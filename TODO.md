@@ -45,3 +45,21 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 设计确认：queue/ 纯逻辑包 + 第 4 个 Tab（队列页）+ Enter 替换语义 + a 追加 + 顺序/随机播放
 - [x] 创建 feature_lead 实现播放队列（与 MPRIS 并行，注意 git 协作）✅（commit 5f560c5 + 16d1f06，已合并 master）
 - [x] 验收：连播、随机、添加/删除/清空、首页位置显示 ✅（测试全绿含 -race；review 循环修复删除当前曲连播衔接缺陷 9bfec4e；真机听感验收待用户确认）
+
+## Bug 修复（bugfix_lead session_ba4ba596-692 处理中）
+
+- [x] 创建 bugfix_lead：修复 "播放失败: mpv 未连接"（连接断开不重连）
+- [x] 追加现象：用户另报 "⚠ mpv 播放出错（end-file reason=error）"——需排查与未连接是否同源（mpv 播放出错→退出→断连），以及 end-file error 的根因（yt-dlp 取流失败/视频不可用等）
+- [x] 修复提交 + 验证 ✅（commit e54b5b5 + d04bbcb，已合并 master）
+  - 根因：MpvPlayer 断开后无任何恢复机制——pump 只发一次 ErrorEvent，conn/cmd 残留死状态，
+    所有命令永久报 "mpv 未连接" 直到重启应用
+  - 方案：pump 断开→诊断日志（mpv 退出码，区分被杀/崩溃/socket 异常）+ 清理死状态 + 后台自动重连
+    （最多 3 次 × 1s 间隔）；Play/Pause/Resume/Seek/SetVolume/Volume 惰性重连（单飞合并并发请求、
+    失败 2s 冷却防风暴）；重连全失败发明确 ErrorEvent（不静默）；SetVolume/Volume 不再触发
+    mpvipc IsClosed 数据竞争
+  - 测试：helper 进程模式模拟真实 mpv 死亡/重启——自动重连、惰性重连、失败降级（启动次数≤3）、
+    单飞（并发只启动一次）、crash-loop 双循环、重连中再断恢复；全量 -race + -count=3 全绿
+  - 验证：断开后无需重启应用，按空格/回车自动恢复播放；重连失败时界面显示明确错误；
+    下次断线时终端日志（mpv 进程已退出: signal: killed / exit status N）可定位断开原因
+- [ ] end-file reason=error 根因排查（本次修复覆盖"出错→mpv 退出→断连→自动重连"链路，
+  但内容层根因——yt-dlp 取流失败/视频不可用等——未定位，需另查）
