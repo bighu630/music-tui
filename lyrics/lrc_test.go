@@ -102,13 +102,13 @@ func TestLineAt(t *testing.T) {
 		wantIdx  int
 		wantText string
 	}{
-		{0, -1, ""},        // 早于第一行
-		{10, 0, "第一行"},    // 恰好命中
-		{15.9, 0, "第一行"},  // 区间内
-		{20, 1, "第二行"},    // 恰好命中
+		{0, -1, ""},      // 早于第一行
+		{10, 0, "第一行"},   // 恰好命中
+		{15.9, 0, "第一行"}, // 区间内
+		{20, 1, "第二行"},   // 恰好命中
 		{29.999, 1, "第二行"},
-		{30, 2, "第三行"},    // 最后一行
-		{999, 2, "第三行"},   // 超出末尾
+		{30, 2, "第三行"},  // 最后一行
+		{999, 2, "第三行"}, // 超出末尾
 	}
 	for _, c := range cases {
 		idx, text := ly.LineAt(c.pos)
@@ -125,5 +125,17 @@ func TestLineAtEmpty(t *testing.T) {
 	}
 	if idx, text := ly.LineAt(5); idx != -1 || text != "" {
 		t.Errorf("LineAt = (%d, %q), want (-1, \"\")", idx, text)
+	}
+}
+
+func TestParseLRCRejectsOverflowMinutes(t *testing.T) {
+	// 19 位分钟数：超出 int64（Atoi 失败）或 mm*60 溢出，均视为非法时间标签。
+	lrc := "[9999999999999999999:00.00]Atoi溢出\n[9000000000000000000:00.00]乘法溢出\n[00:10.00]正常"
+	ly, err := ParseLRC([]byte(lrc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ly.Lines) != 1 || ly.Lines[0].Time != 10.0 || ly.Lines[0].Text != "正常" {
+		t.Errorf("lines = %+v, want 仅正常行", ly.Lines)
 	}
 }

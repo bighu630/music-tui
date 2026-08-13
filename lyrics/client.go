@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"music-tui/model"
@@ -54,14 +55,16 @@ type lrclibSong struct {
 
 // Fetch 获取歌曲歌词：先 /api/get（按 track_name/artist_name/duration，
 // lrclib 内部按 ±2s 精确匹配）精确命中；404 或歌词为空时降级
-// /api/search 并选择时长最接近的匹配。失败统一返回 ErrNotFound。
+// /api/search 并选择时长最接近的匹配。未找到歌词返回 ErrNotFound；
+// 网络或服务端错误原样返回。
 func (c *Client) Fetch(ctx context.Context, track model.Track) (*Lyrics, error) {
 	var song lrclibSong
 	q := url.Values{}
 	q.Set("track_name", track.Title)
 	q.Set("artist_name", track.Artist)
 	q.Set("duration", fmt.Sprintf("%.2f", track.Duration))
-	u := c.baseURL + "/api/get?" + q.Encode()
+	base := strings.TrimSuffix(c.baseURL, "/")
+	u := base + "/api/get?" + q.Encode()
 	err := c.do(ctx, u, &song)
 	if err == nil {
 		if ly := songToLyrics(song); ly != nil {
@@ -78,7 +81,7 @@ func (c *Client) Fetch(ctx context.Context, track model.Track) (*Lyrics, error) 
 	q2 := url.Values{}
 	q2.Set("track_name", track.Title)
 	q2.Set("artist_name", track.Artist)
-	u2 := c.baseURL + "/api/search?" + q2.Encode()
+	u2 := base + "/api/search?" + q2.Encode()
 	if err := c.do(ctx, u2, &songs); err != nil {
 		return nil, err
 	}
@@ -115,10 +118,12 @@ func (c *Client) do(ctx context.Context, u string, out interface{}) error {
 		case http.StatusTooManyRequests:
 			wait := retryAfter(resp)
 			resp.Body.Close()
+			timer := time.NewTimer(wait)
 			select {
-			case <-time.After(wait):
+			case <-timer.C:
 				continue
 			case <-ctx.Done():
+				timer.Stop()
 				return ctx.Err()
 			}
 		default:

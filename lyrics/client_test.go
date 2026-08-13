@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"music-tui/model"
 )
@@ -177,5 +178,85 @@ func TestChooseBestPrefersClosestDuration(t *testing.T) {
 	ly := chooseBest(songs, model.Track{Duration: 10})
 	if ly == nil || ly.Lines[0].Text != "c" {
 		t.Errorf("chooseBest = %+v, want c", ly)
+	}
+}
+
+func TestRetryAfter(t *testing.T) {
+	// 缺省 1 秒
+	if d := retryAfter(&http.Response{}); d != time.Second {
+		t.Errorf("缺省 retryAfter = %v, want 1s", d)
+	}
+	// 秒数
+	resp := &http.Response{Header: http.Header{"Retry-After": []string{"3"}}}
+	if d := retryAfter(resp); d != 3*time.Second {
+		t.Errorf("秒数 retryAfter = %v, want 3s", d)
+	}
+	// HTTP 日期格式
+	resp = &http.Response{Header: http.Header{"Retry-After": []string{time.Now().Add(2 * time.Second).UTC().Format(http.TimeFormat)}}}
+	d := retryAfter(resp)
+	if d <= 0 || d > 5*time.Second {
+		t.Errorf("日期格式 retryAfter = %v, want (0, 5s]", d)
+	}
+	// 非法值 → 缺省 1 秒
+	resp = &http.Response{Header: http.Header{"Retry-After": []string{"abc"}}}
+	if d := retryAfter(resp); d != time.Second {
+		t.Errorf("非法值 retryAfter = %v, want 1s", d)
+	}
+}
+
+func TestFetchRetry429Exhausted(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	c := NewClient(testUA)
+	c.baseURL = server.URL
+	_, err := c.Fetch(context.Background(), model.Track{Title: "t", Artist: "a", Duration: 10})
+	if err == nil || !strings.Contains(err.Error(), "限流") {
+		t.Errorf("err = %v, want 限流重试后仍失败", err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2（429 重试两次后放弃）", calls)
+	}
+}
+
+func TestFetchRetryCanceledDuringWait(t *testing.T) {
+	got := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		select {
+		case got <- struct{}{}:
+		default:
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := NewClient(testUA)
+	c.baseURL = server.URL
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Fetch(ctx, model.Track{Title: "t", Artist: "a", Duration: 10})
+		done <- err
+	}()
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("服务器未收到请求")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("取消后 Fetch 未返回")
 	}
 }

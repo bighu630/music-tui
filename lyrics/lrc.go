@@ -2,6 +2,7 @@
 package lyrics
 
 import (
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -20,8 +21,9 @@ type Lyrics struct {
 	Plain string
 }
 
-// LineAt 返回"时间戳 ≤ pos 的最后一行"的下标与文本；
-// pos 早于第一行或歌词为空时返回 (-1, "")。二分查找，O(log n)。
+// LineAt 返回"时间戳 ≤ pos 的最后一行"（upper_bound 语义）的下标与文本；
+// 时间戳重复时取最后一条；pos 早于第一行或歌词为空时返回 (-1, "")。
+// 二分查找，O(log n)。
 func (l *Lyrics) LineAt(pos float64) (int, string) {
 	if len(l.Lines) == 0 {
 		return -1, ""
@@ -52,8 +54,16 @@ func parseTimeTag(tag string) (float64, bool) {
 	if m == nil {
 		return 0, false
 	}
-	mm, _ := strconv.Atoi(m[1])
-	ss, _ := strconv.Atoi(m[2])
+	mm, err := strconv.Atoi(m[1])
+	if err != nil || mm > math.MaxInt64/60 {
+		// Atoi 失败（超长数字溢出）或 mm*60 会溢出 int64 时视为非法，
+		// 避免负时间行破坏 LineAt 的二分查找。
+		return 0, false
+	}
+	ss, err := strconv.Atoi(m[2])
+	if err != nil {
+		return 0, false
+	}
 	if ss > 59 {
 		return 0, false
 	}
