@@ -2,7 +2,7 @@
 
 计划：docs/superpowers/plans/2026-08-13-music-tui.md（10 个 Task，每 Task 走 TDD 五步 + 两阶段审查）
 
-- [ ] Task 1: 项目初始化（go mod、依赖、目录结构）
+- [x] Task 1: 项目初始化（go mod、依赖、目录结构）✅ spec+quality 通过
 - [ ] Task 2: model 包（Track、PlaybackState）
 - [ ] Task 3: lyrics 包（LRC 解析器、lrclib 客户端）
 - [ ] Task 4: history 包（JSON 存储、去重置顶、上限裁剪）
