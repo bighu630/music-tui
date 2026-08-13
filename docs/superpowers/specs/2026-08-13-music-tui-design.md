@@ -473,10 +473,10 @@ main 加载 session.Store（损坏→备份重建）→ NewModel：
 - **无播放中曲目时退出**：删除会话文件（会话自然结束，避免下次恢复陈旧状态）
 - 保存失败仅记日志，不影响播放主链路（尽力而为）
 
-### 15.6 已知问题：恢复定位竞态（已修复）
-- 初版恢复流程为 `PlayPaused(url)` + 单独 `Seek(pos)`：loadfile 是异步的（yt-dlp 解析网络曲目需数秒），加载完成前 seek 被 mpv 拒绝（`error running command`）→ 恢复必然失败
-- 修复（a7573e1，2026-08-13）：`PlayPaused(url, start)` 用 mpv ≥0.38 的 4 参 loadfile 语法 `loadfile <url> replace -1 start=<pos>` 随加载原子定位；start=0 时用 2 参语法兼容旧版
-- 实测注意：YouTube 风控（403）为间歇性环境问题，恢复失败时队列保留展示（见 15.4），不阻塞用户查看/跳转
+### 15.6 已知问题与修复记录
+- **恢复定位竞态（已修复）**：初版恢复流程为 `PlayPaused(url)` + 单独 `Seek(pos)`：loadfile 是异步的（yt-dlp 解析网络曲目需数秒），加载完成前 seek 被 mpv 拒绝（`error running command`）→ 恢复必然失败。修复（a7573e1）：`PlayPaused(url, start)` 用 mpv ≥0.38 的 4 参 loadfile 语法 `loadfile <url> replace -1 start=<pos>` 随加载原子定位；start=0 时用 2 参语法兼容旧版
+- **tmux 下按键全部失效（已修复，32b4b3b）**：go-termimg 的 CSI 查询（14t/16t/sixel）与 TerminalQuerier 用无超时 goroutine 读 /dev/tty；Go 的 `SetReadDeadline` 在 `term.MakeRaw` 之后的 fd 上失效（poller 与 termios 交互问题，实测永久阻塞），fd 关闭不中断阻塞中的 read → 泄漏 goroutine 永久占用终端读取，与 bubbletea 抢同一终端、吞掉后续全部按键（封面渲染后空格/q/数字键均失效）。修复：third_party 本地副本（go.mod replace），查询改 `syscall.Select` 手动超时 + 同步读；home.go 在 tmux 下强制 Halfblocks 字符模式
+- **实测注意**：YouTube 风控（403）为间歇性环境问题，恢复失败时队列保留展示（见 15.4），不阻塞用户查看/跳转
 
 ### 15.6 测试策略
 | 模块 | 策略 |
