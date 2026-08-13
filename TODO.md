@@ -11,5 +11,5 @@
 - [x] Task 7: player 包（mpv 进程管理与 JSON IPC 事件分发）✅ spec+quality 通过（真实 mpv 冒烟验证）
 - [x] Task 8: ui 包（三页面、全局按键与事件路由）✅ spec+quality 通过
 - [x] Task 9: main.go 入口（依赖检测、服务组装、退出清理）✅ spec+quality 通过
-- [ ] Task 10: 手动验收清单（文档 + 验收执行）
+- [x] Task 10: 手动验收清单（文档 + 验收执行）✅ 大部分项已实测，3 项待真实终端/用户确认
 - [ ] 最终全量验证（go build / vet / test）+ 最终代码审查
