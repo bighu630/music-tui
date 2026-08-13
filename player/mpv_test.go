@@ -116,14 +116,54 @@ func (f *fakeMpvServer) Close() error {
 }
 
 // connectTestPlayer 直接连接 fake server（跳过进程启动），并注册清理。
+//
+// mpvipc 的 hub 只向已注册的 EventListener 广播事件（无排队缓冲），而
+// pump() 里 NewEventListener 的注册是异步完成的：connect() 返回后立刻
+// pushEvent 可能被静默丢弃，导致 waitEvent 偶发超时。因此连接后先探测
+// 监听者就绪，保证返回后测试事件可靠送达。
 func connectTestPlayer(t *testing.T, fake *fakeMpvServer) *MpvPlayer {
 	t.Helper()
 	p := NewMpvPlayer("", fake.Path())
 	if err := p.connect(); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
+	probeListenerReady(t, p, fake)
 	t.Cleanup(func() { _ = p.Close() })
 	return p
+}
+
+// probeListenerReady 等待 mpvipc 监听者注册完成。探测事件是 time-pos=0.0
+// 的 property-change（转换为 ProgressEvent{Position:0, Duration:0}），与
+// 测试事件同管道 FIFO 送达、先于测试事件被消费，不会干扰后续断言。
+func probeListenerReady(t *testing.T, p *MpvPlayer, fake *fakeMpvServer) {
+	t.Helper()
+	const probe = `{"event":"property-change","id":1,"name":"time-pos","data":0.0}`
+	deadline := time.After(2 * time.Second)
+	for {
+		fake.pushEvent(probe)
+		select {
+		case <-p.Events():
+			// 监听者已就绪：丢弃探测事件，并排空可能仍在途的探测事件
+			// （重试场景下可能累积多条），确保返回时事件通道为空。
+			drainDeadline := time.Now().Add(200 * time.Millisecond)
+			for {
+				select {
+				case <-p.Events():
+					if time.Now().After(drainDeadline) {
+						return
+					}
+				case <-time.After(20 * time.Millisecond):
+					return // 20ms 无新事件 = 管道已排空
+				}
+			}
+		case <-time.After(200 * time.Millisecond):
+			// 未收到：监听者可能尚未注册（探测事件被丢弃），重试。
+		case <-deadline:
+			t.Fatalf("监听者未就绪：2s 内未收到探测事件（事件监听链路异常）")
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // waitEvent 在超时时间内等待下一个事件。
