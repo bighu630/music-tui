@@ -24,8 +24,8 @@
 - [x] 验收：playerctl 实测（dbus-run-session：发现播放器、status、volume 读写、无 D-Bus 降级）
 - [x] 验收（加分项）：PTY 驱动真实搜索→播放后，playerctl status=Playing / metadata 有值 /
       position 递增 / play-pause 生效 / position 10 跳转（均通过，见下方实测记录）
-- [x] 已知限制：无播放队列（Next/Previous/OpenUri 返回 NotSupported）；无 Introspectable 接口；
-      Raise/Quit no-op；DesktopEntry 为空
+- [x] 已知限制：MPRIS 的 Next/Previous/OpenUri 返回 NotSupported（队列在 ui 层，MPRIS 服务未接入，可作后续迭代）；
+      无 Introspectable 接口；Raise/Quit no-op；DesktopEntry 为空
 
 ### MPRIS playerctl 实测记录（Task 11.3，dbus-run-session 临时总线）
 
