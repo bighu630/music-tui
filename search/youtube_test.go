@@ -2,7 +2,11 @@ package search
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"music-tui/model"
 )
@@ -73,4 +77,65 @@ func TestSearchBinaryMissing(t *testing.T) {
 	if _, err := a.Search(context.Background(), "test"); err == nil {
 		t.Error("yt-dlp 不存在时应报错")
 	}
+}
+
+func TestParseYTDLPOutputSkipsLongGarbageLine(t *testing.T) {
+	// 单行 100KB，超过 bufio.Scanner 默认 64KB token 上限；
+	// 应被跳过且不破坏后续解析。
+	longLine := strings.Repeat("x", 100*1024)
+	out := longLine + "\n" + fakeYTDLPOutput
+	tracks, err := parseYTDLPOutput([]byte(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tracks) != 2 {
+		t.Fatalf("len = %d, want 2（超长行应被跳过）", len(tracks))
+	}
+}
+
+func TestSearchTimeout(t *testing.T) {
+	a := NewYouTubeAdapter(writeScript(t, "#!/bin/sh\nwhile :; do :; done\n"))
+	a.timeout = 200 * time.Millisecond
+	start := time.Now()
+	_, err := a.Search(context.Background(), "q")
+	if err == nil {
+		t.Fatal("超时应报错")
+	} else if !strings.Contains(err.Error(), "搜索超时") {
+		t.Errorf("err = %v, want 超时消息", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("超时未及时生效: %v", time.Since(start))
+	}
+}
+
+func TestSearchCanceled(t *testing.T) {
+	a := NewYouTubeAdapter(writeScript(t, "#!/bin/sh\nwhile :; do :; done\n"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 立即取消，非超时
+	_, err := a.Search(ctx, "q")
+	if err == nil {
+		t.Fatal("取消后应报错")
+	} else if !strings.Contains(err.Error(), "已取消") {
+		t.Errorf("err = %v, want 已取消消息（而非超时）", err)
+	}
+}
+
+func TestSearchErrorIncludesStderr(t *testing.T) {
+	a := NewYouTubeAdapter(writeScript(t, "#!/bin/sh\necho 'ERROR: [youtube] Unable to download API page' >&2\nexit 1\n"))
+	_, err := a.Search(context.Background(), "q")
+	if err == nil {
+		t.Fatal("yt-dlp 失败应报错")
+	} else if !strings.Contains(err.Error(), "Unable to download API page") {
+		t.Errorf("err = %v, want 包含 stderr 诊断", err)
+	}
+}
+
+// writeScript 在临时目录写一个可执行 shell 脚本并返回路径。
+func writeScript(t *testing.T, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "fake-ytdlp.sh")
+	if err := os.WriteFile(p, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
