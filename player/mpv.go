@@ -163,13 +163,25 @@ func (p *MpvPlayer) pump() {
 		case "file-loaded":
 			// 真实 mpv 中 duration property-change 晚于 file-loaded 到达，
 			// 此时同步 Get 兜底。Get 响应走 mpvipc checkResult 路由（不经过
-			// 事件通道），pump 内同步调用不会死锁。
+			// 事件通道），pump 内调用不会死锁；但若 mpv 恰在此刻崩溃/卡死，
+			// Get 会永久阻塞在 mpvipc 的结果通道上（关闭连接也不通知 waiting
+			// requests），pump 回不到 range 循环 → 断线 ErrorEvent 不再触发。
+			// 故加超时：最坏退化为泄漏一个 500ms 内自灭的 goroutine（mpv 永不
+			// 响应时永久挂起，与 Close 的 quit goroutine 同款权衡）。
 			d := p.getDuration()
 			if d <= 0 {
-				if v, err := p.conn.Get("duration"); err == nil {
-					if f, ok := toFloat64(v); ok {
-						d = f
+				got := make(chan float64, 1)
+				go func() {
+					if v, err := p.conn.Get("duration"); err == nil {
+						if f, ok := toFloat64(v); ok {
+							got <- f
+						}
 					}
+				}()
+				select {
+				case f := <-got:
+					d = f
+				case <-time.After(500 * time.Millisecond):
 				}
 			}
 			p.emit(TrackStartedEvent{Duration: d})

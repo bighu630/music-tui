@@ -15,13 +15,14 @@ import (
 // fakeMpvServer 模拟 mpv 的 JSON IPC：接收命令并回复 success，
 // 测试可主动推送事件行。协议：请求/响应与事件均为换行分隔的 JSON。
 type fakeMpvServer struct {
-	t        *testing.T
-	ln       net.Listener
-	mu       sync.Mutex
-	conn     net.Conn
-	commands [][]interface{} // 收到的所有命令（已解码）
-	pushCh   chan string     // 待推送的事件行
-	duration float64         // get_property("duration") 的返回值（可配置）
+	t            *testing.T
+	ln           net.Listener
+	mu           sync.Mutex
+	conn         net.Conn
+	commands     [][]interface{} // 收到的所有命令（已解码）
+	pushCh       chan string     // 待推送的事件行
+	duration     float64         // get_property("duration") 的返回值（可配置）
+	respondToGet bool            // false 时对 get_property 不响应（模拟 mpv 挂死）
 }
 
 func newFakeMpvServer(t *testing.T) *fakeMpvServer {
@@ -31,7 +32,7 @@ func newFakeMpvServer(t *testing.T) *fakeMpvServer {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	f := &fakeMpvServer{t: t, ln: ln, pushCh: make(chan string, 32), duration: 217.0}
+	f := &fakeMpvServer{t: t, ln: ln, pushCh: make(chan string, 32), duration: 217.0, respondToGet: true}
 	go f.acceptLoop()
 	t.Cleanup(func() { _ = f.Close() })
 	return f
@@ -68,10 +69,15 @@ func (f *fakeMpvServer) readLoop(conn net.Conn) {
 		status := "success"
 		var data interface{}
 		if len(req.Command) > 0 && req.Command[0] == "get_property" {
+			f.mu.Lock()
+			respond := f.respondToGet
+			dur := f.duration
+			f.mu.Unlock()
+			if !respond {
+				continue // 模拟 mpv 挂死：不回复，客户端 Call 永久阻塞
+			}
 			if prop, ok := req.Command[1].(string); ok && prop == "duration" {
-				f.mu.Lock()
-				data = f.duration
-				f.mu.Unlock()
+				data = dur
 			} else {
 				status = "property unavailable"
 			}
@@ -326,6 +332,37 @@ func TestMpvPlayerEofReachedDoesNotEmitTrackEnded(t *testing.T) {
 	case ev := <-p.Events():
 		t.Fatalf("eof-reached=true 不应产生 TrackEndedEvent, got %#v", ev)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// pump 的 file-loaded Get 兜底有 500ms 超时：mpv 对 get_property 不响应
+// （崩溃/卡死）时 pump 不应被永久阻塞，超时后照常处理后续事件。
+func TestMpvPlayerFileLoadedGetTimeoutKeepsPumpAlive(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	fake.respondToGet = false // 模拟 mpv 挂死：不响应 get_property
+	p := connectTestPlayer(t, fake)
+
+	fake.pushEvent(`{"event":"file-loaded"}`)
+	ev := waitEvent(t, p, 2*time.Second) // 覆盖 500ms 超时 + 余量
+	started, ok := ev.(TrackStartedEvent)
+	if !ok {
+		t.Fatalf("超时后仍应发出 TrackStartedEvent, got %#v", ev)
+	}
+	if started.Duration != 0 {
+		t.Errorf("兜底超时后 Duration 应为 0, got %v", started.Duration)
+	}
+
+	// pump 必须仍存活：后续事件应照常处理（超时后不再有 get_property
+	// 请求，respondToGet 保持 false 即可，勿再写它以免与 readLoop 竞态）
+	fake.pushEvent(`{"event":"property-change","id":2,"name":"duration","data":217.0}`)
+	fake.pushEvent(`{"event":"property-change","id":1,"name":"time-pos","data":5.0}`)
+	ev = waitEvent(t, p, 2*time.Second)
+	progress, ok := ev.(ProgressEvent)
+	if !ok {
+		t.Fatalf("want ProgressEvent, got %#v", ev)
+	}
+	if progress.Position != 5.0 || progress.Duration != 217.0 {
+		t.Errorf("progress = %+v, want {5 217}", progress)
 	}
 }
 
