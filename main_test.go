@@ -63,3 +63,59 @@ func TestInstallHint(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadHistoryMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.json")
+	store, err := loadHistory(path)
+	if err != nil {
+		t.Fatalf("历史文件不存在时应返回空 store: %v", err)
+	}
+	if store == nil {
+		t.Fatal("store 不应为 nil")
+	}
+}
+
+func TestLoadHistoryCorruptBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "history.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := loadHistory(path)
+	if err != nil {
+		t.Fatalf("损坏历史应降级重建而非报错: %v", err)
+	}
+	if store == nil {
+		t.Fatal("store 不应为 nil")
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "history.json.corrupt-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("应生成 1 个损坏备份文件, got %d: %v", len(matches), matches)
+	}
+}
+
+func TestLoadHistoryCorruptBackupFail(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 无 POSIX 目录权限语义")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root 无视目录权限, 无法模拟备份失败")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "history.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+
+	if _, err := loadHistory(path); err == nil {
+		t.Fatal("备份失败时应返回错误而非降级")
+	}
+}
