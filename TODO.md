@@ -20,7 +20,6 @@
 - [x] 方案确认（godbus/dbus v5 手写服务端，仅 Linux，主体完成后实现）
 - [x] 设计文档追加第 13 章 MPRIS 设计（commit 8c360bf）
 - [x] 创建 feature_lead 处理 MPRIS（session_81ff29e1-8c2，进行中）
-<<<<<<< Updated upstream
 - [x] MPRIS 实现完成（player 广播+音量 / mpris 包 / ui 回调 / main 集成）
 - [x] 验收：playerctl 实测（dbus-run-session：发现播放器、status、volume 读写、无 D-Bus 降级）
 - [x] 验收（加分项）：PTY 驱动真实搜索→播放后，playerctl status=Playing / metadata 有值 /
