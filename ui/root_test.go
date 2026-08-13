@@ -224,6 +224,10 @@ func TestTabSwitchesPages(t *testing.T) {
 	if m.current != pageHistory {
 		t.Errorf("按 3 后 current = %v, want pageHistory", m.current)
 	}
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	if m.current != pageQueue {
+		t.Errorf("按 4 后 current = %v, want pageQueue", m.current)
+	}
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
 	if m.current != pageHome {
 		t.Errorf("按 1 后 current = %v, want pageHome", m.current)
@@ -527,7 +531,11 @@ func TestTabWrapsAround(t *testing.T) {
 	if m.current != pageHistory {
 		t.Fatalf("current = %v, want pageHistory", m.current)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // history → home（循环 wrap）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // history → queue
+	if m.current != pageQueue {
+		t.Fatalf("current = %v, want pageQueue", m.current)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // queue → home（循环 wrap）
 	if m.current != pageHome {
 		t.Errorf("tab 循环后 current = %v, want pageHome", m.current)
 	}

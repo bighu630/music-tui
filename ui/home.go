@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/blacktop/go-termimg"
@@ -13,6 +14,7 @@ import (
 	"music-tui/lyrics"
 	"music-tui/model"
 	"music-tui/player"
+	"music-tui/queue"
 )
 
 // 封面区尺寸（字符单元格）。
@@ -46,6 +48,10 @@ type homeModel struct {
 	width, height int
 
 	state model.PlaybackState
+
+	queuePos   int // 当前曲目在队列中的 1 基位置；0 = 无当前曲目
+	queueTotal int // 队列总长；0 = 无队列信息（隐藏展示）
+	queueMode  queue.Mode
 
 	progress  progress.Model
 	spinner   spinner.Model
@@ -155,6 +161,14 @@ func (m homeModel) syncState(state model.PlaybackState) homeModel {
 			}
 		}
 	}
+	return m
+}
+
+// setQueueInfo 更新队列位置与模式展示（root 在队列变化后调用）。
+func (m homeModel) setQueueInfo(pos, total int, mode queue.Mode) homeModel {
+	m.queuePos = pos
+	m.queueTotal = total
+	m.queueMode = mode
 	return m
 }
 
@@ -312,7 +326,13 @@ func (m homeModel) trackInfoView() string {
 	if m.state.Playing {
 		status = "⏵ 播放中"
 	}
-	return strings.Join([]string{title, meta, bar + "  " + pos, status}, "\n")
+	lines := []string{title, meta, bar + "  " + pos, status}
+	// 队列位置与模式（如 "3/12 · 随机"）；无队列信息时不展示
+	if m.queueTotal > 0 {
+		lines = append(lines, lipgloss.NewStyle().Faint(true).Render(
+			fmt.Sprintf("%d/%d · %s", m.queuePos, m.queueTotal, modeName(m.queueMode))))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // percent 计算进度百分比并 clamp 到 [0,1]。

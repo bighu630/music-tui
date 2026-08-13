@@ -15,6 +15,7 @@ import (
 	"music-tui/lyrics"
 	"music-tui/model"
 	"music-tui/player"
+	"music-tui/queue"
 	"music-tui/search"
 )
 
@@ -25,6 +26,7 @@ const (
 	pageHome page = iota
 	pageSearch
 	pageHistory
+	pageQueue
 )
 
 // ---- 消息类型 ----
@@ -54,8 +56,13 @@ type playerOpResultMsg struct {
 	err error
 }
 
-// trackSelectedMsg 搜索页/历史页请求播放某首歌曲。
+// trackSelectedMsg 搜索页/历史页请求播放某首歌曲（替换语义）。
 type trackSelectedMsg struct {
+	track model.Track
+}
+
+// trackAppendMsg 搜索页/历史页请求把曲目追加到队尾（不打断当前播放）。
+type trackAppendMsg struct {
 	track model.Track
 }
 
@@ -78,13 +85,14 @@ type historyResultMsg struct {
 	err error
 }
 
-// Model 顶层模型：持有共享播放状态与三个页面，负责全局按键、
+// Model 顶层模型：持有共享播放状态、播放队列与四个页面，负责全局按键、
 // 页面切换、服务调用与结果路由。
 type Model struct {
 	player  player.Player
 	lyrics  *lyrics.Client
 	cover   *cover.Fetcher
 	history *history.Store
+	queue   *queue.Queue
 
 	state     model.PlaybackState
 	current   page
@@ -94,6 +102,7 @@ type Model struct {
 	home        homeModel
 	searchPage  searchModel
 	historyPage historyModel
+	queuePage   queueModel
 }
 
 // NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h 为具体服务。
@@ -103,10 +112,12 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 		lyrics:      l,
 		cover:       c,
 		history:     h,
+		queue:       queue.New(),
 		current:     pageHome,
 		home:        newHomeModel(p),
 		searchPage:  newSearchModel(s),
 		historyPage: newHistoryModel(),
+		queuePage:   newQueueModel(),
 	}
 	m.historyPage = m.historyPage.setEntries(h.Entries())
 	return m
@@ -127,6 +138,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case trackSelectedMsg:
 		return m.startPlay(msg.track)
+
+	case trackAppendMsg:
+		// 追加到队尾：不打断当前播放，也不自动开播（队列为空时同样只入队）
+		m.queue.Add(msg.track)
+		return m.syncQueueViews(), nil
+
+	case queuePlayMsg:
+		// 队列页 Enter：跳转语义——保留队列其余曲目，仅把当前指针
+		// 移到所选曲目并播放（与搜索/历史的替换语义区分）。
+		if !m.queue.JumpTo(msg.index) {
+			return m, nil
+		}
+		m.current = pageHome
+		return m.playQueueTrack()
+
+	case queueDeleteMsg:
+		m.queue.Remove(msg.index)
+		return m.syncQueueViews(), nil
+
+	case queueClearMsg:
+		m.queue.Clear()
+		return m.syncQueueViews(), nil
+
+	case queueModeMsg:
+		mode := queue.Sequential
+		if m.queue.Mode() == queue.Sequential {
+			mode = queue.Shuffle
+		}
+		m.queue.SetMode(mode)
+		return m.syncQueueViews(), nil
 
 	case playResultMsg:
 		// 预留分支：若未来把 player.Play 改回异步 cmd，此分支处理其失败结果。
@@ -215,7 +256,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "tab":
 			return m.switchPage("tab"), nil
-		case "1", "2", "3":
+		case "1", "2", "3", "4":
 			// 数字键始终切页。注：计划原代码在搜索输入框聚焦时把数字让给输入框，
 			// 但 TestTabSwitchesPages 要求搜索页聚焦时按 3/1 仍能切页，故取消例外。
 			return m.switchPage(msg.String()), nil
@@ -253,6 +294,8 @@ func (m Model) View() string {
 		body = m.searchPage.view()
 	case pageHistory:
 		body = m.historyPage.view()
+	case pageQueue:
+		body = m.queuePage.view()
 	}
 	if m.lastError != "" {
 		body += "\n\n" + lipgloss.NewStyle().
@@ -282,10 +325,15 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		}
 		m.home = m.home.syncState(m.state)
 	case player.TrackEndedEvent:
-		// 第一版无队列：停在当前位置等待用户操作；空格重播同曲（见 restartSameTrack）
+		// 自动连播：队列有下一首则继续播放，否则停在当前位置等待用户操作。
+		if tr, ok := m.queue.Next(); ok {
+			m.queuePage = m.queuePage.sync(m.queue)
+			return m.beginPlay(tr)
+		}
 		m.ended = true
 		m.state.Playing = false
 		m.home = m.home.syncState(m.state)
+		return m.syncQueueViews(), nil
 	case player.ErrorEvent:
 		m.ended = true
 		m.lastError = ev.Err.Error()
@@ -306,14 +354,31 @@ func waitForPlayerEvents(p player.Player) tea.Cmd {
 	}
 }
 
-// startPlay 播放歌曲：切首页、置播放状态，同步调用 player.Play（
-// root_test 的 TestPlayFlow 在 update 返回后立即断言 playCount，故必须同步）。
+// startPlay 手动播放某曲目（替换语义）：清空队列 → 该曲入队为当前 → 播放。
 // 成功时并行触发 歌词 / 封面 / 历史 三个异步 cmd（核心链路 1）；
 // Play 失败时跳过全部异步 cmd（失败播放不进历史、不请求歌词/封面），
-// 状态重置为空回到“未在播放”空态 + 错误横幅。
+// 状态重置为空回到"未在播放"空态 + 错误横幅。
 func (m Model) startPlay(track model.Track) (Model, tea.Cmd) {
-	m.ended = false
+	m.queue.Replace(track)
 	m.current = pageHome
+	return m.playQueueTrack()
+}
+
+// playQueueTrack 播放队列当前曲目（不修改队列结构）。
+func (m Model) playQueueTrack() (Model, tea.Cmd) {
+	tr, ok := m.queue.Current()
+	if !ok {
+		return m, nil
+	}
+	return m.beginPlay(tr)
+}
+
+// beginPlay 核心播放流程：置播放状态、同步调用 player.Play（
+// root_test 的 TestPlayFlow 在 update 返回后立即断言 playCount，故必须同步）、
+// 刷新队列展示；成功时并行触发 歌词/封面/历史 三个异步 cmd，
+// Play 失败时跳过全部异步 cmd，状态重置为空回到"未在播放"空态 + 错误横幅。
+func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
+	m.ended = false
 	m.state = model.PlaybackState{Track: &track, Playing: true, Duration: track.Duration}
 	m.lastError = ""
 	m.home = m.home.resetForTrack(&track)
@@ -321,9 +386,10 @@ func (m Model) startPlay(track model.Track) (Model, tea.Cmd) {
 		m.lastError = "播放失败: " + err.Error()
 		m.state = model.PlaybackState{}
 		m.home = m.home.syncState(m.state)
+		m.queuePage = m.queuePage.sync(m.queue)
 		return m, nil
 	}
-	return m, tea.Batch(
+	return m.syncQueueViews(), tea.Batch(
 		fetchLyricsCmd(m.lyrics, track),
 		fetchCoverCmd(m.cover, track),
 		addHistoryCmd(m.history, track),
@@ -394,6 +460,26 @@ func emitTrackSelected(track model.Track) tea.Cmd {
 	return func() tea.Msg { return trackSelectedMsg{track: track} }
 }
 
+func emitTrackAppend(track model.Track) tea.Cmd {
+	return func() tea.Msg { return trackAppendMsg{track: track} }
+}
+
+func emitQueuePlay(index int) tea.Cmd {
+	return func() tea.Msg { return queuePlayMsg{index: index} }
+}
+
+func emitQueueDelete(index int) tea.Cmd {
+	return func() tea.Msg { return queueDeleteMsg{index: index} }
+}
+
+func emitQueueClear() tea.Cmd {
+	return func() tea.Msg { return queueClearMsg{} }
+}
+
+func emitQueueMode() tea.Cmd {
+	return func() tea.Msg { return queueModeMsg{} }
+}
+
 func emitDeleteEntry(id, source string) tea.Cmd {
 	return func() tea.Msg { return deleteEntryMsg{id: id, source: source} }
 }
@@ -402,7 +488,7 @@ func emitClearHistory() tea.Cmd {
 	return func() tea.Msg { return clearHistoryMsg{} }
 }
 
-// switchPage 处理 Tab（循环）与 1/2/3（直达）。
+// switchPage 处理 Tab（循环）与 1/2/3/4（直达）。
 func (m Model) switchPage(key string) Model {
 	switch key {
 	case "1":
@@ -411,8 +497,10 @@ func (m Model) switchPage(key string) Model {
 		m.current = pageSearch
 	case "3":
 		m.current = pageHistory
+	case "4":
+		m.current = pageQueue
 	default: // tab
-		m.current = page((int(m.current) + 1) % 3)
+		m.current = page((int(m.current) + 1) % 4)
 	}
 	return m
 }
@@ -432,8 +520,20 @@ func (m Model) delegate(msg tea.Msg) (Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.historyPage, cmd = m.historyPage.Update(msg)
 		return m, cmd
+	case pageQueue:
+		var cmd tea.Cmd
+		m.queuePage, cmd = m.queuePage.Update(msg)
+		return m, cmd
 	}
 	return m, nil
+}
+
+// syncQueueViews 队列变化后同步队列页与首页的队列信息展示。
+// 首页展示 1 基位置：currentIdx=-1（无当前曲目）时显示 0。
+func (m Model) syncQueueViews() Model {
+	m.home = m.home.setQueueInfo(m.queue.CurrentIndex()+1, m.queue.Len(), m.queue.Mode())
+	m.queuePage = m.queuePage.sync(m.queue)
+	return m
 }
 
 // refreshHistory 从 store 重新加载历史并刷新页面。

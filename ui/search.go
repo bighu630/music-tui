@@ -107,6 +107,18 @@ func (s searchModel) Update(msg tea.Msg) (searchModel, tea.Cmd) {
 				}
 			}
 			return s, nil
+		case "a":
+			// 输入框聚焦时 'a' 是搜索字符（走下方 typing 分支插入）
+			if s.typing() {
+				break
+			}
+			// 列表选中项 → 追加到队尾（不打断当前播放）
+			if s.state == searchDone && len(s.results) > 0 {
+				if item, ok := s.list.SelectedItem().(trackItem); ok {
+					return s, emitTrackAppend(item.track)
+				}
+			}
+			return s, nil
 		case "esc":
 			if !s.typing() {
 				return s, s.input.Focus()
@@ -190,7 +202,7 @@ func (s searchModel) view() string {
 			sb.WriteString(lipgloss.NewStyle().Faint(true).Render("无结果"))
 		default:
 			sb.WriteString(s.list.View())
-			sb.WriteString("\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ 选择 · Enter 播放"))
+			sb.WriteString("\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ 选择 · Enter 播放 · a 加入队列"))
 		}
 	}
 	return sb.String()
