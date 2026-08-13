@@ -23,7 +23,6 @@
 - 歌词手动偏移调整
 - MPV_PATH 等路径覆盖配置
 - 搜索历史
-- 续播（记住播放进度）
 - 图片终端的特殊优化（go-termimg Auto 自动探测即可）
 
 ## 3. 技术选型
@@ -53,6 +52,7 @@ music-tui/
 ├── main.go              # 入口：检测 mpv/yt-dlp → 启动 mpv 进程 → 组装各服务 → 启动 TUI
 ├── model/               # 共享数据结构：Track、PlaybackState（无依赖，被所有模块引用）
 ├── queue/               # 播放队列纯逻辑：顺序/随机、自动连播推进（只依赖 model）
+├── session/             # 播放会话（队列+进度）JSON 持久化：续播恢复
 ├── ui/
 │   ├── root.go          # 顶层 Model：页面切换（Tab）、全局按键、全局播放状态、队列编排
 │   ├── home.go          # 首页：封面、歌曲信息、可滑动进度条、播放控制、同步歌词
@@ -77,6 +77,7 @@ music-tui/
 ### 依赖方向
 - `main` 负责组装；`ui` 只依赖各服务的**接口**（Player、SearchAdapter），不依赖具体实现
 - `queue` 只依赖 `model`，不依赖 `player` 与任何 IO（纯逻辑，可单测）
+- `session` 只依赖 `queue` 与 `model`（JSON 持久化，原子写盘）
 - `player / search / lyrics / cover / history` 只依赖 `model`，互不依赖
 - `model` 为叶子包，不含逻辑
 
@@ -278,7 +279,6 @@ mpv 进度事件（50ms）→ root 更新 PlaybackState.Position
 
 - 中文音乐源适配器（实现 SearchAdapter 即可接入）
 - 音量控制
-- 续播（历史 Entry 增加进度字段）
 - 搜索历史
 - chafa 等外部工具增强封面画质
 
@@ -393,3 +393,74 @@ func (q *Queue) Len() int
 |---|---|
 | queue | 纯函数单测：Add/Replace/JumpTo/Remove 四象限、Next 顺序推进与停止、SetMode 洗牌性质（集合不变/当前与前缀不动/显示序=播放序）、Clear 保留模式 |
 | ui | tea.Program + update 驱动集成测试：Tab 四页循环、Enter 替换语义、a 追加不打断、TrackEnded 自动连播与不切页、队列页跳转/删除/清空/模式切换、首页位置显示 |
+
+## 15. 续播（播放会话持久化，追加需求，用户确认方案 B）
+
+### 15.1 概述
+- 记住播放队列（曲目 + 当前项 + 顺序/随机模式）与当前曲目进度；关闭后再次打开恢复为**暂停态**（不自动出声），按空格继续播放
+- 保存时机（方案 B，用户已确认）：**退出时保存** + **播放中每 5 秒节流自动保存**（崩溃/断电也可恢复）
+- 存储：`~/.config/music-tui/session.json`（与 history.json 同目录），原子写盘；损坏时备份后重建（与 loadHistory 同款降级，不阻止启动）
+
+### 15.2 模块结构
+```
+session/
+└── session.go        # Store：Load（不存在=无会话）/ Save（原子写盘）/ Clear / State
+```
+
+```go
+// queue 包新增（纯逻辑）
+type Snapshot struct {
+    Tracks     []model.Track
+    CurrentIdx int
+    Mode       Mode
+}
+func (q *Queue) Snapshot() Snapshot          // 副本，修改不影响队列
+func (q *Queue) Restore(s Snapshot)          // CurrentIdx 越界降级为 -1（防损坏数据）
+
+// session 包
+type State struct {
+    Queue    queue.Snapshot // 队列快照
+    Position float64        // 当前曲目进度（秒）
+    Ended    bool           // 退出时当前曲目是否已播完
+}
+func NewStore(path string) (*Store, error)
+func (s *Store) Save(st State) error
+func (s *Store) State() *State   // nil = 无会话
+func (s *Store) Clear() error    // 删除文件（无播放中曲目时退出调用）
+```
+
+### 15.3 播放器：静默加载（不发声）
+- `Player` 接口新增 `PlayPaused(url string) error`：mpv 先 `set pause=true` 再 `loadfile`（pause 属性不随文件重置），新文件加载后保持暂停；随后 `Seek(position)` 定位到退出时进度
+- 恢复路径**不写历史**（恢复的是已播放过的曲目）；恢复曲目经 `onTrack` 同步给 MPRIS
+
+### 15.4 恢复流程（启动时）
+```
+main 加载 session.Store（损坏→备份重建）→ NewModel：
+  → session 有状态且队列有当前曲目：
+      queue.Restore(快照)
+      state = {Track: 当前曲, Position: 保存进度, Duration: 曲目元数据, Playing: false}
+      home 同步（进度条定位、歌词置加载中）
+      Init 返回 resumeCmd：PlayPaused(url) → Seek(pos) → resumeResultMsg
+      → 成功后异步加载歌词/封面（暂停态也可展示）
+      → 失败：状态重置 + 队列清空 + 错误横幅（会话无保留价值，避免反复失败）
+  → session 无状态 / 队列无当前曲目（损坏/手改）：从空态开始
+恢复的 ended 语义：
+  → Ended=false：暂停在保存进度
+  → Ended=true 且有下一首：暂停在下一首开头（position=0）
+  → Ended=true 且无下一首：当前曲从头（position=0）
+```
+
+### 15.5 保存流程
+- **退出**（q / Ctrl+C）：同步保存（队列快照 + Position + ended）
+- **播放中**：ProgressEvent 更新时按 `saveInterval=5s` 节流保存（lastSave 记录）
+- **无播放中曲目时退出**：删除会话文件（会话自然结束，避免下次恢复陈旧状态）
+- 保存失败仅记日志，不影响播放主链路（尽力而为）
+
+### 15.6 测试策略
+| 模块 | 策略 |
+|---|---|
+| queue | Snapshot/Restore roundtrip、副本隔离、越界 CurrentIdx 降级 |
+| session | 缺失=无会话、Save/State roundtrip（重启读回）、覆盖写、Clear、损坏报错、空文件 |
+| player | fake mpv socket 断言命令序列：set pause=true → loadfile；超时/未连接表驱动扩展 |
+| ui | 恢复：队列/模式/进度/暂停态断言、PlayPaused+Seek 调用、ended 两分支、失败重置、MPRIS onTrack 通知；保存：退出写盘、ProgressEvent 节流、无播放清除 |
+| main | loadSession 缺失/损坏备份重建（与 loadHistory 同款） |
