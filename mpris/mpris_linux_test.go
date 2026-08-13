@@ -630,3 +630,35 @@ func TestIntegrationServiceNameConflict(t *testing.T) {
 		t.Fatal("第二个实例应抢名失败")
 	}
 }
+
+// TestIntegrationCloseWaitsForPump 验证 Close 等 pump 退出后再关连接：
+// 关闭窗口内处理事件不 panic，Close 后推事件也不崩（pump 已退出）。
+func TestIntegrationCloseWaitsForPump(t *testing.T) {
+	if os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" {
+		t.Skip("无 session bus，跳过集成测试")
+	}
+	fp := newFakePlayer()
+	s := NewServer(fp)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fp.push(player.StateEvent{Playing: true}) // 关闭窗口内的事件处理不应 panic
+	fp.push(player.TrackStartedEvent{Duration: 100})
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	fp.push(player.StateEvent{Playing: true}) // Close 后推事件也不应崩（pump 已退出）
+	select {
+	case <-s.pumpDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close 后 pump 未退出")
+	}
+	// 幂等
+	if err := s.Close(); err != nil {
+		t.Fatalf("第二次 Close: %v", err)
+	}
+	// Close 后 Start 应被拒绝
+	if err := s.Start(); err == nil {
+		t.Fatal("Close 后 Start 应被拒绝")
+	}
+}

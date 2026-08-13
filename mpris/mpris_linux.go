@@ -8,6 +8,7 @@ package mpris
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -78,9 +79,10 @@ type propsStore interface {
 type Server struct {
 	p playerLike
 
-	conn    bus
-	props   propsStore
-	closeCh chan struct{}
+	conn     bus
+	props    propsStore
+	closeCh  chan struct{}
+	pumpDone chan struct{} // pump 退出信号：Close 等它关闭后才断开连接
 
 	closed atomic.Bool // Close 幂等保护；Close 后 pump 可能短暂存活，字段不再置 nil
 
@@ -98,6 +100,9 @@ func NewServer(p playerLike) *Server {
 // Start 连接 session bus、注册服务名并导出对象。失败返回错误，
 // 调用方应仅记录警告并继续（MPRIS 不影响播放器主功能）。
 func (s *Server) Start() error {
+	if s.closed.Load() {
+		return errors.New("MPRIS 服务已关闭，不能重启")
+	}
 	conn, err := dbus.SessionBusPrivateNoAutoStartup()
 	if err != nil {
 		return fmt.Errorf("连接 session bus: %w", err)
@@ -142,22 +147,27 @@ func (s *Server) Start() error {
 	}
 
 	s.closeCh = make(chan struct{})
+	s.pumpDone = make(chan struct{})
 	go s.pump()
 	return nil
 }
 
 // Close 停止事件泵并断开总线；幂等，可重复调用。
-// 注意：不得把 conn/props/closeCh 置 nil——Close 后 pump goroutine 可能仍在
-// 短暂存活（已出队事件尚未处理完，handleEvent 读 props/conn、select 读 closeCh），
-// 置 nil 会引发空指针 panic，进而中止 main.go 的 defer 清理。godbus conn.Close()
-// 用 closeOnce 幂等，关闭后 Emit 走 sendAndIfClosed 的 closed 分支为安全 no-op，
-// props.SetMust 仅写本地 prop 值不碰总线，因此 pump 短暂存活是安全的。
+// 顺序很关键：先关 closeCh 并等 pump 完全退出（<-pumpDone），之后才关连接。
+// 原因：PlaybackStatus/Metadata/Volume 是 EmitTrue 属性，SetMust 会经
+// emitChange 调 conn.Emit；若先关连接，pump 存活期内处理残留事件时 Emit
+// 返回 ErrClosed（dbus: connection closed by user），SetMust 直接 panic，
+// 还会跳过 main.go 的 defer 清理（mpv 残留）。等 pump 退出后泵内不会再碰
+// conn，此时关连接才是安全的（真实总线复现过该 panic）。pump 因事件通道
+// 提前关闭而退出时 pumpDone 已关，等待立即返回；Start 未完成（closeCh 为
+// nil，pump 未启动）时跳过等待。字段保持不置 nil。
 func (s *Server) Close() error {
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 	if s.closeCh != nil {
 		close(s.closeCh)
+		<-s.pumpDone // 等 pump 完全退出，杜绝存活期处理事件
 	}
 	if s.conn != nil {
 		_ = s.conn.Close()
@@ -174,9 +184,12 @@ func (s *Server) SetTrack(t *model.Track) {
 }
 
 // pump 订阅播放器事件并同步到 MPRIS 属性；Close 或事件通道关闭时退出。
+// defer 顺序：先注册 unsub、后注册 close(pumpDone)，退出时后进先出——
+// 先关 pumpDone 信号（Close 据此得知 pump 已不再触碰 conn），再执行 unsub。
 func (s *Server) pump() {
 	events, unsub := s.p.Subscribe()
 	defer unsub()
+	defer close(s.pumpDone)
 	for {
 		select {
 		case <-s.closeCh:
