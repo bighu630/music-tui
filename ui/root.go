@@ -120,6 +120,7 @@ type Model struct {
 
 	state     model.PlaybackState
 	current   page
+	hoverTab  int // Tab 栏悬停标签下标（= page 枚举值）；-1 = 无悬停
 	lastError string
 	ended     bool // 当前歌曲是否已播放结束/出错（空格语义：重播同曲而非 Resume）
 	// queueSkip 标记删除当前曲导致的指针解耦：mpv 仍播放被删曲目，
@@ -160,6 +161,7 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 		session:     sess,
 		onTrack:     onTrack,
 		current:     pageHome,
+		hoverTab:    -1,
 		home:        newHomeModel(p),
 		searchPage:  newSearchModel(s),
 		historyPage: newHistoryModel(),
@@ -399,6 +401,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.historyPage = m.historyPage.setSize(msg.Width, msg.Height-1)
 		m.queuePage = m.queuePage.setSize(msg.Width, msg.Height-1)
 		return m, nil
+
+	case tea.MouseMsg:
+		return m.onMouse(msg)
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -809,6 +814,36 @@ func emitDeleteEntry(id, source string) tea.Cmd {
 
 func emitClearHistory() tea.Cmd {
 	return func() tea.Msg { return clearHistoryMsg{} }
+}
+
+// onMouse 处理鼠标事件：Tab 栏（首行 Y==0，bubbletea X/Y 为 0-based）——
+// 点击标签（左键按下）切换页面，移动更新悬停高亮；其余区域事件不拦截，
+// 交给当前页面（bubbles 列表/歌词区原生获得滚轮滚动与点击选择）。
+func (m Model) onMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
+	if msg.Y != 0 {
+		// 鼠标不在 Tab 栏：清除悬停高亮，事件交给页面
+		if m.hoverTab >= 0 {
+			m.hoverTab = -1
+		}
+		return m.delegate(msg)
+	}
+	p, ok := m.tabHitAt(msg.X)
+	switch msg.Action {
+	case tea.MouseActionMotion:
+		if ok {
+			m.hoverTab = int(p)
+		} else {
+			m.hoverTab = -1
+		}
+		return m, nil // 悬停事件不落到页面
+	case tea.MouseActionPress:
+		m.hoverTab = -1 // 点击后清除悬停
+		if msg.Button == tea.MouseButtonLeft && ok {
+			m.current = p
+		}
+		return m, nil
+	}
+	return m, nil // 其余（释放/滚轮等）在 Tab 栏上不处理
 }
 
 // switchPage 处理 Tab（循环）与 1/2/3/4（直达）。
