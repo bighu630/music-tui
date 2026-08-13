@@ -96,7 +96,7 @@ func run() error {
 		sess,
 		mprisSrv.SetTrack,
 	)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI 运行失败: %w", err)
 	}

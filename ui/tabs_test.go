@@ -119,3 +119,139 @@ func TestQueuePageReceivesWindowSize(t *testing.T) {
 			m.queuePage.width, m.queuePage.height)
 	}
 }
+
+// ---- 鼠标交互（点击切换 + hover 高亮） ----
+
+// 固定状态下的标签文本（无曲目 + 队列 3 首），与 tabBar 分隔约定（2 空格）一致。
+// 用 ansi.StringWidth 独立计算各标签 0-based 起始列，避免与实现共享内部函数。
+func mouseTabCols() []struct {
+	text string
+	col  int
+	want page
+} {
+	labels := []struct {
+		text string
+		col  int
+		want page
+	}{
+		{"⏹ 首页", 0, pageHome},
+		{"搜索", 0, pageSearch},
+		{"历史", 0, pageHistory},
+		{"队列 (3)", 0, pageQueue},
+	}
+	col := 0
+	for i := range labels {
+		if i > 0 {
+			col += 2 // 标签间分隔
+		}
+		labels[i].col = col
+		col += ansi.StringWidth(labels[i].text)
+	}
+	return labels
+}
+
+// 点击每个标签（按下即响应）应切到对应页；点击当前页标签幂等。
+func TestMouseClickSwitchesPage(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	for _, id := range []string{"q1", "q2", "q3"} {
+		m, _ = update(m, trackAppendMsg{track: testTrack(id)})
+	}
+	seps := mouseTabCols()
+	// 先注入悬停状态：悬停在“搜索”标签上（hoverTab=1），验证点击会清除悬停
+	m, _ = update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: seps[1].col + 1, Y: 0})
+	for _, lb := range seps {
+		click := lb.col + 1 // 标签内部一列（0-based）
+		m2, _ := update(m, tea.MouseMsg{
+			Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: click, Y: 0,
+		})
+		if m2.current != lb.want {
+			t.Errorf("点击 %q (x=%d) 后 current = %v, want %v", lb.text, click, m2.current, lb.want)
+		}
+		if m2.hoverTab != -1 {
+			t.Errorf("点击 %q (x=%d) 后 hoverTab = %d, want -1（点击应清除悬停）", lb.text, click, m2.hoverTab)
+		}
+	}
+	// 幂等：先切到搜索页，再点当前页“搜索”应保持 pageSearch
+	m, _ = update(m, tea.MouseMsg{
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[1].col + 1, Y: 0,
+	})
+	if m.current != pageSearch {
+		t.Fatalf("点击“搜索”后 current = %v, want pageSearch", m.current)
+	}
+	m2, _ := update(m, tea.MouseMsg{
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[1].col + 1, Y: 0,
+	})
+	if m2.current != pageSearch {
+		t.Errorf("点击当前页“搜索”应幂等, current = %v, want pageSearch", m2.current)
+	}
+}
+
+// 点击标签间分隔不应切换页面。
+func TestMouseClickOnSeparatorIgnored(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	seps := mouseTabCols()
+	for i := 1; i < len(seps); i++ {
+		// 上一标签末尾与下一标签起始之间的两个分隔格
+		for _, x := range []int{seps[i].col - 2, seps[i].col - 1} {
+			m2, _ := update(m, tea.MouseMsg{
+				Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: 0,
+			})
+			if m2.current != pageHome {
+				t.Errorf("点击分隔 (x=%d) 不应切页, current = %v", x, m2.current)
+			}
+		}
+	}
+}
+
+// 点击非首行、或 X 超出最后一个标签 → 不切页。
+func TestMouseClickOutsideTabBarIgnored(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m2, _ := update(m, tea.MouseMsg{
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 1, // 第二行
+	})
+	if m2.current != pageHome {
+		t.Error("点击非首行不应切页")
+	}
+	m2, _ = update(m, tea.MouseMsg{
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 500, Y: 0, // 超界
+	})
+	if m2.current != pageHome {
+		t.Error("点击超界位置不应切页")
+	}
+}
+
+// 悬停非当前页标签 → 下划线高亮；移出 Tab 栏 → 清除。
+func TestMouseHoverHighlightsTab(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	seps := mouseTabCols()
+	x := seps[1].col + 1 // 悬停"搜索"标签
+	m2, _ := update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: x, Y: 0})
+	if m2.hoverTab != int(pageSearch) {
+		t.Errorf("hoverTab = %d, want %d", m2.hoverTab, int(pageSearch))
+	}
+	if !strings.Contains(m2.View(), tabHoverStyle.Render("搜索")) {
+		t.Error("悬停的标签应显示下划线高亮")
+	}
+	// 鼠标移出 Tab 栏 → 清除 hover
+	m3, _ := update(m2, tea.MouseMsg{Action: tea.MouseActionMotion, X: x, Y: 5})
+	if m3.hoverTab != -1 {
+		t.Errorf("移出后 hoverTab = %d, want -1", m3.hoverTab)
+	}
+	if strings.Contains(m3.View(), tabHoverStyle.Render("搜索")) {
+		t.Error("移出后不应再有下划线高亮")
+	}
+}
+
+// 悬停当前页标签 → 保持 tabStyle（当前页高亮优先于 hover）。
+func TestMouseHoverOnCurrentTabKeepsTabStyle(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m2, _ := update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: 1, Y: 0}) // 悬停首页
+	if !strings.Contains(m2.View(), tabStyle.Render("⏹ 首页")) {
+		t.Error("悬停当前页应保持 tabStyle（高亮优先于 hover）")
+	}
+}
