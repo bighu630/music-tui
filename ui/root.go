@@ -347,9 +347,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, spinnerTick
 
 	case tea.WindowSizeMsg:
-		m.home = m.home.setSize(msg.Width, msg.Height)
-		m.searchPage = m.searchPage.setSize(msg.Width, msg.Height)
-		m.historyPage = m.historyPage.setSize(msg.Width, msg.Height)
+		// 顶部 Tab 栏占 1 行，页面高度相应减 1
+		m.home = m.home.setSize(msg.Width, msg.Height-1)
+		m.searchPage = m.searchPage.setSize(msg.Width, msg.Height-1)
+		m.historyPage = m.historyPage.setSize(msg.Width, msg.Height-1)
+		m.queuePage = m.queuePage.setSize(msg.Width, msg.Height-1)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -403,7 +405,7 @@ func (m Model) View() string {
 			Foreground(lipgloss.Color("9")).
 			Render("⚠ "+m.lastError)
 	}
-	return body
+	return m.tabBar() + "\n" + body
 }
 
 // onPlayerEvent 更新共享播放状态并同步首页。
