@@ -36,6 +36,7 @@ func TestCleanCandidatesKeepsRawAndExtracts(t *testing.T) {
 		{"括号加官方后缀", "周杰倫 Jay Chou【晴天 Sunny Day】-Official Music Video", "晴天"},
 		{"连字符分隔", "周杰伦-七里香", "七里香"},
 		{"括号版本", "Taylor Swift - Love Story (Taylor's Version)", "Love Story"},
+		{"日文标题", "YOASOBI - 夜に駆ける", "夜に駆ける"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -57,5 +58,23 @@ func TestCleanCandidatesLimit(t *testing.T) {
 	}
 	if len(cands) > maxCandidates {
 		t.Errorf("len(cands) = %d, want ≤ %d", len(cands), maxCandidates)
+	}
+}
+
+func TestStripNoise(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"周杰倫 Jay Chou【晴天 Sunny Day】-Official Music Video", "周杰倫 Jay Chou"},
+		{"[Official Video] 夜に駆ける", "夜に駆ける"},
+		{"((Live)) 晴天", "晴天"},
+		{"MV", ""},
+		{"夜に駆ける", "夜に駆ける"},
+	}
+	for _, tt := range cases {
+		if got := stripNoise(tt.in); got != tt.want {
+			t.Errorf("stripNoise(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }

@@ -60,6 +60,10 @@ type lrclibSong struct {
 // 0 结果）。未找到歌词返回 ErrNotFound；网络或服务端错误原样返回。
 func (c *Client) Fetch(ctx context.Context, track model.Track) (*Lyrics, error) {
 	for i, cand := range cleanCandidates(track.Title) {
+		// 派生候选恰为歌手名（如 CJK 词元"周杰倫"）是最常见的浪费请求，跳过。
+		if i > 0 && strings.EqualFold(cand, track.Artist) {
+			continue
+		}
 		ly, err := c.fetchOne(ctx, track, cand, i == 0)
 		if err == nil {
 			return ly, nil
@@ -77,7 +81,9 @@ func (c *Client) Fetch(ctx context.Context, track model.Track) (*Lyrics, error) 
 // 未命中返回 ErrNotFound，由 Fetch 决定是否尝试下一候选。
 func (c *Client) fetchOne(ctx context.Context, track model.Track, cand string, withArtist bool) (*Lyrics, error) {
 	base := strings.TrimSuffix(c.baseURL, "/")
-	if withArtist {
+	if withArtist && track.Artist != "" {
+		// /api/get 必须带 artist_name，否则 lrclib 返回 400 中断整条链；
+		// artist 为空时跳过 get 直接走 search。
 		var song lrclibSong
 		q := url.Values{}
 		q.Set("track_name", cand)
@@ -99,7 +105,7 @@ func (c *Client) fetchOne(ctx context.Context, track model.Track, cand string, w
 	var songs []lrclibSong
 	q2 := url.Values{}
 	q2.Set("track_name", cand)
-	if withArtist {
+	if withArtist && track.Artist != "" {
 		q2.Set("artist_name", track.Artist)
 	}
 	u2 := base + "/api/search?" + q2.Encode()
@@ -156,19 +162,35 @@ func (c *Client) do(ctx context.Context, u string, out interface{}) error {
 	return fmt.Errorf("lrclib 限流，重试后仍失败")
 }
 
-// retryAfter 解析 Retry-After 响应头（秒数或 HTTP 日期），缺省 1 秒。
+// retryAfter 解析 Retry-After 响应头（秒数或 HTTP 日期），缺省 1 秒，
+// 结果 clamp 到 [0, maxRetryWait]：候选链请求翻倍后防止单候选长时间
+// 拖死整条链。
 func retryAfter(resp *http.Response) time.Duration {
 	v := resp.Header.Get("Retry-After")
 	if v == "" {
 		return time.Second
 	}
 	if secs, err := strconv.Atoi(v); err == nil {
-		return time.Duration(secs) * time.Second
+		return clampWait(time.Duration(secs) * time.Second)
 	}
 	if t, err := http.ParseTime(v); err == nil {
-		return time.Until(t)
+		return clampWait(time.Until(t))
 	}
 	return time.Second
+}
+
+// maxRetryWait 单次 429 等待上限（5s）。
+const maxRetryWait = 5 * time.Second
+
+// clampWait 将等待时长限制在 [0, maxRetryWait]。
+func clampWait(d time.Duration) time.Duration {
+	if d < 0 {
+		return 0
+	}
+	if d > maxRetryWait {
+		return maxRetryWait
+	}
+	return d
 }
 
 // songToLyrics 将 lrclib 歌曲对象转为 Lyrics：同步歌词优先，退回纯文本；
@@ -185,7 +207,13 @@ func songToLyrics(s lrclibSong) *Lyrics {
 	return nil
 }
 
-// chooseBest 在搜索结果中选最佳：跳过纯器乐，选时长与目标最接近的条目。
+// maxDurationDelta 时长匹配阈值（秒）：偏差超过即视为不同曲目，排除。
+// 音频/MV 片头偏移通常 ≤30s（实测晴天 MV 319s vs lrclib 300s，Δ=19s
+// 属同曲应命中）；现场版/错歌偏差通常 >60s，应排除。
+const maxDurationDelta = 30.0
+
+// chooseBest 在搜索结果中选最佳：跳过纯器乐与时长偏差超过阈值的条目，
+// 选时长与目标最接近的。
 func chooseBest(songs []lrclibSong, track model.Track) *Lyrics {
 	var best *lrclibSong
 	bestDelta := math.MaxFloat64
@@ -195,6 +223,9 @@ func chooseBest(songs []lrclibSong, track model.Track) *Lyrics {
 			continue
 		}
 		delta := math.Abs(s.Duration - track.Duration)
+		if delta > maxDurationDelta {
+			continue
+		}
 		if delta < bestDelta {
 			best, bestDelta = s, delta
 		}

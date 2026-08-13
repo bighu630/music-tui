@@ -226,6 +226,31 @@ func TestFetchNoisyTitleFallsBackToCleanedCandidates(t *testing.T) {
 	}
 }
 
+func TestFetchStopsOnNonNotFoundError(t *testing.T) {
+	var searchCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/get":
+			w.WriteHeader(http.StatusNotFound)
+		case "/api/search":
+			searchCalls++
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	c := NewClient(testUA)
+	c.baseURL = server.URL
+	_, err := c.Fetch(context.Background(), model.Track{Title: "周杰倫 七里香 歌詞", Artist: "周杰倫", Duration: 300})
+	if err == nil || !strings.Contains(err.Error(), "500") {
+		t.Errorf("err = %v, want 500 服务端错误", err)
+	}
+	if searchCalls != 1 {
+		t.Errorf("searchCalls = %d, want 1（非 ErrNotFound 应立即中断，不再尝试后续候选）", searchCalls)
+	}
+}
+
 func TestRetryAfter(t *testing.T) {
 	// 缺省 1 秒
 	if d := retryAfter(&http.Response{}); d != time.Second {
