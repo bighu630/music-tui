@@ -201,6 +201,22 @@ func TestResumeNotifiesMPRIS(t *testing.T) {
 	_ = m
 }
 
+// TestResumeFirstProgressEventDoesNotOverwriteDisk 回归：恢复启动后 loadfile 会
+// 触发 time-pos=0 的 ProgressEvent（先于 Seek 定位到达），不应触发节流保存
+// 覆盖磁盘上的恢复进度（否则崩溃恢复退化为从 0 开始）。
+func TestResumeFirstProgressEventDoesNotOverwriteDisk(t *testing.T) {
+	m, _ := newResumeTestModel(t, sessionState(66.6, false), nil)
+	if m.lastSave.IsZero() {
+		t.Fatal("恢复时应预置节流基准（lastSave），否则首个进度事件会立即保存")
+	}
+
+	// 模拟 loadfile 后的 time-pos=0 事件（先于 Seek 的 66.6）
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 0, Duration: 200}})
+	if st := m.session.State(); st.Position != 66.6 {
+		t.Errorf("恢复后首个进度事件不应覆盖磁盘会话: Position = %v, want 66.6", st.Position)
+	}
+}
+
 // TestSaveOnQuitWritesSession 播放中按 q 退出 → 会话写入（队列 + 进度 + ended）。
 func TestSaveOnQuitWritesSession(t *testing.T) {
 	m, _ := newResumeTestModel(t, nil, nil)

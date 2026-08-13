@@ -157,6 +157,10 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 			if pos < 0 {
 				pos = 0
 			}
+			// 上界 clamp：损坏但可解析的超大进度按曲目时长收口
+			if cur.Duration > 0 && pos > cur.Duration {
+				pos = cur.Duration
+			}
 			if st.Ended {
 				// 退出时已播完：有下一首则从下一首开头（暂停），否则当前曲从头
 				if next, ok := m.queue.Next(); ok {
@@ -171,6 +175,10 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 			m.home = m.home.syncState(m.state)
 			m.notifyTrack(&cur)
 			m.resume = &resumeInfo{track: cur, pos: pos}
+			// 预置节流基准：恢复后 loadfile 会触发 time-pos=0 的 ProgressEvent
+			//（先于 Seek 定位到达），若 lastSave 为零值会立即触发保存，
+			// 把磁盘上的恢复进度覆盖为 0（回归：TestResumeFirstProgressEventDoesNotOverwriteDisk）
+			m.lastSave = time.Now()
 		} else {
 			// 队列无当前曲目（损坏/手改数据）：丢弃会话
 			m.queue = queue.New()
@@ -257,7 +265,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case resumeResultMsg:
 		if msg.err != nil {
-			// 恢复失败：会话无保留价值（当前曲播放不了），清空避免反复失败
+			// 恢复失败：清空内存中的恢复队列（当前曲播放不了）；磁盘会话
+			// 保留——下次启动重试（mpv 瞬时故障可恢复），用户播放新曲或
+			// 退出时自然覆盖/清除。
 			m.lastError = "恢复播放失败: " + msg.err.Error()
 			m.state = model.PlaybackState{}
 			m.home = m.home.syncState(m.state)

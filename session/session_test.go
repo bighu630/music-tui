@@ -111,6 +111,9 @@ func TestStateReturnsCopy(t *testing.T) {
 	if s.State().Position == 999 {
 		t.Error("修改 State() 返回值不应影响 store")
 	}
+	if s.State().Queue.Tracks[0].ID == "mutated" {
+		t.Error("修改 State() 返回值的 Tracks 不应影响 store（深拷贝）")
+	}
 }
 
 func TestClear(t *testing.T) {

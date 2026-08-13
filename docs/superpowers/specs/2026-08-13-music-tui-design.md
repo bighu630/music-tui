@@ -442,7 +442,8 @@ main 加载 session.Store（损坏→备份重建）→ NewModel：
       home 同步（进度条定位、歌词置加载中）
       Init 返回 resumeCmd：PlayPaused(url) → Seek(pos) → resumeResultMsg
       → 成功后异步加载歌词/封面（暂停态也可展示）
-      → 失败：状态重置 + 队列清空 + 错误横幅（会话无保留价值，避免反复失败）
+      → 失败：状态重置 + 内存队列清空 + 错误横幅；磁盘会话保留（下次启动重试，
+        用户播放新曲或退出时自然覆盖/清除）
   → session 无状态 / 队列无当前曲目（损坏/手改）：从空态开始
 恢复的 ended 语义：
   → Ended=false：暂停在保存进度

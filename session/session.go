@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"music-tui/model"
 	"music-tui/queue"
 )
 
@@ -72,7 +73,7 @@ func (s *Store) Save(st State) error {
 	return nil
 }
 
-// State 返回已保存会话状态的副本；无会话时返回 nil。
+// State 返回已保存会话状态的深拷贝（含 Tracks 切片）；无会话时返回 nil。
 func (s *Store) State() *State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -80,6 +81,7 @@ func (s *Store) State() *State {
 		return nil
 	}
 	cp := *s.state
+	cp.Queue.Tracks = append([]model.Track(nil), s.state.Queue.Tracks...)
 	return &cp
 }
 
