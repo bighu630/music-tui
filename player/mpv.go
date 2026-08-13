@@ -492,7 +492,7 @@ func (p *MpvPlayer) PlayPaused(url string, start float64) error {
 	}
 	if err := callWithTimeout(func() error {
 		// start 极端值兜底：NaN/负值落入 start<=0 走 2 参从头加载（安全）；
-		// +Inf 会生成 "inf" 被 mpv 拒绝、走上层报错恢复，而会话位置源自 mpv time-pos 实际不会出现。
+		// +Inf 落入 4 参分支会生成 "start=+Inf"，mpv 接受并钳制到 EOF（无害）；实际来自 time-pos 不会出现。
 		if start > 0 {
 			// 4 参语法（mpv ≥0.38）：loadfile <url> replace <index> <options>，
 			// start= 选项随加载原子定位；旧 3 参 options 语法在 0.38+ 已改为
