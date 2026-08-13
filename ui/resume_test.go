@@ -64,7 +64,8 @@ func sessionState(pos float64, ended bool) *session.State {
 }
 
 // TestResumeRestoresQueueAndState 重启恢复：队列/模式/当前曲/进度恢复为暂停态，
-// Init 触发 PlayPaused 静默加载 + Seek 定位，成功后加载歌词/封面。
+// Init 触发 PlayPaused 静默加载并定位（随 loadfile start= 原子完成，不再单独
+// Seek），成功后加载歌词/封面。
 func TestResumeRestoresQueueAndState(t *testing.T) {
 	m, fp := newResumeTestModel(t, sessionState(66.6, false), nil)
 
@@ -88,13 +89,16 @@ func TestResumeRestoresQueueAndState(t *testing.T) {
 		t.Errorf("resume 信息 = %+v", m.resume)
 	}
 
-	// Init → resumeCmd：PlayPaused + Seek（waitForPlayerEvents 阻塞通道，单独执行 resumeCmd）
+	// Init → resumeCmd：PlayPaused（含定位）（waitForPlayerEvents 阻塞通道，单独执行 resumeCmd）
 	msgs := execCmds(resumeCmd(m))
 	if fp.pausedCount() != 1 || fp.lastPaused() != testTrack("b").URL {
 		t.Errorf("PlayPaused 调用 = %d %q, want 1 次 b", fp.pausedCount(), fp.lastPaused())
 	}
-	if len(fp.seeks) != 1 || fp.seeks[0] != 66.6 {
-		t.Errorf("Seek = %v, want [66.6]", fp.seeks)
+	if len(fp.seeks) != 0 {
+		t.Errorf("恢复不应再调用 Seek（定位随 loadfile start= 原子完成）: %v", fp.seeks)
+	}
+	if fp.pausedStart() != 66.6 {
+		t.Errorf("PlayPaused start = %v, want 66.6", fp.pausedStart())
 	}
 
 	// resumeResultMsg 回灌 → 触发歌词/封面加载
@@ -141,8 +145,11 @@ func TestResumeEndedAdvancesToNext(t *testing.T) {
 	if fp.lastPaused() != testTrack("c").URL {
 		t.Errorf("PlayPaused = %q, want c", fp.lastPaused())
 	}
-	if len(fp.seeks) != 1 || fp.seeks[0] != 0 {
-		t.Errorf("Seek = %v, want [0]", fp.seeks)
+	if len(fp.seeks) != 0 {
+		t.Errorf("恢复不应再调用 Seek（定位随 loadfile start= 原子完成）: %v", fp.seeks)
+	}
+	if fp.pausedStart() != 0 {
+		t.Errorf("PlayPaused start = %v, want 0（从头加载）", fp.pausedStart())
 	}
 	m, _ = update(m, msgs[0])
 	if m.state.Track == nil || m.state.Track.ID != "c" {
@@ -162,6 +169,12 @@ func TestResumeEndedSingleTrackRestartsCurrent(t *testing.T) {
 	msgs := execCmds(resumeCmd(m))
 	if fp.lastPaused() != testTrack("a").URL {
 		t.Errorf("PlayPaused = %q, want a", fp.lastPaused())
+	}
+	if len(fp.seeks) != 0 {
+		t.Errorf("恢复不应再调用 Seek（定位随 loadfile start= 原子完成）: %v", fp.seeks)
+	}
+	if fp.pausedStart() != 0 {
+		t.Errorf("PlayPaused start = %v, want 0（从头加载）", fp.pausedStart())
 	}
 	m, _ = update(m, msgs[0])
 	if m.state.Playing {

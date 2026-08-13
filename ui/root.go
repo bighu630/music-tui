@@ -86,7 +86,7 @@ type historyResultMsg struct {
 	err error
 }
 
-// resumeResultMsg 续播恢复结果（PlayPaused + Seek 成败）。
+// resumeResultMsg 续播恢复结果（PlayPaused（含定位）成败）。
 type resumeResultMsg struct {
 	err error
 }
@@ -190,7 +190,7 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 }
 
 // Init 启动两个常驻 cmd：播放器事件监听 + spinner 全局 tick；
-// 存在已保存会话时追加续播恢复 cmd（PlayPaused 静默加载 + Seek 定位）。
+// 存在已保存会话时追加续播恢复 cmd（PlayPaused 静默加载并定位）。
 // （不用包级 spinner.Tick：bubbles v1.0.0 的包级 Tick 无延时，会形成忙循环。）
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{waitForPlayerEvents(m.player), spinnerTick}
@@ -551,15 +551,14 @@ func (m Model) saveSession() {
 	}
 }
 
-// resumeCmd 续播恢复：PlayPaused 静默加载当前曲目（不发声）→ Seek 定位。
+// resumeCmd 续播恢复：PlayPaused 静默加载当前曲目并定位（不发声；定位随
+// loadfile 的 start= 选项原子完成，避免加载窗口内 seek 被 mpv 拒绝的竞态，
+// 见 mpv.go PlayPaused）。
 func resumeCmd(m Model) tea.Cmd {
 	track := m.resume.track
 	pos := m.resume.pos
 	return func() tea.Msg {
-		if err := m.player.PlayPaused(track.URL); err != nil {
-			return resumeResultMsg{err: err}
-		}
-		if err := m.player.Seek(pos); err != nil {
+		if err := m.player.PlayPaused(track.URL, pos); err != nil {
 			return resumeResultMsg{err: err}
 		}
 		return resumeResultMsg{}
