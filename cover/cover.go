@@ -24,7 +24,10 @@ import (
 // thumbnailSizes 是 YouTube 缩略图降级链：从大到小依次尝试。
 var thumbnailSizes = []string{"maxresdefault", "sddefault", "hqdefault", "mqdefault"}
 
-// Fetcher 下载并缓存封面。缓存文件位于 <cacheDir>/<videoID>.jpg。
+// maxCoverBytes 限制单张封面下载大小，防止解压炸弹。
+const maxCoverBytes = 16 << 20 // 16 MiB
+
+// Fetcher 下载并缓存封面。缓存文件位于 <cacheDir>/<Source>-<ID>.jpg。
 type Fetcher struct {
 	client *http.Client
 	dir    string
@@ -43,25 +46,33 @@ func NewFetcher(cacheDir string) (*Fetcher, error) {
 
 // Fetch 返回封面本地路径：磁盘缓存命中则直接返回；
 // 否则沿降级链（maxresdefault→sddefault→hqdefault→mqdefault）下载，
-// 校验图片有效性后原子写入缓存。全部失败返回错误（调用方显示占位框）。
+// 校验图片有效性后原子写入缓存。全部失败返回聚合错误（调用方显示占位框）。
 func (f *Fetcher) Fetch(ctx context.Context, track model.Track) (string, error) {
-	if track.CoverURL == "" {
-		return "", errors.New("封面 URL 为空")
+	if track.ID == "" {
+		return "", errors.New("track ID 为空")
 	}
-	dest := filepath.Join(f.dir, track.ID+".jpg")
+	dest := filepath.Join(f.dir, track.Source+"-"+track.ID+".jpg")
+	// 缓存按 ID+Source 键控，命中时无需 CoverURL。
 	if _, err := os.Stat(dest); err == nil {
 		return dest, nil
 	}
+	if track.CoverURL == "" {
+		return "", errors.New("封面 URL 为空")
+	}
+	var errs []error
 	for _, size := range thumbnailSizes {
 		u, err := thumbURL(track.CoverURL, size)
 		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", size, err))
 			continue
 		}
-		if err := f.download(ctx, u, dest); err == nil {
-			return dest, nil
+		if err := f.download(ctx, u, dest); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", size, err))
+			continue
 		}
+		return dest, nil
 	}
-	return "", errors.New("封面降级链全部失败")
+	return "", errors.Join(errs...)
 }
 
 // thumbURL 将封面 URL 的最后一段路径替换为指定缩略图尺寸，保留 query 参数。
@@ -70,16 +81,18 @@ func thumbURL(base, size string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	segs := strings.Split(u.Path, "/")
-	if len(segs) == 0 {
+	if strings.Trim(u.Path, "/") == "" {
 		return "", errors.New("封面 URL 无路径")
 	}
+	segs := strings.Split(u.Path, "/")
 	segs[len(segs)-1] = size + ".jpg"
 	u.Path = strings.Join(segs, "/")
 	return u.String(), nil
 }
 
-// download 下载并校验图片，写入临时文件后原子重命名到 dest。
+// download 下载并校验图片，写入唯一临时文件后原子重命名到 dest。
+// 并发安全：每次调用使用独立的 CreateTemp 临时文件（并发下不会互相覆盖或
+// ENOENT）；Rename 失败但 dest 已存在时视为成功（并发下对方已完成写入）。
 func (f *Fetcher) download(ctx context.Context, u, dest string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -93,16 +106,34 @@ func (f *Fetcher) download(ctx context.Context, u, dest string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("下载 %s: %s", u, resp.Status)
 	}
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxCoverBytes))
 	if err != nil {
 		return err
+	}
+	if len(data) >= maxCoverBytes {
+		return fmt.Errorf("封面 %s 超过大小上限 %d 字节", u, maxCoverBytes)
 	}
 	if _, _, err := image.Decode(bytes.NewReader(data)); err != nil {
 		return fmt.Errorf("封面不是有效图片: %w", err)
 	}
-	tmp := dest + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	tmp, err := os.CreateTemp(f.dir, "*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, dest)
+	// 失败时清理临时文件；成功 rename 后原路径已不存在，Remove 的 ENOENT 忽略。
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), dest); err != nil {
+		if _, statErr := os.Stat(dest); statErr == nil {
+			return nil // 并发下对方已写入 dest
+		}
+		return err
+	}
+	return nil
 }
