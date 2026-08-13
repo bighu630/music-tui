@@ -129,7 +129,8 @@ func testTrack(id string) model.Track {
 }
 
 // newTestModel 组装真实服务（历史/封面用临时目录，歌词指向 404 的假服务器）。
-func newTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter) Model {
+// onTrack 透传给 NewModel（MPRIS 曲目回调；测试可传 nil 或自定收集）。
+func newTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, onTrack func(*model.Track)) Model {
 	t.Helper()
 	lyricServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -146,7 +147,7 @@ func newTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter) Model {
 	}
 	return NewModel(fp, fa,
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist)
+		cf, hist, onTrack)
 }
 
 // execCmds 同步执行 tea.Cmd 并收集返回的非 nil 消息（测试用）。
@@ -214,7 +215,7 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 func TestTabSwitchesPages(t *testing.T) {
 	fp := newFakePlayer()
 	fa := &fakeSearchAdapter{}
-	m := newTestModel(t, fp, fa)
+	m := newTestModel(t, fp, fa, nil)
 
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyTab})
 	if m.current != pageSearch {
@@ -232,7 +233,7 @@ func TestTabSwitchesPages(t *testing.T) {
 
 func TestSpaceTogglesPlayback(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	tr := testTrack("t1")
 	m.state = model.PlaybackState{Track: &tr, Playing: true}
 	m.home = m.home.syncState(m.state)
@@ -248,7 +249,7 @@ func TestSpaceTogglesPlayback(t *testing.T) {
 
 func TestSpaceTypesWhenSearchInputFocused(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m = runProgram(t, m,
 		tea.KeyMsg{Type: tea.KeyTab}, // 切到搜索页，输入框聚焦
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")},
@@ -265,7 +266,7 @@ func TestSpaceTypesWhenSearchInputFocused(t *testing.T) {
 
 func TestQuitOnQ(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	p := tea.NewProgram(m, tea.WithInput(strings.NewReader("")), tea.WithoutRenderer())
 	done := make(chan struct{})
 	go func() {
@@ -288,7 +289,7 @@ func TestQuitOnQ(t *testing.T) {
 func TestPlayFlow(t *testing.T) {
 	fp := newFakePlayer()
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1"), testTrack("t2")}}
-	m := newTestModel(t, fp, fa)
+	m := newTestModel(t, fp, fa, nil)
 
 	// 搜索页输入关键词并 Enter
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
@@ -380,7 +381,7 @@ func TestPlayFlow(t *testing.T) {
 
 func TestStaleAsyncResultsIgnored(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 
@@ -399,7 +400,7 @@ func TestStaleAsyncResultsIgnored(t *testing.T) {
 func TestPlayFailureShowsError(t *testing.T) {
 	fp := newFakePlayer()
 	fp.playErr = true
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	if cmd != nil {
 		t.Error("播放失败后不应再发异步 cmd（歌词/封面/历史）")
@@ -433,7 +434,7 @@ func TestPlayFailureShowsError(t *testing.T) {
 // 特殊流）时不应覆盖搜索元数据提供的真实时长，避免进度条被抹零。
 func TestTrackStartedEventZeroDurationKeepsMetadata(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1")) // 搜索元数据 Duration=200
 	_ = execCmds(cmd)
 	if m.state.Duration != 200 {
@@ -454,7 +455,7 @@ func TestTrackStartedEventZeroDurationKeepsMetadata(t *testing.T) {
 
 func TestErrorEventSetsEndedAndSpaceReplays(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	if fp.playCount() != 1 {
@@ -487,7 +488,7 @@ func TestErrorEventSetsEndedAndSpaceReplays(t *testing.T) {
 
 func TestSpaceAfterTrackEndedReplaysSameTrack(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	if fp.playCount() != 1 {
@@ -513,9 +514,49 @@ func TestSpaceAfterTrackEndedReplaysSameTrack(t *testing.T) {
 	}
 }
 
+// ---- onTrack 回调（MPRIS 曲目桥） ----
+
+// startPlay 成功时应在 Play 返回后同步通知新曲目（回调收到 track 指针拷贝）。
+func TestStartPlayNotifiesTrack(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	var got []*model.Track
+	m := newTestModel(t, fp, fa, func(track *model.Track) {
+		cp := *track
+		got = append(got, &cp)
+	})
+
+	tr := model.Track{ID: "v1", Title: "T1", Artist: "A", URL: "http://x/1"}
+	m, cmd := m.startPlay(tr)
+	_ = cmd // 回调在 startPlay 内同步触发，无需执行异步 cmd
+	_ = m
+	if len(got) != 1 || got[0].ID != "v1" {
+		t.Fatalf("startPlay 应通知新曲目: %#v", got)
+	}
+}
+
+// startPlay 失败时（Play 返回错误）应通知 nil（当前无曲目）。
+func TestStartPlayFailureClearsTrack(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	var got []*model.Track
+	m := newTestModel(t, fp, fa, func(track *model.Track) {
+		got = append(got, track) // 失败路径传 nil
+	})
+	fp.playErr = true
+
+	tr := model.Track{ID: "v1", Title: "T1", URL: "http://x/1"}
+	m, cmd := m.startPlay(tr)
+	_ = cmd // 失败路径无异步 cmd
+	_ = m
+	if len(got) != 1 || got[0] != nil {
+		t.Fatalf("播放失败应通知 nil: %#v", got)
+	}
+}
+
 func TestTabWrapsAround(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	if m.current != pageHome {
 		t.Fatalf("初始 current = %v, want pageHome", m.current)
 	}

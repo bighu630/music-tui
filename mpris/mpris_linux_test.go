@@ -139,7 +139,7 @@ func newTestServer() *Server {
 func TestMetadataFor(t *testing.T) {
 	tr := &model.Track{ID: "abc123", Title: "标题", Artist: "歌手", Duration: 217.5, CoverURL: "http://x/y.jpg"}
 	m := metadataFor(tr)
-	if m["mpris:trackid"] != dbus.MakeVariant(dbus.ObjectPath("/org/mpris/MediaPlayer2/TrackList/abc123")) {
+	if m["mpris:trackid"] != dbus.MakeVariant(trackIDPath("abc123")) {
 		t.Errorf("trackid 错误: %v", m["mpris:trackid"])
 	}
 	if m["mpris:length"] != dbus.MakeVariant(int64(217500000)) {
@@ -175,6 +175,28 @@ func TestMetadataForNil(t *testing.T) {
 	m := metadataFor(nil)
 	if len(m) != 0 {
 		t.Errorf("nil 曲目应返回空字典: %v", m)
+	}
+}
+
+// 真实 YouTube ID 可含 '-'（如 sF80I-TQiW0），而 D-Bus 对象路径元素只允许
+// [A-Za-z0-9_]：trackid 必须编码为合法路径，否则 godbus 封送时直接 panic，
+// 会把整个应用带崩（真实播放中实测复现）。
+func TestMetadataForTrackIDWithDashIsValidObjectPath(t *testing.T) {
+	tr := &model.Track{ID: "sF80I-TQiW0", Title: "t", Duration: 10}
+	m := metadataFor(tr)
+	tid, ok := m["mpris:trackid"].Value().(dbus.ObjectPath)
+	if !ok {
+		t.Fatalf("trackid 类型错误: %T", m["mpris:trackid"].Value())
+	}
+	// godbus 封送 ObjectPath 前用 IsValid 校验，非法直接 panic（见 encoder.go）
+	if !tid.IsValid() {
+		t.Fatalf("trackid %q 不是合法对象路径（godbus 封送会 panic 并带崩应用）", tid)
+	}
+	// SetPosition 校验依赖 currentTrackID 与 Metadata 的 trackid 一致
+	s := newTestServer()
+	s.SetTrack(tr)
+	if got := s.currentTrackID(); got != tid {
+		t.Errorf("currentTrackID = %v, want %v（SetPosition 校验会不一致）", got, tid)
 	}
 }
 
@@ -331,21 +353,21 @@ func TestSetPosition(t *testing.T) {
 	fp := s.p.(*fakePlayer)
 
 	// 无曲目时任何 trackId 都拒绝
-	err := s.SetPosition(dbus.ObjectPath("/org/mpris/MediaPlayer2/TrackList/vid1"), 3e6)
+	err := s.SetPosition(trackIDPath("vid1"), 3e6)
 	if err == nil || err.Name != "org.freedesktop.DBus.Error.InvalidArgs" {
 		t.Fatalf("无曲目应返回 InvalidArgs: %v", err)
 	}
 
 	s.SetTrack(&model.Track{ID: "vid1", Title: "T"})
 	// 匹配 trackId → Seek(3)
-	if err := s.SetPosition(dbus.ObjectPath("/org/mpris/MediaPlayer2/TrackList/vid1"), 3e6); err != nil {
+	if err := s.SetPosition(trackIDPath("vid1"), 3e6); err != nil {
 		t.Fatalf("合法 SetPosition 失败: %v", err)
 	}
 	if !fp.hasCall("Seek,3") {
 		t.Fatal("SetPosition 未转调 Seek(3)")
 	}
 	// 不匹配 trackId → InvalidArgs
-	if err := s.SetPosition(dbus.ObjectPath("/org/mpris/MediaPlayer2/TrackList/other"), 3e6); err == nil ||
+	if err := s.SetPosition(trackIDPath("other"), 3e6); err == nil ||
 		err.Name != "org.freedesktop.DBus.Error.InvalidArgs" {
 		t.Fatalf("不匹配 trackId 应返回 InvalidArgs: %v", err)
 	}

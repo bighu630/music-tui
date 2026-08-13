@@ -7,6 +7,7 @@
 package mpris
 
 import (
+	"encoding/hex"
 	"fmt"
 	"sync"
 
@@ -34,6 +35,13 @@ const seekedThreshold = 2.0
 
 // trackIDPrefix 是 mpris:trackid 对象路径前缀。
 const trackIDPrefix = "/org/mpris/MediaPlayer2/TrackList/"
+
+// trackIDPath 把曲目 ID 编码为合法 D-Bus 对象路径段。YouTube ID 可含 '-'，
+// 而对象路径元素只允许 [A-Za-z0-9_]：godbus 封送非法路径直接 panic，会把
+// 整个应用带崩（真实播放中实测复现）。hex 编码保证唯一、可逆、全合法字符。
+func trackIDPath(id string) dbus.ObjectPath {
+	return dbus.ObjectPath(trackIDPrefix + hex.EncodeToString([]byte(id)))
+}
 
 // offsetUs 是 Seek 的相对偏移量（微秒）。用命名类型而非裸 int64，避免
 // go vet stdmethods 将 Seek 误判为 io.Seeker 实现（D-Bus 线上签名仍为 x）。
@@ -344,7 +352,7 @@ func (s *Server) currentTrackID() dbus.ObjectPath {
 	if s.track == nil {
 		return ""
 	}
-	return dbus.ObjectPath(trackIDPrefix + s.track.ID)
+	return trackIDPath(s.track.ID)
 }
 
 // ---- Server 便捷转发（供单测与调用方直接调用；D-Bus 导出仍走 handler 包装） ----
@@ -406,7 +414,7 @@ func metadataFor(t *model.Track) map[string]dbus.Variant {
 		return map[string]dbus.Variant{}
 	}
 	m := map[string]dbus.Variant{
-		"mpris:trackid": dbus.MakeVariant(dbus.ObjectPath(trackIDPrefix + t.ID)),
+		"mpris:trackid": dbus.MakeVariant(trackIDPath(t.ID)),
 		"mpris:length":  dbus.MakeVariant(int64(t.Duration * 1e6)),
 		"xesam:title":   dbus.MakeVariant(t.Title),
 		"xesam:artist":  dbus.MakeVariant(artistList(t.Artist)),

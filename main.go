@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"music-tui/cover"
 	"music-tui/history"
 	"music-tui/lyrics"
+	"music-tui/mpris"
 	"music-tui/player"
 	"music-tui/search"
 	"music-tui/ui"
@@ -70,6 +72,15 @@ func run() error {
 	}
 	defer mpv.Close()
 
+	// 3.5 MPRIS 服务（仅 Linux 有效；非 Linux 为 no-op 桩）。
+	// 连接/注册失败仅警告，绝不影响播放器主功能。
+	mprisSrv := mpris.NewServer(mpv)
+	if err := mprisSrv.Start(); err != nil {
+		log.Printf("MPRIS 服务不可用（不影响播放器）: %v", err)
+	} else {
+		defer mprisSrv.Close()
+	}
+
 	// 4. 组装服务并启动 TUI（退出后 run 返回，defer 清理 mpv）
 	model := ui.NewModel(
 		mpv,
@@ -77,6 +88,7 @@ func run() error {
 		lyrics.NewClient(userAgent),
 		covers,
 		hist,
+		mprisSrv.SetTrack,
 	)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
