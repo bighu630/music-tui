@@ -181,6 +181,51 @@ func TestChooseBestPrefersClosestDuration(t *testing.T) {
 	}
 }
 
+func TestFetchNoisyTitleFallsBackToCleanedCandidates(t *testing.T) {
+	var searchCalls []string
+	var searchArtists []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/get":
+			w.WriteHeader(http.StatusNotFound)
+		case "/api/search":
+			searchCalls = append(searchCalls, r.URL.Query().Get("track_name"))
+			searchArtists = append(searchArtists, r.URL.Query().Get("artist_name"))
+			if r.URL.Query().Get("track_name") == "七里香" {
+				_ = json.NewEncoder(w).Encode([]lrclibSong{
+					{TrackName: "七里香", ArtistName: "周杰倫", Duration: 300.0, SyncedLyrics: "[00:01.00]七里香歌词"},
+				})
+			} else {
+				_ = json.NewEncoder(w).Encode([]lrclibSong{})
+			}
+		}
+	}))
+	defer server.Close()
+
+	c := NewClient(testUA)
+	c.baseURL = server.URL
+	ly, err := c.Fetch(context.Background(), model.Track{Title: "周杰倫 七里香 歌詞", Artist: "周杰倫", Duration: 300.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	cleanCalled := false
+	for i, tn := range searchCalls {
+		if tn == "七里香" {
+			cleanCalled = true
+			if searchArtists[i] != "" {
+				t.Errorf("七里香 的 search 带 artist_name=%q, want 空（清洗候选不带 artist）", searchArtists[i])
+			}
+		}
+	}
+	if !cleanCalled {
+		t.Errorf("search 未以清洗候选 七里香 调用: %v", searchCalls)
+	}
+	if len(ly.Lines) != 1 || ly.Lines[0].Text != "七里香歌词" {
+		t.Errorf("lyrics = %+v", ly.Lines)
+	}
+}
+
 func TestRetryAfter(t *testing.T) {
 	// 缺省 1 秒
 	if d := retryAfter(&http.Response{}); d != time.Second {

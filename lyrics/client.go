@@ -53,34 +53,55 @@ type lrclibSong struct {
 	SyncedLyrics string  `json:"syncedLyrics"`
 }
 
-// Fetch 获取歌曲歌词：先 /api/get（按 track_name/artist_name/duration，
-// lrclib 内部按 ±2s 精确匹配）精确命中；404 或歌词为空时降级
-// /api/search 并选择时长最接近的匹配。未找到歌词返回 ErrNotFound；
-// 网络或服务端错误原样返回。
+// Fetch 获取歌曲歌词：按 cleanCandidates 生成的候选标题依次查询，命中即停。
+// 候选 0 为原始标题，带 artist 走 /api/get（lrclib 内部按 ±2s 精确匹配）
+// → 404 或空歌词降级 /api/search；派生候选（去噪/切分/CJK 词元）不带
+// artist 直接走 /api/search（lrclib 对 track_name 精确匹配，噪声词会致
+// 0 结果）。未找到歌词返回 ErrNotFound；网络或服务端错误原样返回。
 func (c *Client) Fetch(ctx context.Context, track model.Track) (*Lyrics, error) {
-	var song lrclibSong
-	q := url.Values{}
-	q.Set("track_name", track.Title)
-	q.Set("artist_name", track.Artist)
-	q.Set("duration", fmt.Sprintf("%.2f", track.Duration))
-	base := strings.TrimSuffix(c.baseURL, "/")
-	u := base + "/api/get?" + q.Encode()
-	err := c.do(ctx, u, &song)
-	if err == nil {
-		if ly := songToLyrics(song); ly != nil {
+	for i, cand := range cleanCandidates(track.Title) {
+		ly, err := c.fetchOne(ctx, track, cand, i == 0)
+		if err == nil {
 			return ly, nil
 		}
-		// /api/get 命中但无歌词内容，降级到 search 兜底。
-		err = ErrNotFound
+		if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
 	}
-	if !errors.Is(err, ErrNotFound) {
-		return nil, err
+	return nil, ErrNotFound
+}
+
+// fetchOne 对单个候选标题查询：withArtist=true（仅候选 0）时先 /api/get
+// 精确命中，404 或歌词为空时降级 /api/search 并选择时长最接近的匹配；
+// withArtist=false 时跳过 get 直接 search（不带 artist 参数）。
+// 未命中返回 ErrNotFound，由 Fetch 决定是否尝试下一候选。
+func (c *Client) fetchOne(ctx context.Context, track model.Track, cand string, withArtist bool) (*Lyrics, error) {
+	base := strings.TrimSuffix(c.baseURL, "/")
+	if withArtist {
+		var song lrclibSong
+		q := url.Values{}
+		q.Set("track_name", cand)
+		q.Set("artist_name", track.Artist)
+		q.Set("duration", fmt.Sprintf("%.2f", track.Duration))
+		u := base + "/api/get?" + q.Encode()
+		err := c.do(ctx, u, &song)
+		if err == nil {
+			if ly := songToLyrics(song); ly != nil {
+				return ly, nil
+			}
+			err = ErrNotFound // 200 但歌词为空：视同未命中，降级 search
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
 	}
 
 	var songs []lrclibSong
 	q2 := url.Values{}
-	q2.Set("track_name", track.Title)
-	q2.Set("artist_name", track.Artist)
+	q2.Set("track_name", cand)
+	if withArtist {
+		q2.Set("artist_name", track.Artist)
+	}
 	u2 := base + "/api/search?" + q2.Encode()
 	if err := c.do(ctx, u2, &songs); err != nil {
 		return nil, err
