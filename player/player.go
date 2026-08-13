@@ -28,7 +28,9 @@ type TrackStartedEvent struct {
 
 func (TrackStartedEvent) isEvent() {}
 
-// TrackEndedEvent 当前歌曲播放结束（mpv eof-reached）。
+// TrackEndedEvent 当前歌曲播放结束（mpv end-file reason=eof）。
+// keep-open=no 下 EOF 时 eof-reached 属性立即变 unavailable（data=null），
+// 可靠信号是 end-file 事件，故结束信号统一以此为准。
 type TrackEndedEvent struct{}
 
 func (TrackEndedEvent) isEvent() {}

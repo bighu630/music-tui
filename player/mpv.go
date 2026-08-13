@@ -15,10 +15,9 @@ import (
 
 // 观察属性 ID：mpv observe_property 的第一个参数。
 const (
-	obsTimePos    int64 = 1
-	obsDuration   int64 = 2
-	obsPause      int64 = 3
-	obsEOFReached int64 = 4
+	obsTimePos  int64 = 1
+	obsDuration int64 = 2
+	obsPause    int64 = 3
 )
 
 // MpvPlayer 通过 JSON IPC 控制 mpv 进程，并把 mpv 事件转换为
@@ -58,7 +57,7 @@ func (p *MpvPlayer) Start() error {
 		"--idle=yes",
 		"--no-video",           // 纯音频，避免 mpv 抢占终端
 		"--no-terminal",        // 禁用 mpv 的终端控制，避免与 TUI 抢键盘
-		"--keep-open=no",       // 播完即结束，保证 eof-reached 事件
+		"--keep-open=no",       // 播完即退出，可靠触发 end-file reason=eof
 		"--no-resume-playback", // 不写恢复播放状态文件
 		"--input-ipc-server=" + p.socketPath,
 	}
@@ -72,10 +71,16 @@ func (p *MpvPlayer) Start() error {
 
 	if err := p.waitForSocket(5 * time.Second); err != nil {
 		_ = p.killProcess()
+		p.cmd = nil
+		p.waitCh = nil
+		p.conn = nil
 		return err
 	}
 	if err := p.connect(); err != nil {
 		_ = p.killProcess()
+		p.cmd = nil
+		p.waitCh = nil
+		p.conn = nil
 		return err
 	}
 	return nil
@@ -92,6 +97,9 @@ func (p *MpvPlayer) waitForSocket(timeout time.Duration) error {
 		}
 		select {
 		case werr := <-p.waitCh:
+			if werr == nil {
+				return errors.New("mpv 进程提前退出（退出码 0）")
+			}
 			return fmt.Errorf("mpv 进程提前退出: %w", werr)
 		case <-deadline:
 			return fmt.Errorf("mpv IPC socket 超时未就绪: %s", p.socketPath)
@@ -116,7 +124,9 @@ func (p *MpvPlayer) connect() error {
 	return nil
 }
 
-// observeProperties 注册进度/时长/暂停/结束四个属性的观察。
+// observeProperties 注册进度/时长/暂停三个属性的观察。
+// 不观察 eof-reached：keep-open=no 下 EOF 瞬间属性即变 unavailable
+// （data=null），结束信号统一用 end-file reason=eof。
 func (p *MpvPlayer) observeProperties() error {
 	props := []struct {
 		id   int64
@@ -125,7 +135,6 @@ func (p *MpvPlayer) observeProperties() error {
 		{obsTimePos, "time-pos"},
 		{obsDuration, "duration"},
 		{obsPause, "pause"},
-		{obsEOFReached, "eof-reached"},
 	}
 	for _, prop := range props {
 		if _, err := p.conn.Call("observe_property", prop.id, prop.name); err != nil {
@@ -152,9 +161,25 @@ func (p *MpvPlayer) pump() {
 		case "property-change":
 			p.handlePropertyChange(ev)
 		case "file-loaded":
-			p.emit(TrackStartedEvent{Duration: p.getDuration()})
+			// 真实 mpv 中 duration property-change 晚于 file-loaded 到达，
+			// 此时同步 Get 兜底。Get 响应走 mpvipc checkResult 路由（不经过
+			// 事件通道），pump 内同步调用不会死锁。
+			d := p.getDuration()
+			if d <= 0 {
+				if v, err := p.conn.Get("duration"); err == nil {
+					if f, ok := toFloat64(v); ok {
+						d = f
+					}
+				}
+			}
+			p.emit(TrackStartedEvent{Duration: d})
 		case "end-file":
-			if ev.Reason == "error" {
+			// 结束信号来源：keep-open=no 下 EOF 时 eof-reached 属性立即变
+			// unavailable（data=null，toBool 失败），可靠信号是 end-file。
+			switch ev.Reason {
+			case "eof":
+				p.emit(TrackEndedEvent{})
+			case "error":
 				p.emit(ErrorEvent{Err: fmt.Errorf("mpv 播放出错（end-file reason=error）")})
 			}
 		}
@@ -173,10 +198,11 @@ func (p *MpvPlayer) handlePropertyChange(ev *mpvipc.Event) {
 		if !ok {
 			return
 		}
-		if d := p.getDuration(); d > 0 && pos > d {
+		d := p.getDuration() // 取一次局部变量：过滤与 emit 用同一值
+		if d > 0 && pos > d {
 			return // 异常进度值（Position > Duration）过滤丢弃
 		}
-		p.emit(ProgressEvent{Position: pos, Duration: p.getDuration()})
+		p.emit(ProgressEvent{Position: pos, Duration: d})
 	case obsDuration:
 		if d, ok := toFloat64(ev.Data); ok {
 			p.setDuration(d)
@@ -184,10 +210,6 @@ func (p *MpvPlayer) handlePropertyChange(ev *mpvipc.Event) {
 	case obsPause:
 		if paused, ok := toBool(ev.Data); ok {
 			p.emit(StateEvent{Playing: !paused})
-		}
-	case obsEOFReached:
-		if eof, ok := toBool(ev.Data); ok && eof {
-			p.emit(TrackEndedEvent{})
 		}
 	}
 }
@@ -206,16 +228,31 @@ func (p *MpvPlayer) Play(url string) error {
 
 // Pause 暂停播放。
 func (p *MpvPlayer) Pause() error {
-	return p.conn.Set("pause", true)
+	if p.conn == nil || p.conn.IsClosed() {
+		return errors.New("mpv 未连接")
+	}
+	if err := p.conn.Set("pause", true); err != nil {
+		return fmt.Errorf("pause: %w", err)
+	}
+	return nil
 }
 
 // Resume 继续播放。
 func (p *MpvPlayer) Resume() error {
-	return p.conn.Set("pause", false)
+	if p.conn == nil || p.conn.IsClosed() {
+		return errors.New("mpv 未连接")
+	}
+	if err := p.conn.Set("pause", false); err != nil {
+		return fmt.Errorf("resume: %w", err)
+	}
+	return nil
 }
 
 // Seek 跳转到指定秒数（绝对位置）。
 func (p *MpvPlayer) Seek(seconds float64) error {
+	if p.conn == nil || p.conn.IsClosed() {
+		return errors.New("mpv 未连接")
+	}
 	if _, err := p.conn.Call("seek", seconds, "absolute"); err != nil {
 		return fmt.Errorf("seek: %w", err)
 	}
@@ -238,11 +275,13 @@ func (p *MpvPlayer) emit(ev Event) {
 // Close 退出 mpv 并清理 socket 文件；可重复调用。
 // 注意：mpv 对 quit 命令可能不回复就退出，Call 可能阻塞，
 // 因此放到 goroutine 里加超时，超时后直接杀掉进程。
+// mpvipc 关闭连接时不会通知阻塞中的请求（waitingRequests），超时后该
+// goroutine 可能永久阻塞 —— 每次 Close 泄漏一个 goroutine；v1 中 Close
+// 仅在退出时调用一次，可接受。
 func (p *MpvPlayer) Close() error {
-	if p.closed.Load() {
+	if !p.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	p.closed.Store(true)
 	if p.conn != nil && !p.conn.IsClosed() {
 		done := make(chan struct{})
 		go func() {

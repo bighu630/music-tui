@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"encoding/json"
 	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +21,7 @@ type fakeMpvServer struct {
 	conn     net.Conn
 	commands [][]interface{} // 收到的所有命令（已解码）
 	pushCh   chan string     // 待推送的事件行
+	duration float64         // get_property("duration") 的返回值（可配置）
 }
 
 func newFakeMpvServer(t *testing.T) *fakeMpvServer {
@@ -28,7 +31,7 @@ func newFakeMpvServer(t *testing.T) *fakeMpvServer {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	f := &fakeMpvServer{t: t, ln: ln, pushCh: make(chan string, 32)}
+	f := &fakeMpvServer{t: t, ln: ln, pushCh: make(chan string, 32), duration: 217.0}
 	go f.acceptLoop()
 	t.Cleanup(func() { _ = f.Close() })
 	return f
@@ -66,7 +69,9 @@ func (f *fakeMpvServer) readLoop(conn net.Conn) {
 		var data interface{}
 		if len(req.Command) > 0 && req.Command[0] == "get_property" {
 			if prop, ok := req.Command[1].(string); ok && prop == "duration" {
-				data = 217.0
+				f.mu.Lock()
+				data = f.duration
+				f.mu.Unlock()
 			} else {
 				status = "property unavailable"
 			}
@@ -182,16 +187,15 @@ func TestMpvPlayerObservesProperties(t *testing.T) {
 	fake := newFakeMpvServer(t)
 	p := connectTestPlayer(t, fake)
 
-	// connect() 成功返回即意味着 4 条 observe_property 均已收到响应
+	// connect() 成功返回即意味着 3 条 observe_property 均已收到响应
 	cmds := fake.recordedCommands()
-	if len(cmds) != 4 {
-		t.Fatalf("commands = %d, want 4", len(cmds))
+	if len(cmds) != 3 {
+		t.Fatalf("commands = %d, want 3", len(cmds))
 	}
 	want := [][]interface{}{
 		{"observe_property", float64(1), "time-pos"},
 		{"observe_property", float64(2), "duration"},
 		{"observe_property", float64(3), "pause"},
-		{"observe_property", float64(4), "eof-reached"},
 	}
 	for i := range want {
 		for j := range want[i] {
@@ -260,10 +264,68 @@ func TestMpvPlayerTrackLifecycleEvents(t *testing.T) {
 		t.Errorf("want TrackStartedEvent{Duration:217}, got %#v", ev)
 	}
 
-	fake.pushEvent(`{"event":"property-change","id":4,"name":"eof-reached","data":true}`)
+	// 播放结束信号：end-file reason=eof（keep-open=no 下 eof-reached 属性
+	// EOF 瞬间即变 unavailable，data=null 不可用，见 TestMpvPlayerEofReachedDoesNotEmitTrackEnded）
+	fake.pushEvent(`{"event":"end-file","reason":"eof"}`)
 	ev = waitEvent(t, p, 2*time.Second)
 	if _, ok := ev.(TrackEndedEvent); !ok {
 		t.Errorf("want TrackEndedEvent, got %#v", ev)
+	}
+}
+
+// duration property-change 晚于 file-loaded 到达时，pump 应通过
+// get_property("duration") 兜底，保证 TrackStartedEvent.Duration 非零。
+func TestMpvPlayerTrackStartedDurationFallsBackToGet(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	fake.duration = 333.0 // 配置兜底值，验证 get_property 分支可配置
+	p := connectTestPlayer(t, fake)
+
+	fake.pushEvent(`{"event":"file-loaded"}`)
+	ev := waitEvent(t, p, 2*time.Second)
+	started, ok := ev.(TrackStartedEvent)
+	if !ok {
+		t.Fatalf("want TrackStartedEvent, got %#v", ev)
+	}
+	if started.Duration != 333.0 {
+		t.Errorf("want Duration=333（get_property 兜底）, got %v", started.Duration)
+	}
+
+	// 确认兜底确实发出了 get_property duration 请求
+	cmds := fake.recordedCommands()
+	found := false
+	for _, c := range cmds {
+		if len(c) == 2 && c[0] == "get_property" && c[1] == "duration" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("应发出 get_property duration 兜底请求, commands = %v", cmds)
+	}
+
+	// duration property-change 随后正常到达：不产生新事件，仅更新缓存
+	fake.pushEvent(`{"event":"property-change","id":2,"name":"duration","data":217.0}`)
+	fake.pushEvent(`{"event":"property-change","id":1,"name":"time-pos","data":5.0}`)
+	ev = waitEvent(t, p, 2*time.Second)
+	progress, ok := ev.(ProgressEvent)
+	if !ok {
+		t.Fatalf("want ProgressEvent, got %#v", ev)
+	}
+	if progress.Position != 5.0 || progress.Duration != 217.0 {
+		t.Errorf("progress = %+v, want {5 217}", progress)
+	}
+}
+
+// 语义守护：eof-reached=true 不再产生 TrackEndedEvent（结束信号
+// 统一以 end-file reason=eof 为准，避免 keep-open=yes 下与 end-file 重复）。
+func TestMpvPlayerEofReachedDoesNotEmitTrackEnded(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	fake.pushEvent(`{"event":"property-change","id":4,"name":"eof-reached","data":true}`)
+	select {
+	case ev := <-p.Events():
+		t.Fatalf("eof-reached=true 不应产生 TrackEndedEvent, got %#v", ev)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
@@ -307,7 +369,7 @@ func TestMpvPlayerCommands(t *testing.T) {
 	}
 
 	cmds := fake.recordedCommands()
-	got := cmds[4:] // 前 4 条是 observe_property
+	got := cmds[3:] // 前 3 条是 observe_property
 	want := [][]interface{}{
 		{"loadfile", "https://www.youtube.com/watch?v=abc"},
 		{"set_property", "pause", true},
@@ -320,6 +382,73 @@ func TestMpvPlayerCommands(t *testing.T) {
 				t.Fatalf("cmd[%d] = %v, want %v", i, got[i], want[i])
 			}
 		}
+	}
+}
+
+// 未连接（未 Start/connect）时所有命令都应报错而非 panic。
+func TestMpvPlayerCommandsFailWhenNotConnected(t *testing.T) {
+	p := NewMpvPlayer("", "")
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"Play", func() error { return p.Play("https://example.com/a.mp3") }},
+		{"Pause", func() error { return p.Pause() }},
+		{"Resume", func() error { return p.Resume() }},
+		{"Seek", func() error { return p.Seek(10) }},
+	} {
+		if err := tc.call(); err == nil {
+			t.Errorf("%s: 未连接时应报错", tc.name)
+		}
+	}
+}
+
+// Start 失败（进程提前退出）后不残留脏状态：再次 Start 应重新走启动流程，
+// 而不是报"播放器已在运行"；错误信息不应含 %!w 格式化残留。
+func TestMpvPlayerStartFailureLeavesNoDirtyState(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-mpv.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := NewMpvPlayer(script, filepath.Join(dir, "mpv.sock"))
+
+	if err := p.Start(); err == nil {
+		t.Fatal("进程立即退出（不建 socket）时 Start 应报错")
+	} else if strings.Contains(err.Error(), "%!w") {
+		t.Fatalf("错误信息不应含格式化残留: %v", err)
+	}
+	if p.cmd != nil || p.waitCh != nil || p.conn != nil {
+		t.Fatalf("Start 失败后残留脏状态: cmd=%v waitCh=%v conn=%v",
+			p.cmd != nil, p.waitCh != nil, p.conn != nil)
+	}
+	// 再次 Start 不应报"播放器已在运行"，应重新执行启动流程并再次失败
+	if err := p.Start(); err == nil {
+		t.Fatal("再次 Start 应仍失败（脚本仍立即退出）")
+	}
+}
+
+// Close 后 pump 停止分发：再推事件不应收到任何 Event。
+func TestMpvPlayerNoEventsAfterClose(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	// 前置：确认事件链路正常
+	fake.pushEvent(`{"event":"end-file","reason":"eof"}`)
+	if _, ok := waitEvent(t, p, 2*time.Second).(TrackEndedEvent); !ok {
+		t.Fatalf("前置事件异常：want TrackEndedEvent")
+	}
+
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fake.pushEvent(`{"event":"end-file","reason":"eof"}`)
+	fake.pushEvent(`{"event":"property-change","id":2,"name":"duration","data":217.0}`)
+	select {
+	case ev := <-p.Events():
+		t.Fatalf("Close 后不应再收到事件, got %#v", ev)
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 
