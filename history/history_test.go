@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,6 +110,82 @@ func TestClear(t *testing.T) {
 	}
 	if got := len(s.Entries()); got != 0 {
 		t.Fatalf("len = %d, want 0", got)
+	}
+	// 写盘应为空数组 [] 而非 null
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "[]" {
+		t.Fatalf("文件内容 = %q, want %q（避免 null）", got, "[]")
+	}
+}
+
+func TestConcurrentAccess(t *testing.T) {
+	s := newTestStore(t)
+	const workers = 4
+	const perWorker = 30
+	var wg sync.WaitGroup
+	errCh := make(chan error, workers*2)
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				id := fmt.Sprintf("g%d-%02d", w, i)
+				if err := s.Add(track(id)); err != nil {
+					errCh <- fmt.Errorf("Add(%s): %w", id, err)
+					return
+				}
+				// 循环读 Entries：并发读不破坏不变量
+				if entries := s.Entries(); len(entries) > MaxEntries {
+					errCh <- fmt.Errorf("Entries len = %d, want <= %d", len(entries), MaxEntries)
+					return
+				}
+				// 穿插 Remove 不存在的记录（幂等，验证并发删除安全）
+				if i%10 == 0 {
+					if err := s.Remove("ghost-"+id, "youtube"); err != nil {
+						errCh <- fmt.Errorf("Remove(%s): %w", id, err)
+						return
+					}
+				}
+			}
+			// 删除自己添加的部分记录（存在性删除）
+			for i := 0; i < perWorker; i += 3 {
+				id := fmt.Sprintf("g%d-%02d", w, i)
+				if err := s.Remove(id, "youtube"); err != nil {
+					errCh <- fmt.Errorf("Remove(%s): %w", id, err)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+
+	entries := s.Entries()
+	if len(entries) > MaxEntries {
+		t.Fatalf("len = %d, want <= %d", len(entries), MaxEntries)
+	}
+	seen := make(map[string]bool)
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Track.ID, "g") {
+			t.Errorf("意外 ID: %q", e.Track.ID)
+		}
+		if seen[e.Track.ID] {
+			t.Errorf("重复 ID: %q", e.Track.ID)
+		}
+		seen[e.Track.ID] = true
+	}
+	// 已删除的记录不应残留
+	for i := 0; i < perWorker; i += 3 {
+		id := fmt.Sprintf("g%d-%02d", workers-1, i)
+		if seen[id] {
+			t.Errorf("已删除的记录仍存在: %s", id)
+		}
 	}
 }
 

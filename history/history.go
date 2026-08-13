@@ -74,11 +74,11 @@ func (s *Store) Remove(id, source string) error {
 	return s.saveLocked()
 }
 
-// Clear 清空全部历史。
+// Clear 清空全部历史（写盘为空数组 []，而非 null）。
 func (s *Store) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries = nil
+	s.entries = []Entry{}
 	return s.saveLocked()
 }
 
@@ -108,11 +108,14 @@ func (s *Store) removeLocked(id, source string) bool {
 func (s *Store) saveLocked() error {
 	data, err := json.MarshalIndent(s.entries, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("序列化历史: %w", err)
 	}
 	tmp := s.path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
+		return fmt.Errorf("写入历史文件: %w", err)
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		return fmt.Errorf("写入历史文件: %w", err)
+	}
+	return nil
 }
