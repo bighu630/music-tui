@@ -42,6 +42,18 @@ type ErrorEvent struct {
 
 func (ErrorEvent) isEvent() {}
 
+// LoadFailedError 表示文件加载/播放失败（mpv end-file reason=error）。
+// FileError 是 mpv IPC file_error 字段的诊断文本（如 "no audio or video data played"），
+// 旧版 mpv 可能缺失该字段（为空串）。
+type LoadFailedError struct{ FileError string }
+
+func (e *LoadFailedError) Error() string {
+	if e.FileError != "" {
+		return "mpv 播放出错（end-file reason=error）: " + e.FileError
+	}
+	return "mpv 播放出错（end-file reason=error）"
+}
+
 // Player 是播放器接口，ui 层只依赖此接口。
 type Player interface {
 	// Play 开始播放指定 URL，替换当前歌曲。

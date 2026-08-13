@@ -3,7 +3,10 @@ package ui
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -100,6 +103,11 @@ type resumeInfo struct {
 // saveInterval 播放中自动保存会话的节流间隔。
 const saveInterval = 5 * time.Second
 
+// 播放失败自动重试：取流失败（如 YouTube 403 风控）多为瞬态错误，
+// 重试 = 重新 loadfile = 重新取流拿新签名 URL，大概率恢复。
+const maxPlayRetries = 2           // 每首曲目最多自动重试次数
+var retryBackoff = 2 * time.Second // 重试间隔（包级变量：测试可调小以缩短等待）
+
 // Model 顶层模型：持有共享播放状态、播放队列与四个页面，负责全局按键、
 // 页面切换、服务调用与结果路由。
 type Model struct {
@@ -118,6 +126,10 @@ type Model struct {
 	// 但队列指针已顺延。下次 TrackEnded 应播放顺延曲目（不推进），
 	// 避免跳过顺延曲目（回归：TestDeleteCurrentThenTrackEndedPlaysSlidTrack）。
 	queueSkip bool
+
+	// 播放失败自动重试状态
+	retryCount int // 当前曲目已自动重试次数（新曲加载成功/结束/手动播放时重置）
+	playGen    int // 播放代际计数器：每次 beginPlay 自增；过期重试消息（用户已换曲）丢弃
 
 	resume   *resumeInfo // 续播恢复信息（NewModel 填充，Init 消费；nil = 无会话）
 	lastSave time.Time   // 最近一次自动保存会话的时刻（节流）
@@ -221,6 +233,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.queue.JumpTo(msg.index) {
 			return m, nil
 		}
+		m.retryCount = 0    // 手动跳转播放：全新重试预算
 		m.queueSkip = false // 跳转即重新对齐，解除删除解耦标记
 		m.current = pageHome
 		return m.playQueueTrack()
@@ -262,6 +275,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastError = msg.err.Error()
 		}
 		return m, nil
+
+	case retryPlayMsg:
+		// 取流失败自动重试（retryPlayCmd 延迟触发）：代际不匹配说明用户
+		// 已手动换曲/重播，丢弃过期重试；匹配则重走播放流程（状态一致性）。
+		if msg.gen != m.playGen {
+			return m, waitForPlayerEvents(m.player)
+		}
+		m2, cmd := m.playQueueTrack()
+		return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
 
 	case resumeResultMsg:
 		if msg.err != nil {
@@ -425,6 +447,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.state.Playing = ev.Playing
 		m.home = m.home.syncState(m.state)
 	case player.TrackStartedEvent:
+		m.retryCount = 0 // 新曲加载成功，重试预算重置
 		m.ended = false
 		// 仅在拿到真实时长时覆盖：Duration=0 表示 observe 与 Get 兜底
 		// 均失败（直播/特殊流），此时保留搜索元数据提供的时长，避免被抹零。
@@ -433,6 +456,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		}
 		m.home = m.home.syncState(m.state)
 	case player.TrackEndedEvent:
+		m.retryCount = 0 // 下一首开始，重试预算重置
 		// 自动连播。解耦标记（删除当前曲）存在时：播放顺延曲目（当前位），
 		// 无当前位则从头，队列为空则停止；否则正常推进到下一首。
 		// 两种情况均不切换当前页面。
@@ -451,6 +475,41 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.stopAfterEnd()
 	case player.ErrorEvent:
+		// 取流失败（LoadFailedError）多为瞬态错误（如 YouTube 403 风控）：
+		// 预算内自动重试；耗尽后队列有下一首则跳过继续连播，否则停止。
+		// 其他错误（连接断开/重连失败）保持原有行为，不自动重试。
+		var le *player.LoadFailedError
+		if errors.As(ev.Err, &le) {
+			if m.retryCount < maxPlayRetries {
+				m.retryCount++
+				hint := loadFailureHint(le.FileError)
+				m.lastError = fmt.Sprintf("播放失败：%s，正在自动重试（%d/%d）…", hint, m.retryCount, maxPlayRetries)
+				m.state.Playing = false
+				m.home = m.home.syncState(m.state)
+				return m, tea.Batch(waitForPlayerEvents(m.player), retryPlayCmd(m.playGen))
+			}
+			hint := loadFailureHint(le.FileError)
+			if tr, ok := m.queue.Next(); ok {
+				// 重试耗尽：跳过失败曲目继续连播（横幅保留告知用户哪首失败）。
+				// 失败曲目标题须在 beginPlay 前捕获（beginPlay 会替换 state.Track）。
+				failed := m.state.Track
+				m.retryCount = 0
+				m2, cmd := m.beginPlay(tr)
+				failedTitle := "当前歌曲"
+				if failed != nil {
+					failedTitle = failed.Title
+				}
+				m2.lastError = fmt.Sprintf("「%s」播放失败：%s，已重试 %d 次，跳过继续播放", failedTitle, hint, maxPlayRetries)
+				return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
+			}
+			// 单曲重试耗尽：停止播放，等待用户操作（空格重播同曲）
+			m.ended = true
+			m.lastError = fmt.Sprintf("播放失败：%s，已重试 %d 次。请稍后重试或更换歌曲", hint, maxPlayRetries)
+			m.state.Playing = false
+			m.home = m.home.syncState(m.state)
+			return m, tea.Batch(cmds...)
+		}
+		m.retryCount = 0
 		m.ended = true
 		m.lastError = ev.Err.Error()
 		m.state.Playing = false
@@ -470,6 +529,35 @@ func waitForPlayerEvents(p player.Player) tea.Cmd {
 	}
 }
 
+// retryPlayMsg 触发一次自动重试（经 update 重新走 playQueueTrack，保证状态一致性）。
+type retryPlayMsg struct{ gen int }
+
+// retryPlayCmd 延迟 retryBackoff 后发送重试消息；期间用户换了歌（gen 不匹配）则丢弃。
+func retryPlayCmd(gen int) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(retryBackoff)
+		return retryPlayMsg{gen: gen}
+	}
+}
+
+// loadFailureHint 把 mpv 的 file_error 诊断文本映射为可操作的中文提示。
+func loadFailureHint(fileErr string) string {
+	switch {
+	case strings.Contains(fileErr, "no audio or video data played"):
+		return "YouTube 未返回可播放音轨（可能被风控、视频不可用或地区限制）"
+	case strings.Contains(fileErr, "403"):
+		return "YouTube 拒绝访问（风控/限流），可稍后重试"
+	case strings.Contains(fileErr, "Couldn't resolve") || strings.Contains(fileErr, "resolve"):
+		return "网络解析失败，请检查网络连接"
+	case strings.Contains(fileErr, "unavailable"):
+		return "视频不可用"
+	case fileErr == "":
+		return "mpv 无法播放该地址"
+	default:
+		return "播放出错：" + fileErr
+	}
+}
+
 // stopAfterEnd 播放结束且无下一首：停在当前位置等待用户操作（空格重播同曲）。
 func (m Model) stopAfterEnd() (Model, tea.Cmd) {
 	m.ended = true
@@ -484,6 +572,7 @@ func (m Model) stopAfterEnd() (Model, tea.Cmd) {
 // 状态重置为空回到"未在播放"空态 + 错误横幅。
 func (m Model) startPlay(track model.Track) (Model, tea.Cmd) {
 	m.queue.Replace(track)
+	m.retryCount = 0    // 手动播放：全新重试预算
 	m.queueSkip = false // 替换即重新对齐，解除删除解耦标记
 	m.current = pageHome
 	return m.playQueueTrack()
@@ -502,7 +591,11 @@ func (m Model) playQueueTrack() (Model, tea.Cmd) {
 // root_test 的 TestPlayFlow 在 update 返回后立即断言 playCount，故必须同步）、
 // 刷新队列展示；成功时并行触发 歌词/封面/历史 三个异步 cmd，
 // Play 失败时跳过全部异步 cmd，状态重置为空回到"未在播放"空态 + 错误横幅。
+// 注意：不重置 retryCount——自动重试也走本路径，重置会让重试预算
+// 永不耗尽（回归：TestLoadFailRetriesExhaustedSkipsInQueue/StopsSingle）；
+// 预算在 TrackStarted/TrackEnded/手动播放入口重置。
 func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
+	m.playGen++ // 播放代际递增：使在途重试消息过期（用户换曲后不再重试旧曲）
 	m.ended = false
 	m.state = model.PlaybackState{Track: &track, Playing: true, Duration: track.Duration}
 	m.lastError = ""

@@ -613,3 +613,198 @@ func TestTabWrapsAround(t *testing.T) {
 		t.Errorf("tab 循环后 current = %v, want pageHome", m.current)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 取流失败自动重试（YouTube 403 风控等瞬态错误：重试=重新 loadfile=重新取流）
+// ---------------------------------------------------------------------------
+
+// 执行重试 batch：cmd 是 tea.Batch(waitForPlayerEvents, retryPlayCmd)。
+// waitForPlayerEvents 阻塞在播放器事件通道，测试需先预推一个普通事件让它
+// 立即返回，随后 retryPlayCmd 在 retryBackoff 后发出 retryPlayMsg，
+// 由 update 的 tea.BatchMsg 分支回灌（与现有测试驱动方式一致）。
+func execRetryBatch(m Model, cmd tea.Cmd, fp *fakePlayer) Model {
+	fp.events <- player.ProgressEvent{Position: 0, Duration: 200}
+	m2, _ := update(m, cmd().(tea.BatchMsg))
+	return m2
+}
+
+// 取流失败在重试预算内：自动重试重新 loadfile，成功（TrackStartedEvent）
+// 后恢复播放状态并重置预算。
+func TestLoadFailRetriesThenSucceeds(t *testing.T) {
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	defer func() { retryBackoff = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	if fp.playCount() != 1 {
+		t.Fatalf("初始 playCount = %d, want 1", fp.playCount())
+	}
+
+	// 第 1 次取流失败：调度自动重试，等待期间暂停态 + 横幅提示
+	m, cmd = update(m, playerEventMsg{ev: player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}})
+	if cmd == nil {
+		t.Fatal("取流失败后应调度重试 cmd")
+	}
+	if m.state.Playing {
+		t.Error("重试等待期间 Playing 应为 false")
+	}
+	if !strings.Contains(m.lastError, "正在自动重试（1/2）") {
+		t.Errorf("lastError = %q, want 含“正在自动重试（1/2）”", m.lastError)
+	}
+
+	// 重试触发：重新 loadfile（playCount=2），恢复播放态
+	m = execRetryBatch(m, cmd, fp)
+	if fp.playCount() != 2 {
+		t.Fatalf("重试后 playCount = %d, want 2", fp.playCount())
+	}
+	if fp.lastPlayed() != testTrack("t1").URL {
+		t.Errorf("重试应重载同一曲目: %q", fp.lastPlayed())
+	}
+	if !m.state.Playing {
+		t.Error("重试 loadfile 后 Playing 应为 true")
+	}
+
+	// 重试成功（file-loaded）：重试预算重置
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	if m.retryCount != 0 {
+		t.Errorf("加载成功后 retryCount = %d, want 0", m.retryCount)
+	}
+}
+
+// 队列连播时某曲重试耗尽：跳过失败曲目，继续播放下一首；
+// 横幅保留告知用户哪首失败（不中断整个连播）。
+func TestLoadFailRetriesExhaustedSkipsInQueue(t *testing.T) {
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	defer func() { retryBackoff = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m.queue.Add(testTrack("t2")) // 队列：[t1, t2]
+
+	loadErr := player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}
+	// 前两次失败各触发一次自动重试（重载第 1 首）
+	for i := 0; i < 2; i++ {
+		m, cmd = update(m, playerEventMsg{ev: loadErr})
+		m = execRetryBatch(m, cmd, fp)
+	}
+	if fp.playCount() != 3 {
+		t.Fatalf("两次重试后 playCount = %d, want 3", fp.playCount())
+	}
+	if fp.lastPlayed() != testTrack("t1").URL {
+		t.Errorf("重试应仍重载第 1 首: %q", fp.lastPlayed())
+	}
+
+	// 第 3 次失败：重试耗尽 → 跳过第 1 首，播放第 2 首
+	m, _ = update(m, playerEventMsg{ev: loadErr})
+	if fp.lastPlayed() != testTrack("t2").URL {
+		t.Errorf("重试耗尽应播放第 2 首: got %q, want %q", fp.lastPlayed(), testTrack("t2").URL)
+	}
+	if m.state.Track == nil || m.state.Track.ID != "t2" {
+		t.Errorf("state.Track = %+v, want t2", m.state.Track)
+	}
+	if !m.state.Playing {
+		t.Error("跳过并播放下一首后 Playing 应为 true")
+	}
+	if !strings.Contains(m.lastError, "跳过") || !strings.Contains(m.lastError, "测试歌曲 t1") {
+		t.Errorf("lastError = %q, want 含“跳过”与第 1 首标题", m.lastError)
+	}
+}
+
+// 单曲（无下一首）重试耗尽：停止播放，不再重试，横幅提示手动重试。
+func TestLoadFailRetriesExhaustedStopsSingle(t *testing.T) {
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	defer func() { retryBackoff = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	loadErr := player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}
+	for i := 0; i < 2; i++ {
+		m, cmd = update(m, playerEventMsg{ev: loadErr})
+		m = execRetryBatch(m, cmd, fp)
+	}
+	if fp.playCount() != 3 {
+		t.Fatalf("两次重试后 playCount = %d, want 3", fp.playCount())
+	}
+
+	// 第 3 次失败：重试耗尽且队列无下一首 → 停止，不再调度任何播放
+	m, cmd = update(m, playerEventMsg{ev: loadErr})
+	if fp.playCount() != 3 {
+		t.Errorf("重试耗尽后不应再 Play: playCount = %d, want 3", fp.playCount())
+	}
+	if m.state.Playing {
+		t.Error("重试耗尽停止后 Playing 应为 false")
+	}
+	if !m.ended {
+		t.Error("重试耗尽停止后 ended 应为 true")
+	}
+	if !strings.Contains(m.lastError, "已重试 2 次") || !strings.Contains(m.lastError, "请稍后重试或更换歌曲") {
+		t.Errorf("lastError = %q, want 含“已重试 2 次”与“请稍后重试或更换歌曲”", m.lastError)
+	}
+}
+
+// 重试等待期间用户手动换曲：代际不匹配，过期重试必须丢弃
+// （不得对旧曲重复播放）。
+func TestStaleRetryDroppedOnNewPlay(t *testing.T) {
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	defer func() { retryBackoff = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	// 第 1 首失败：调度重试（携带当前代际）
+	m, cmd = update(m, playerEventMsg{ev: player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}})
+	if cmd == nil {
+		t.Fatal("应调度重试 cmd")
+	}
+
+	// 重试触发前用户手动播放另一首（代际递增）
+	m, _ = m.startPlay(testTrack("t2"))
+	if fp.playCount() != 2 {
+		t.Fatalf("换歌后 playCount = %d, want 2", fp.playCount())
+	}
+
+	// 执行旧 batch（含过期重试）：必须被丢弃，不得再播放旧曲
+	m = execRetryBatch(m, cmd, fp)
+	if fp.playCount() != 2 {
+		t.Errorf("过期重试不应触发播放: playCount = %d, want 2", fp.playCount())
+	}
+	if fp.lastPlayed() != testTrack("t2").URL {
+		t.Errorf("播放的应是新歌 t2: %q", fp.lastPlayed())
+	}
+	if !m.state.Playing {
+		t.Error("换歌后 Playing 应为 true")
+	}
+}
+
+// loadFailureHint 把 mpv file_error 诊断文本映射为可操作的中文提示。
+func TestLoadFailHint(t *testing.T) {
+	cases := []struct {
+		fileErr string
+		want    string
+	}{
+		{"no audio or video data played", "YouTube 未返回可播放音轨"},
+		{"403 Forbidden", "YouTube 拒绝访问"},
+		{"Couldn't resolve host name", "网络解析失败"},
+		{"This video is unavailable", "视频不可用"},
+		{"", "mpv 无法播放该地址"},
+		{"some weird error", "播放出错：some weird error"},
+	}
+	for _, tc := range cases {
+		if got := loadFailureHint(tc.fileErr); !strings.Contains(got, tc.want) {
+			t.Errorf("loadFailureHint(%q) = %q, want 含 %q", tc.fileErr, got, tc.want)
+		}
+	}
+}

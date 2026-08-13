@@ -3,6 +3,7 @@ package player
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -407,6 +408,46 @@ func TestMpvPlayerErrorOnEndFileError(t *testing.T) {
 	}
 }
 
+// end-file reason=error 时，ErrorEvent 应携带 mpv IPC file_error 字段的诊断
+// 文本（如 "no audio or video data played"），供 UI 层给出可操作的中文提示。
+func TestMpvPlayerLoadFailedErrorCarriesFileError(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	fake.pushEvent(`{"event":"end-file","reason":"error","file_error":"no audio or video data played"}`)
+	ev := waitErrorEvent(t, p, 2*time.Second)
+	var le *LoadFailedError
+	if !errors.As(ev.Err, &le) {
+		t.Fatalf("want *LoadFailedError, got %T (%v)", ev.Err, ev.Err)
+	}
+	if le.FileError != "no audio or video data played" {
+		t.Errorf("FileError = %q, want %q", le.FileError, "no audio or video data played")
+	}
+	if !strings.Contains(ev.Err.Error(), "mpv 播放出错（end-file reason=error）") {
+		t.Errorf("错误消息应保留原前缀: %v", ev.Err)
+	}
+}
+
+// 旧版 mpv 可能缺失 file_error 字段：此时 FileError 为空串，
+// 错误消息与原有版本完全一致（向后兼容）。
+func TestMpvPlayerLoadFailedErrorEmptyFileError(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	fake.pushEvent(`{"event":"end-file","reason":"error"}`)
+	ev := waitErrorEvent(t, p, 2*time.Second)
+	var le *LoadFailedError
+	if !errors.As(ev.Err, &le) {
+		t.Fatalf("want *LoadFailedError, got %T (%v)", ev.Err, ev.Err)
+	}
+	if le.FileError != "" {
+		t.Errorf("FileError = %q, want 空串", le.FileError)
+	}
+	if got := ev.Err.Error(); got != "mpv 播放出错（end-file reason=error）" {
+		t.Errorf("错误消息 = %q, want 原消息", got)
+	}
+}
+
 func TestMpvPlayerErrorOnDisconnect(t *testing.T) {
 	fake := newFakeMpvServer(t)
 	p := connectTestPlayer(t, fake)
@@ -551,6 +592,32 @@ func TestMpvPlayerStartFailureLeavesNoDirtyState(t *testing.T) {
 	// 再次 Start 不应报"播放器已在运行"，应重新执行启动流程并再次失败
 	if err := p.Start(); err == nil {
 		t.Fatal("再次 Start 应仍失败（脚本仍立即退出）")
+	}
+}
+
+// mpv 启动参数必须含 --ytdl-format=bestaudio：纯音频播放器只需音频流，
+// 避免同时开视频+音频两个流（YouTube 403 风控暴露面翻倍，见设计文档）。
+// 包装脚本把收到的全部参数记入 MUSIC_TUI_FAKE_MPV_LOG，Start 返回时
+// socket 已就绪（args 行先于 socket 出现），直接读日志断言。
+func TestMpvStartProcessYtdlFormatArg(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "mpv.sock")
+	logPath := filepath.Join(dir, "starts.log")
+	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
+	script := writeFakeMpvWrapperScript(t, dir)
+
+	p := NewMpvPlayer(script, socketPath)
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取日志: %v", err)
+	}
+	if !strings.Contains(string(data), "--ytdl-format=bestaudio") {
+		t.Errorf("mpv 启动参数应含 --ytdl-format=bestaudio:\n%s", data)
 	}
 }
 
@@ -775,7 +842,8 @@ func appendFakeLog(path, line string) {
 // writeFakeMpvWrapperScript 生成 mpv 包装脚本：Start() 以 mpv 参数启动它，
 // 脚本解析出 --input-ipc-server 的 socket 路径后 exec 测试二进制重入
 // TestFakeMpvProcess 作为 fake mpv 进程（环境变量 MUSIC_TUI_FAKE_MPV_LOG
-// 由 t.Setenv 设置，随 exec 链透传）。
+// 由 t.Setenv 设置，随 exec 链透传）。设置 MUSIC_TUI_FAKE_MPV_LOG 时
+// 在 exec 前把收到的全部参数记为一行 "args: $*"（启动参数断言用）。
 func writeFakeMpvWrapperScript(t *testing.T, dir string) string {
 	t.Helper()
 	script := filepath.Join(dir, "fake-mpv.sh")
@@ -786,6 +854,9 @@ for arg in "$@"; do
         --input-ipc-server=*) export MUSIC_TUI_FAKE_MPV_SOCKET="${arg#--input-ipc-server=}" ;;
     esac
 done
+if [ -n "$MUSIC_TUI_FAKE_MPV_LOG" ]; then
+    echo "args: $*" >> "$MUSIC_TUI_FAKE_MPV_LOG"
+fi
 export MUSIC_TUI_FAKE_MPV=1
 exec "%s" -test.run=TestFakeMpvProcess
 `, os.Args[0])

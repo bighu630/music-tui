@@ -86,10 +86,11 @@ func (p *MpvPlayer) startProcess() error {
 	_ = os.Remove(p.socketPath) // 清理上次残留的 socket 文件
 	args := []string{
 		"--idle=yes",
-		"--no-video",           // 纯音频，避免 mpv 抢占终端
-		"--no-terminal",        // 禁用 mpv 的终端控制，避免与 TUI 抢键盘
-		"--keep-open=no",       // 播完即退出，可靠触发 end-file reason=eof
-		"--no-resume-playback", // 不写恢复播放状态文件
+		"--no-video",              // 纯音频，避免 mpv 抢占终端
+		"--no-terminal",           // 禁用 mpv 的终端控制，避免与 TUI 抢键盘
+		"--keep-open=no",          // 播完即退出，可靠触发 end-file reason=eof
+		"--ytdl-format=bestaudio", // 纯音频播放器只需音频流：避免同时开视频+音频两个流（403 风控暴露面减半）
+		"--no-resume-playback",    // 不写恢复播放状态文件
 		"--input-ipc-server=" + p.socketPath,
 	}
 	p.stateMu.Lock()
@@ -249,7 +250,15 @@ func (p *MpvPlayer) pump(conn *mpvipc.Connection) {
 			case "eof":
 				p.emit(TrackEndedEvent{})
 			case "error":
-				p.emit(ErrorEvent{Err: fmt.Errorf("mpv 播放出错（end-file reason=error）")})
+				// 提取 mpv IPC file_error 字段的诊断文本（如 "no audio or video data played"）；
+				// mpvipc 的 Event.ExtraData 已保留该字段，旧版 mpv 可能缺失（空串兜底）。
+				fileErr := ""
+				if ev.ExtraData != nil {
+					if s, ok := ev.ExtraData["file_error"].(string); ok {
+						fileErr = s
+					}
+				}
+				p.emit(ErrorEvent{Err: &LoadFailedError{FileError: fileErr}})
 			}
 		}
 	}
