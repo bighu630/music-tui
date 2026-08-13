@@ -366,7 +366,7 @@ func (q *Queue) Len() int
 
 ### 14.3 播放驱动（ui/root 编排，复用现有事件流）
 
-- `TrackEndedEvent`：原为"停止"，改为 `queue.Next()` → 有下一首则 `player.Play()` 继续播放（同步刷新首页/队列页，**不切换当前页面**），否则停止等待用户操作
+- `TrackEndedEvent`：原为"停止"，改为 `queue.Next()` → 有下一首则 `player.Play()` 继续播放（同步刷新首页/队列页，**不切换当前页面**），否则停止等待用户操作。删除当前曲目后（队列指针已顺延、mpv 仍播被删曲目）播完时**不推进**，直接播放顺延曲目；删除末位当前曲（无顺延）播完时从头开始
 - 手动播放（搜索 Enter / 历史 Enter / 空格重播）统一走 `startPlay`：`queue.Replace(track)` + `player.Play()`；成功并行触发 歌词/封面/历史 三个异步 cmd（与第 7 章核心链路 1 相同）；连播曲目同样写入历史
 - 队列页 Enter：`queue.JumpTo(index)` + 播放当前曲目（保留队列）
 - 自动连播失败（Play 报错）走既有失败路径：重置状态 + 错误横幅，队列指针停在失败曲目

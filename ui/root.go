@@ -98,6 +98,10 @@ type Model struct {
 	current   page
 	lastError string
 	ended     bool // 当前歌曲是否已播放结束/出错（空格语义：重播同曲而非 Resume）
+	// queueSkip 标记删除当前曲导致的指针解耦：mpv 仍播放被删曲目，
+	// 但队列指针已顺延。下次 TrackEnded 应播放顺延曲目（不推进），
+	// 避免跳过顺延曲目（回归：TestDeleteCurrentThenTrackEndedPlaysSlidTrack）。
+	queueSkip bool
 
 	home        homeModel
 	searchPage  searchModel
@@ -150,15 +154,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.queue.JumpTo(msg.index) {
 			return m, nil
 		}
+		m.queueSkip = false // 跳转即重新对齐，解除删除解耦标记
 		m.current = pageHome
 		return m.playQueueTrack()
 
 	case queueDeleteMsg:
+		// 删除当前曲目时 mpv 仍播放被删曲目（不打断），队列指针已顺延：
+		// 记录解耦标记，下次 TrackEnded 播放顺延曲目而非推进。
+		if idx := m.queue.CurrentIndex(); idx >= 0 && msg.index == idx {
+			m.queueSkip = true
+		}
 		m.queue.Remove(msg.index)
 		return m.syncQueueViews(), nil
 
 	case queueClearMsg:
 		m.queue.Clear()
+		m.queueSkip = false
 		return m.syncQueueViews(), nil
 
 	case queueModeMsg:
@@ -325,15 +336,23 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		}
 		m.home = m.home.syncState(m.state)
 	case player.TrackEndedEvent:
-		// 自动连播：队列有下一首则继续播放，否则停在当前位置等待用户操作。
+		// 自动连播。解耦标记（删除当前曲）存在时：播放顺延曲目（当前位），
+		// 无当前位则从头，队列为空则停止；否则正常推进到下一首。
+		// 两种情况均不切换当前页面。
+		if m.queueSkip {
+			m.queueSkip = false
+			if tr, ok := m.queue.Current(); ok {
+				return m.beginPlay(tr)
+			}
+			if tr, ok := m.queue.Next(); ok {
+				return m.beginPlay(tr)
+			}
+			return m.stopAfterEnd()
+		}
 		if tr, ok := m.queue.Next(); ok {
-			m.queuePage = m.queuePage.sync(m.queue)
 			return m.beginPlay(tr)
 		}
-		m.ended = true
-		m.state.Playing = false
-		m.home = m.home.syncState(m.state)
-		return m.syncQueueViews(), nil
+		return m.stopAfterEnd()
 	case player.ErrorEvent:
 		m.ended = true
 		m.lastError = ev.Err.Error()
@@ -354,12 +373,21 @@ func waitForPlayerEvents(p player.Player) tea.Cmd {
 	}
 }
 
+// stopAfterEnd 播放结束且无下一首：停在当前位置等待用户操作（空格重播同曲）。
+func (m Model) stopAfterEnd() (Model, tea.Cmd) {
+	m.ended = true
+	m.state.Playing = false
+	m.home = m.home.syncState(m.state)
+	return m.syncQueueViews(), nil
+}
+
 // startPlay 手动播放某曲目（替换语义）：清空队列 → 该曲入队为当前 → 播放。
 // 成功时并行触发 歌词 / 封面 / 历史 三个异步 cmd（核心链路 1）；
 // Play 失败时跳过全部异步 cmd（失败播放不进历史、不请求歌词/封面），
 // 状态重置为空回到"未在播放"空态 + 错误横幅。
 func (m Model) startPlay(track model.Track) (Model, tea.Cmd) {
 	m.queue.Replace(track)
+	m.queueSkip = false // 替换即重新对齐，解除删除解耦标记
 	m.current = pageHome
 	return m.playQueueTrack()
 }

@@ -114,6 +114,7 @@ func (q queueModel) sync(qu *queue.Queue) queueModel {
 		items = append(items, queueItem{track: tr, idx: i, current: i == q.current})
 	}
 	keep := ""
+	keepIdx := q.list.GlobalIndex()
 	if it, ok := q.list.SelectedItem().(queueItem); ok {
 		keep = it.track.ID
 	}
@@ -122,9 +123,17 @@ func (q queueModel) sync(qu *queue.Queue) queueModel {
 		for i, tr := range q.items {
 			if tr.ID == keep {
 				q.list.Select(i)
-				break
+				return q
 			}
 		}
+	}
+	// 选中项已被删除（keep 未命中）：clamp 到邻近项，避免光标越界
+	// 导致 Enter/d 静默失效（回归：TestQueueDeleteKeepsSelectionValid）。
+	if keepIdx >= len(items) {
+		keepIdx = len(items) - 1
+	}
+	if keepIdx >= 0 {
+		q.list.Select(keepIdx)
 	}
 	return q
 }

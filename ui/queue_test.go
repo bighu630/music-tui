@@ -414,6 +414,179 @@ func TestHistoryAppend(t *testing.T) {
 	}
 }
 
+// TestDeleteCurrentThenTrackEndedPlaysSlidTrack 回归：删除正在播放的当前曲后，
+// 播完应播放顺延曲目（不跳过）：队列 [t1▶,t2,t3] 删 t1 → t1 播完 → 播 t2 → 播 t3。
+func TestDeleteCurrentThenTrackEndedPlaysSlidTrack(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
+
+	// 队列页删除当前曲 t1 → 顺延 t2 为当前（mpv 仍在播 t1，不打断）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	var qd queueDeleteMsg
+	for _, msg := range execCmds(cmd) {
+		if qm, ok := msg.(queueDeleteMsg); ok {
+			qd = qm
+		}
+	}
+	m, _ = update(m, qd)
+	if cur, _ := m.queue.Current(); cur.ID != "t2" {
+		t.Fatalf("删除当前曲后应顺延 t2, Current = %s", cur.ID)
+	}
+
+	// t1 播完 → 应播放顺延的 t2（而非跳过它直接播 t3）
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t2").URL {
+		t.Fatalf("播完应接顺延曲目: playCount=%d lastPlayed=%q, want 2 次 t2", fp.playCount(), fp.lastPlayed())
+	}
+	if m.queue.CurrentIndex() != 0 {
+		t.Errorf("顺延曲目播放后 CurrentIndex = %d, want 0", m.queue.CurrentIndex())
+	}
+	if m.state.Track == nil || m.state.Track.ID != "t2" || !m.state.Playing {
+		t.Errorf("state = %+v, want t2 播放中", m.state)
+	}
+
+	// t2 播完 → 正常推进 t3
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if fp.playCount() != 3 || fp.lastPlayed() != testTrack("t3").URL {
+		t.Errorf("顺延后应正常连播: playCount=%d lastPlayed=%q, want 3 次 t3", fp.playCount(), fp.lastPlayed())
+	}
+}
+
+// TestDeleteLastCurrentThenTrackEndedPlaysFromHead 回归：删除末位当前曲（无顺延）后，
+// 播完从头继续；首页显示 0/N（无当前曲）。
+func TestDeleteLastCurrentThenTrackEndedPlaysFromHead(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
+
+	// 推进到 t3（末位当前）
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if m.queue.CurrentIndex() != 2 {
+		t.Fatalf("CurrentIndex = %d, want 2", m.queue.CurrentIndex())
+	}
+
+	// 删除末位当前曲 t3 → 无当前曲目，首页显示 0/2
+	m, _ = update(m, queueDeleteMsg{index: 2})
+	if m.queue.CurrentIndex() != -1 {
+		t.Fatalf("删除末位当前后 CurrentIndex = %d, want -1", m.queue.CurrentIndex())
+	}
+	if got := m.home.view(); !strings.Contains(got, "0/2 · 顺序") {
+		t.Errorf("首页应显示 0/2 · 顺序, got %q", got)
+	}
+
+	// t3 播完 → 从头播 t1
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if fp.lastPlayed() != testTrack("t1").URL {
+		t.Errorf("无当前曲目时播完应从头: lastPlayed = %q, want t1", fp.lastPlayed())
+	}
+	if m.queue.CurrentIndex() != 0 {
+		t.Errorf("从头后 CurrentIndex = %d, want 0", m.queue.CurrentIndex())
+	}
+}
+
+// TestAutoAdvancePlayFailure 回归：自动连播 Play 失败 → 状态重置 + 错误横幅，不写历史。
+func TestAutoAdvancePlayFailure(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m, cmd := m.startPlay(testTrack("t1"))
+	for _, msg := range execCmds(cmd) {
+		m, _ = update(m, msg) // 回灌 BatchMsg（t1 入历史）
+	}
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+
+	fp.playErr = true
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if fp.playCount() != 1 {
+		t.Errorf("失败播放不应计入 playCount, got %d", fp.playCount())
+	}
+	if !strings.Contains(m.lastError, "播放失败") {
+		t.Errorf("lastError = %q, want 含播放失败", m.lastError)
+	}
+	if m.state.Track != nil || m.state.Playing {
+		t.Errorf("失败后状态应重置: %+v", m.state)
+	}
+	if entries := m.history.Entries(); len(entries) != 1 {
+		t.Errorf("失败连播不应写历史, entries = %d, want 1（仅 t1）", len(entries))
+	}
+}
+
+// TestSpaceReplayReplacesQueue 锁定既定行为：结束后空格重播走替换语义（清空队列）。
+func TestSpaceReplayReplacesQueue(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+
+	// t1 播完 → 连播 t2；t2 播完 → 无下一首 → 停止（ended）
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if !m.ended || m.state.Playing {
+		t.Fatalf("播完后 ended=%v Playing=%v, want true/false", m.ended, m.state.Playing)
+	}
+
+	// 追加 t3，空格重播 t2 → 替换语义清空队列
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if fp.playCount() != 3 || fp.lastPlayed() != testTrack("t2").URL {
+		t.Fatalf("空格应重播同曲: playCount=%d lastPlayed=%q, want 3 次 t2", fp.playCount(), fp.lastPlayed())
+	}
+	// 设计已确认：手动播放统一替换语义 → 队列只剩重播曲目
+	if m.queue.Len() != 1 || m.queue.CurrentIndex() != 0 {
+		t.Errorf("重播后队列 = %d 条 current=%d, want 1 条 current=0（替换语义）", m.queue.Len(), m.queue.CurrentIndex())
+	}
+}
+
+// TestQueueDeleteKeepsSelectionValid 回归：删除的正是选中项时，选择应
+// clamp 到邻近项（不越界），Enter/d 不静默失效。
+func TestQueueDeleteKeepsSelectionValid(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t3（下标 2）
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	var qd queueDeleteMsg
+	for _, msg := range execCmds(cmd) {
+		if qm, ok := msg.(queueDeleteMsg); ok {
+			qd = qm
+		}
+	}
+	m, _ = update(m, qd)
+
+	if m.queuePage.list.SelectedItem() == nil {
+		t.Fatal("删除选中项后光标越界，SelectedItem 为 nil")
+	}
+	if item, ok := m.queuePage.list.SelectedItem().(queueItem); !ok || item.idx != 1 {
+		t.Errorf("选择应 clamp 到下标 1（t2）, got %+v", item)
+	}
+	// Enter 仍能正常发出跳转消息
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	var qp queuePlayMsg
+	for _, msg := range execCmds(cmd) {
+		if qm, ok := msg.(queuePlayMsg); ok {
+			qp = qm
+		}
+	}
+	if qp.index != 1 {
+		t.Errorf("删除后 Enter 应跳转到下标 1, got %d", qp.index)
+	}
+}
+
 // TestQueueItemMarkers 队列项渲染：当前曲带 ▶ 标记与序号。
 func TestQueueItemMarkers(t *testing.T) {
 	item := queueItem{track: testTrack("t1"), idx: 0, current: true}
