@@ -17,6 +17,7 @@ import (
 	"music-tui/player"
 	"music-tui/queue"
 	"music-tui/search"
+	"music-tui/session"
 )
 
 // page 页面枚举。
@@ -85,6 +86,20 @@ type historyResultMsg struct {
 	err error
 }
 
+// resumeResultMsg 续播恢复结果（PlayPaused + Seek 成败）。
+type resumeResultMsg struct {
+	err error
+}
+
+// resumeInfo 待恢复的会话信息（NewModel 从 session 填充，Init 消费）。
+type resumeInfo struct {
+	track model.Track
+	pos   float64
+}
+
+// saveInterval 播放中自动保存会话的节流间隔。
+const saveInterval = 5 * time.Second
+
 // Model 顶层模型：持有共享播放状态、播放队列与四个页面，负责全局按键、
 // 页面切换、服务调用与结果路由。
 type Model struct {
@@ -93,6 +108,7 @@ type Model struct {
 	cover   *cover.Fetcher
 	history *history.Store
 	queue   *queue.Queue
+	session *session.Store
 
 	state     model.PlaybackState
 	current   page
@@ -103,6 +119,9 @@ type Model struct {
 	// 避免跳过顺延曲目（回归：TestDeleteCurrentThenTrackEndedPlaysSlidTrack）。
 	queueSkip bool
 
+	resume   *resumeInfo // 续播恢复信息（NewModel 填充，Init 消费；nil = 无会话）
+	lastSave time.Time   // 最近一次自动保存会话的时刻（节流）
+
 	home        homeModel
 	searchPage  searchModel
 	historyPage historyModel
@@ -111,15 +130,18 @@ type Model struct {
 	onTrack func(*model.Track) // 外部消费者（MPRIS）感知当前曲目；nil 安全
 }
 
-// NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h 为具体服务，
+// NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h/sess 为具体服务，
 // onTrack 在播放状态变化时同步回调当前曲目（nil 表示无曲目；可为 nil）。
-func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store, onTrack func(*model.Track)) Model {
+// 若 sess 存在已保存会话（队列 + 进度），同步恢复队列与播放状态（暂停态），
+// mpv 的静默加载由 Init 返回的 resumeCmd 完成。
+func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store, sess *session.Store, onTrack func(*model.Track)) Model {
 	m := Model{
 		player:      p,
 		lyrics:      l,
 		cover:       c,
 		history:     h,
 		queue:       queue.New(),
+		session:     sess,
 		onTrack:     onTrack,
 		current:     pageHome,
 		home:        newHomeModel(p),
@@ -127,14 +149,47 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 		historyPage: newHistoryModel(),
 		queuePage:   newQueueModel(),
 	}
+	// 续播恢复：会话存在且队列有当前曲目才恢复；否则丢弃会话从空态开始
+	if st := sess.State(); st != nil {
+		m.queue.Restore(st.Queue)
+		if cur, ok := m.queue.Current(); ok {
+			pos := st.Position
+			if pos < 0 {
+				pos = 0
+			}
+			if st.Ended {
+				// 退出时已播完：有下一首则从下一首开头（暂停），否则当前曲从头
+				if next, ok := m.queue.Next(); ok {
+					cur = next
+					pos = 0
+				} else {
+					pos = 0
+				}
+			}
+			m.state = model.PlaybackState{Track: &cur, Position: pos, Duration: cur.Duration, Playing: false}
+			m.home = m.home.resetForTrack(&cur)
+			m.home = m.home.syncState(m.state)
+			m.notifyTrack(&cur)
+			m.resume = &resumeInfo{track: cur, pos: pos}
+		} else {
+			// 队列无当前曲目（损坏/手改数据）：丢弃会话
+			m.queue = queue.New()
+		}
+	}
+	m = m.syncQueueViews()
 	m.historyPage = m.historyPage.setEntries(h.Entries())
 	return m
 }
 
-// Init 启动两个常驻 cmd：播放器事件监听 + spinner 全局 tick。
+// Init 启动两个常驻 cmd：播放器事件监听 + spinner 全局 tick；
+// 存在已保存会话时追加续播恢复 cmd（PlayPaused 静默加载 + Seek 定位）。
 // （不用包级 spinner.Tick：bubbles v1.0.0 的包级 Tick 无延时，会形成忙循环。）
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(waitForPlayerEvents(m.player), spinnerTick)
+	cmds := []tea.Cmd{waitForPlayerEvents(m.player), spinnerTick}
+	if m.resume != nil {
+		cmds = append(cmds, resumeCmd(m))
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update 全局消息路由：先处理播放器事件/服务结果/全局按键，
@@ -199,6 +254,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastError = msg.err.Error()
 		}
 		return m, nil
+
+	case resumeResultMsg:
+		if msg.err != nil {
+			// 恢复失败：会话无保留价值（当前曲播放不了），清空避免反复失败
+			m.lastError = "恢复播放失败: " + msg.err.Error()
+			m.state = model.PlaybackState{}
+			m.home = m.home.syncState(m.state)
+			m.queue = queue.New()
+			m.queueSkip = false
+			m.notifyTrack(nil)
+			return m.syncQueueViews(), nil
+		}
+		// 恢复成功：暂停态也加载歌词/封面展示
+		if m.state.Track == nil {
+			return m, nil
+		}
+		return m, tea.Batch(
+			fetchLyricsCmd(m.lyrics, *m.state.Track),
+			fetchCoverCmd(m.cover, *m.state.Track),
+		)
 
 	case searchResultsMsg:
 		m.searchPage = m.searchPage.withResults(msg)
@@ -291,6 +366,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.current == pageSearch && m.searchPage.typing() {
 				return m.delegate(msg)
 			}
+			m.saveSession() // 退出前持久化会话（队列 + 进度）
 			return m, tea.Quit
 		}
 		return m.delegate(msg)
@@ -328,6 +404,11 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.state.Position = ev.Position
 		m.state.Duration = ev.Duration
 		m.home = m.home.syncState(m.state)
+		// 自动保存（节流）：播放中定期持久化会话，崩溃/断电也能恢复
+		if time.Since(m.lastSave) >= saveInterval {
+			m.lastSave = time.Now()
+			m.saveSession()
+		}
 	case player.StateEvent:
 		m.state.Playing = ev.Playing
 		m.home = m.home.syncState(m.state)
@@ -436,6 +517,40 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 func (m Model) notifyTrack(t *model.Track) {
 	if m.onTrack != nil {
 		m.onTrack(t)
+	}
+}
+
+// saveSession 把当前播放会话写入磁盘（尽力而为，失败仅记日志）。
+// 无播放中曲目时删除会话文件（会话自然结束，避免恢复陈旧状态）。
+func (m Model) saveSession() {
+	if m.state.Track == nil {
+		if err := m.session.Clear(); err != nil {
+			log.Printf("清除会话失败: %v", err)
+		}
+		return
+	}
+	st := session.State{
+		Queue:    m.queue.Snapshot(),
+		Position: m.state.Position,
+		Ended:    m.ended,
+	}
+	if err := m.session.Save(st); err != nil {
+		log.Printf("保存会话失败: %v", err)
+	}
+}
+
+// resumeCmd 续播恢复：PlayPaused 静默加载当前曲目（不发声）→ Seek 定位。
+func resumeCmd(m Model) tea.Cmd {
+	track := m.resume.track
+	pos := m.resume.pos
+	return func() tea.Msg {
+		if err := m.player.PlayPaused(track.URL); err != nil {
+			return resumeResultMsg{err: err}
+		}
+		if err := m.player.Seek(pos); err != nil {
+			return resumeResultMsg{err: err}
+		}
+		return resumeResultMsg{}
 	}
 }
 

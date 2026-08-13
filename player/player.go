@@ -46,6 +46,8 @@ func (ErrorEvent) isEvent() {}
 type Player interface {
 	// Play 开始播放指定 URL，替换当前歌曲。
 	Play(url string) error
+	// PlayPaused 加载指定 URL 但保持暂停（续播恢复用，不发声）。
+	PlayPaused(url string) error
 	// Pause 暂停播放。
 	Pause() error
 	// Resume 继续播放。

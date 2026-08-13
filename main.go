@@ -19,6 +19,7 @@ import (
 	"music-tui/mpris"
 	"music-tui/player"
 	"music-tui/search"
+	"music-tui/session"
 	"music-tui/ui"
 )
 
@@ -55,6 +56,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("加载历史记录失败: %w", err)
 	}
+	sess, err := loadSession(filepath.Join(cfgRoot, "music-tui", "session.json"))
+	if err != nil {
+		return fmt.Errorf("加载会话失败: %w", err)
+	}
 	cacheRoot, err := os.UserCacheDir()
 	if err != nil {
 		return fmt.Errorf("获取用户缓存目录失败: %w", err)
@@ -88,6 +93,7 @@ func run() error {
 		lyrics.NewClient(userAgent),
 		covers,
 		hist,
+		sess,
 		mprisSrv.SetTrack,
 	)
 	p := tea.NewProgram(model, tea.WithAltScreen())
@@ -110,6 +116,25 @@ func loadHistory(path string) (*history.Store, error) {
 	}
 	fmt.Fprintf(os.Stderr, "music-tui: 警告：历史文件损坏，已备份至 %s 并重建\n", backup)
 	store, retryErr := history.NewStore(path)
+	if retryErr != nil {
+		return nil, retryErr
+	}
+	return store, nil
+}
+
+// loadSession 加载会话文件；文件损坏（崩溃/断电截断）时备份后重建，
+// 避免缓存文件阻止应用启动（与 loadHistory 同款降级）。
+func loadSession(path string) (*session.Store, error) {
+	store, err := session.NewStore(path)
+	if err == nil {
+		return store, nil
+	}
+	backup := fmt.Sprintf("%s.corrupt-%d", path, time.Now().UnixNano())
+	if berr := os.Rename(path, backup); berr != nil {
+		return nil, err // 备份失败（如权限问题），按原样返回错误
+	}
+	fmt.Fprintf(os.Stderr, "music-tui: 警告：会话文件损坏，已备份至 %s 并重建\n", backup)
+	store, retryErr := session.NewStore(path)
 	if retryErr != nil {
 		return nil, retryErr
 	}

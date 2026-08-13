@@ -64,6 +64,40 @@ func TestInstallHint(t *testing.T) {
 	}
 }
 
+func TestLoadSessionMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	store, err := loadSession(path)
+	if err != nil {
+		t.Fatalf("会话文件不存在时应返回空 store: %v", err)
+	}
+	if store.State() != nil {
+		t.Error("无会话文件时 State 应为 nil")
+	}
+}
+
+func TestLoadSessionCorruptBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := loadSession(path)
+	if err != nil {
+		t.Fatalf("损坏会话应降级重建而非报错: %v", err)
+	}
+	if store.State() != nil {
+		t.Error("重建后应无会话状态")
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "session.json.corrupt-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("应生成 1 个损坏备份文件, got %d: %v", len(matches), matches)
+	}
+}
+
 func TestLoadHistoryMissing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history.json")
 	store, err := loadHistory(path)

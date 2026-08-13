@@ -116,6 +116,34 @@ func (q *Queue) JumpTo(i int) bool {
 	return true
 }
 
+// Snapshot 是队列状态的不可变快照（供会话持久化/恢复）。
+type Snapshot struct {
+	Tracks     []model.Track `json:"tracks"`
+	CurrentIdx int           `json:"current_index"`
+	Mode       Mode          `json:"mode"`
+}
+
+// Snapshot 返回当前队列状态的副本（修改返回值不影响队列）。
+func (q *Queue) Snapshot() Snapshot {
+	return Snapshot{
+		Tracks:     append([]model.Track(nil), q.tracks...),
+		CurrentIdx: q.currentIdx,
+		Mode:       q.mode,
+	}
+}
+
+// Restore 用快照覆盖当前队列状态。CurrentIdx 越界（损坏/手改数据）
+// 时降级为无当前曲目（-1），避免恢复出不可用状态。
+func (q *Queue) Restore(s Snapshot) {
+	q.tracks = append([]model.Track(nil), s.Tracks...)
+	q.mode = s.Mode
+	if s.CurrentIdx < 0 || s.CurrentIdx >= len(q.tracks) {
+		q.currentIdx = -1
+		return
+	}
+	q.currentIdx = s.CurrentIdx
+}
+
 // Current 返回当前曲目；无当前曲目时返回 false。
 func (q *Queue) Current() (model.Track, bool) {
 	if q.currentIdx < 0 || q.currentIdx >= len(q.tracks) {

@@ -18,6 +18,7 @@ import (
 	"music-tui/lyrics"
 	"music-tui/model"
 	"music-tui/player"
+	"music-tui/session"
 )
 
 // ---- fakes ----
@@ -25,6 +26,7 @@ import (
 type fakePlayer struct {
 	mu      sync.Mutex
 	plays   []string
+	paused  []string // PlayPaused 调用记录（续播恢复）
 	pauses  int
 	resumes int
 	seeks   []float64
@@ -43,6 +45,16 @@ func (f *fakePlayer) Play(url string) error {
 		return context.DeadlineExceeded
 	}
 	f.plays = append(f.plays, url)
+	return nil
+}
+
+func (f *fakePlayer) PlayPaused(url string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.playErr {
+		return context.DeadlineExceeded
+	}
+	f.paused = append(f.paused, url)
 	return nil
 }
 
@@ -86,6 +98,22 @@ func (f *fakePlayer) playCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.plays)
+}
+
+// pausedCount 返回 PlayPaused 调用次数（续播恢复测试）。
+func (f *fakePlayer) pausedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.paused)
+}
+
+func (f *fakePlayer) lastPaused() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.paused) == 0 {
+		return ""
+	}
+	return f.paused[len(f.paused)-1]
 }
 
 func (f *fakePlayer) lastPlayed() string {
@@ -145,9 +173,13 @@ func newTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, onTrack f
 	if err != nil {
 		t.Fatal(err)
 	}
+	sess, err := session.NewStore(filepath.Join(t.TempDir(), "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	return NewModel(fp, fa,
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, onTrack)
+		cf, hist, sess, onTrack)
 }
 
 // execCmds 同步执行 tea.Cmd 并收集返回的非 nil 消息（测试用）。

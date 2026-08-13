@@ -452,6 +452,31 @@ func TestMpvPlayerCommands(t *testing.T) {
 	}
 }
 
+// PlayPaused 加载指定 URL 但保持暂停（续播恢复用，不发声）。
+// 命令序列：set pause=true → loadfile（mpv 的 pause 属性不随文件重置）。
+func TestMpvPlayerPlayPaused(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.PlayPaused("https://www.youtube.com/watch?v=abc"); err != nil {
+		t.Fatal(err)
+	}
+
+	cmds := fake.recordedCommands()
+	got := cmds[3:] // 前 3 条是 observe_property
+	want := [][]interface{}{
+		{"set_property", "pause", true},
+		{"loadfile", "https://www.youtube.com/watch?v=abc"},
+	}
+	for i := range want {
+		for j := range want[i] {
+			if got[i][j] != want[i][j] {
+				t.Fatalf("cmd[%d] = %v, want %v", i, got[i], want[i])
+			}
+		}
+	}
+}
+
 // mpv 挂死（对命令不响应）时 Play/Pause/Resume/Seek 应在 ~500ms 内
 // 超时返回错误，而不是永久阻塞（否则同步调用会冻结整个 TUI）。
 func TestMpvPlayerCommandsTimeoutWhenMpvHangs(t *testing.T) {
@@ -464,6 +489,7 @@ func TestMpvPlayerCommandsTimeoutWhenMpvHangs(t *testing.T) {
 		call func() error
 	}{
 		{"Play", func() error { return p.Play("https://example.com/a.mp3") }},
+		{"PlayPaused", func() error { return p.PlayPaused("https://example.com/a.mp3") }},
 		{"Pause", func() error { return p.Pause() }},
 		{"Resume", func() error { return p.Resume() }},
 		{"Seek", func() error { return p.Seek(30) }},
@@ -492,6 +518,7 @@ func TestMpvPlayerCommandsFailWhenNotConnected(t *testing.T) {
 		call func() error
 	}{
 		{"Play", func() error { return p.Play("https://example.com/a.mp3") }},
+		{"PlayPaused", func() error { return p.PlayPaused("https://example.com/a.mp3") }},
 		{"Pause", func() error { return p.Pause() }},
 		{"Resume", func() error { return p.Resume() }},
 		{"Seek", func() error { return p.Seek(10) }},

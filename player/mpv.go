@@ -468,6 +468,32 @@ func (p *MpvPlayer) Play(url string) error {
 	return nil
 }
 
+// PlayPaused 加载指定 URL 但保持暂停（续播恢复用）：先置 pause=yes
+// 再 loadfile——mpv 的 pause 属性不随文件重置，新文件加载后保持暂停
+// 不发声，随后由调用方 Seek 定位。
+func (p *MpvPlayer) PlayPaused(url string) error {
+	if err := p.ensureConnected(); err != nil {
+		return err
+	}
+	p.setDuration(0)
+	conn := p.currentConn()
+	if conn == nil {
+		return errors.New("mpv 未连接") // 断开清理恰好在检查后发生：极窄窗口，下次命令会重连
+	}
+	if err := callWithTimeout(func() error {
+		return conn.Set("pause", true)
+	}); err != nil {
+		return fmt.Errorf("set pause: %w", err)
+	}
+	if err := callWithTimeout(func() error {
+		_, err := conn.Call("loadfile", url)
+		return err
+	}); err != nil {
+		return fmt.Errorf("loadfile: %w", err)
+	}
+	return nil
+}
+
 // Pause 暂停播放。
 func (p *MpvPlayer) Pause() error {
 	if err := p.ensureConnected(); err != nil {

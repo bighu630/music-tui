@@ -332,6 +332,70 @@ func TestJumpToInvalidIndex(t *testing.T) {
 	}
 }
 
+// ---- Snapshot / Restore（会话持久化） ----
+
+func TestSnapshotRestoreRoundTrip(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.Add(testTrack("c"))
+	q.Next() // b 当前（1）
+	q.SetMode(Shuffle)
+
+	s := q.Snapshot()
+	if got := ids(s.Tracks); !eq(got, []string{"a", "b", "c"}) {
+		t.Errorf("Snapshot.Tracks = %v", got)
+	}
+	if s.CurrentIdx != 1 || s.Mode != Shuffle {
+		t.Errorf("Snapshot = %+v, want current=1 mode=Shuffle", s)
+	}
+
+	nq := New()
+	nq.Restore(s)
+	if nq.Len() != 3 || nq.CurrentIndex() != 1 || nq.Mode() != Shuffle {
+		t.Errorf("Restore 后 Len/Current/Mode = %d/%d/%v", nq.Len(), nq.CurrentIndex(), nq.Mode())
+	}
+	if cur, ok := nq.Current(); !ok || cur.ID != "b" {
+		t.Errorf("Restore 后 Current = %s/%v, want b", cur.ID, ok)
+	}
+	// 恢复后播放行为一致：Next 从 b 推进到 c
+	tr, ok := nq.Next()
+	if !ok || tr.ID != "c" {
+		t.Errorf("Restore 后 Next = %s/%v, want c", tr.ID, ok)
+	}
+}
+
+func TestSnapshotReturnsCopy(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	s := q.Snapshot()
+	s.Tracks[0] = testTrack("mutated")
+	s.CurrentIdx = 0
+	if cur, _ := q.Current(); cur.ID != "a" {
+		t.Errorf("修改 Snapshot 不应影响队列: Current = %s", cur.ID)
+	}
+	if q.CurrentIndex() != 0 {
+		t.Errorf("CurrentIndex = %d, want 0（Restore 前原值）", q.CurrentIndex())
+	}
+}
+
+func TestRestoreInvalidCurrentIndexClampedToNone(t *testing.T) {
+	q := New()
+	q.Add(testTrack("a"))
+	q.Restore(Snapshot{Tracks: []model.Track{testTrack("a")}, CurrentIdx: 5, Mode: Sequential})
+	if q.CurrentIndex() != -1 {
+		t.Errorf("越界 CurrentIdx 应降级为无当前曲目: %d", q.CurrentIndex())
+	}
+	if _, ok := q.Current(); ok {
+		t.Error("越界 CurrentIdx 后 Current 应返回 false")
+	}
+	q.Restore(Snapshot{Tracks: []model.Track{testTrack("a")}, CurrentIdx: -2, Mode: Sequential})
+	if q.CurrentIndex() != -1 {
+		t.Errorf("负数越界 CurrentIdx 应降级为无当前曲目: %d", q.CurrentIndex())
+	}
+}
+
 // ---- SetMode ----
 
 func TestSetModeShuffleKeepsCurrentAndPrefix(t *testing.T) {

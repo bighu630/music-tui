@@ -1,0 +1,278 @@
+package ui
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"music-tui/cover"
+	"music-tui/history"
+	"music-tui/lyrics"
+	"music-tui/model"
+	"music-tui/player"
+	"music-tui/queue"
+	"music-tui/session"
+)
+
+// newResumeTestModel 组装带指定会话状态的测试 model（会话文件已写入 st）。
+func newResumeTestModel(t *testing.T, st *session.State, onTrack func(*model.Track)) (Model, *fakePlayer) {
+	t.Helper()
+	fp := newFakePlayer()
+	lyricServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(lyricServer.Close)
+
+	hist, err := history.NewStore(filepath.Join(t.TempDir(), "history.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf, err := cover.NewFetcher(filepath.Join(t.TempDir(), "covers"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := session.NewStore(filepath.Join(t.TempDir(), "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != nil {
+		if err := sess.Save(*st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := NewModel(fp, &fakeSearchAdapter{},
+		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
+		cf, hist, sess, onTrack)
+	return m, fp
+}
+
+// sessionState 构造含 3 首曲目、当前第 2 首（b）的会话状态。
+func sessionState(pos float64, ended bool) *session.State {
+	q := queue.New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.Add(testTrack("c"))
+	q.Next() // b 当前（1）
+	q.SetMode(queue.Shuffle)
+	st := session.State{Queue: q.Snapshot(), Position: pos, Ended: ended}
+	return &st
+}
+
+// TestResumeRestoresQueueAndState 重启恢复：队列/模式/当前曲/进度恢复为暂停态，
+// Init 触发 PlayPaused 静默加载 + Seek 定位，成功后加载歌词/封面。
+func TestResumeRestoresQueueAndState(t *testing.T) {
+	m, fp := newResumeTestModel(t, sessionState(66.6, false), nil)
+
+	// NewModel 同步恢复的状态
+	if m.queue.Len() != 3 || m.queue.CurrentIndex() != 1 || m.queue.Mode() != queue.Shuffle {
+		t.Fatalf("队列恢复失败: Len=%d current=%d mode=%v", m.queue.Len(), m.queue.CurrentIndex(), m.queue.Mode())
+	}
+	if m.state.Track == nil || m.state.Track.ID != "b" {
+		t.Fatalf("state.Track = %+v, want b", m.state.Track)
+	}
+	if m.state.Position != 66.6 || m.state.Playing {
+		t.Errorf("state = %+v, want position=66.6 playing=false（暂停态）", m.state)
+	}
+	if m.home.state.Position != 66.6 {
+		t.Errorf("home 进度未恢复: %v", m.home.state.Position)
+	}
+	if m.home.lyricsState != lyricsLoading {
+		t.Errorf("恢复后歌词应为加载中, got %v", m.home.lyricsState)
+	}
+	if m.resume == nil || m.resume.track.ID != "b" || m.resume.pos != 66.6 {
+		t.Errorf("resume 信息 = %+v", m.resume)
+	}
+
+	// Init → resumeCmd：PlayPaused + Seek（waitForPlayerEvents 阻塞通道，单独执行 resumeCmd）
+	msgs := execCmds(resumeCmd(m))
+	if fp.pausedCount() != 1 || fp.lastPaused() != testTrack("b").URL {
+		t.Errorf("PlayPaused 调用 = %d %q, want 1 次 b", fp.pausedCount(), fp.lastPaused())
+	}
+	if len(fp.seeks) != 1 || fp.seeks[0] != 66.6 {
+		t.Errorf("Seek = %v, want [66.6]", fp.seeks)
+	}
+
+	// resumeResultMsg 回灌 → 触发歌词/封面加载
+	var resumed bool
+	for _, msg := range msgs {
+		if _, ok := msg.(resumeResultMsg); ok {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Fatal("未收到 resumeResultMsg")
+	}
+	m, cmd := update(m, msgs[0])
+	if fp.playCount() != 0 {
+		t.Errorf("恢复不应调用 Play（应 PlayPaused）: %d", fp.playCount())
+	}
+	// 歌词/封面 cmd 触发
+	sub := execCmds(cmd)
+	if len(sub) == 0 {
+		t.Error("恢复成功应触发歌词/封面加载 cmd")
+	}
+	// 回灌歌词/封面结果不崩溃
+	for _, msg := range sub {
+		m, _ = update(m, msg)
+	}
+	if m.home.lyricsState != lyricsNone {
+		t.Errorf("歌词 404 后应为 lyricsNone, got %v", m.home.lyricsState)
+	}
+}
+
+// TestResumeEndedAdvancesToNext 退出时已播完且有下一首 → 恢复从下一首开头（暂停）。
+func TestResumeEndedAdvancesToNext(t *testing.T) {
+	m, fp := newResumeTestModel(t, sessionState(180, true), nil)
+	if m.state.Track == nil || m.state.Track.ID != "c" {
+		t.Fatalf("ended 恢复应跳到下一首 c, got %+v", m.state.Track)
+	}
+	if m.state.Position != 0 || m.state.Playing {
+		t.Errorf("state = %+v, want position=0 playing=false", m.state)
+	}
+	if m.queue.CurrentIndex() != 2 {
+		t.Errorf("CurrentIndex = %d, want 2", m.queue.CurrentIndex())
+	}
+	msgs := execCmds(resumeCmd(m))
+	if fp.lastPaused() != testTrack("c").URL {
+		t.Errorf("PlayPaused = %q, want c", fp.lastPaused())
+	}
+	if len(fp.seeks) != 1 || fp.seeks[0] != 0 {
+		t.Errorf("Seek = %v, want [0]", fp.seeks)
+	}
+	m, _ = update(m, msgs[0])
+	if m.state.Track == nil || m.state.Track.ID != "c" {
+		t.Errorf("恢复结果后 state = %+v", m.state)
+	}
+}
+
+// TestResumeEndedSingleTrackRestartsCurrent 退出时已播完且无下一首 → 当前曲从头。
+func TestResumeEndedSingleTrackRestartsCurrent(t *testing.T) {
+	q := queue.New()
+	q.Replace(testTrack("a"))
+	st := session.State{Queue: q.Snapshot(), Position: 180, Ended: true}
+	m, fp := newResumeTestModel(t, &st, nil)
+	if m.state.Track == nil || m.state.Track.ID != "a" || m.state.Position != 0 {
+		t.Fatalf("单曲 ended 应从头恢复: %+v pos=%v", m.state.Track, m.state.Position)
+	}
+	msgs := execCmds(resumeCmd(m))
+	if fp.lastPaused() != testTrack("a").URL {
+		t.Errorf("PlayPaused = %q, want a", fp.lastPaused())
+	}
+	m, _ = update(m, msgs[0])
+	if m.state.Playing {
+		t.Error("恢复后应保持暂停")
+	}
+}
+
+// TestResumeFailureResets 恢复加载失败 → 状态重置 + 队列清空 + 错误横幅。
+func TestResumeFailureResets(t *testing.T) {
+	m, fp := newResumeTestModel(t, sessionState(66.6, false), nil)
+	fp.playErr = true
+	msgs := execCmds(resumeCmd(m))
+	m, _ = update(m, msgs[0])
+	if !strings.Contains(m.lastError, "恢复播放失败") {
+		t.Errorf("lastError = %q, want 含恢复播放失败", m.lastError)
+	}
+	if m.state.Track != nil || m.state.Playing {
+		t.Errorf("失败后状态应重置: %+v", m.state)
+	}
+	if m.queue.Len() != 0 {
+		t.Errorf("失败后队列应清空: Len = %d", m.queue.Len())
+	}
+	if got := m.home.view(); !strings.Contains(got, "未在播放") {
+		t.Errorf("home 应回到未播放空态: %q", got)
+	}
+}
+
+// TestResumeNotifiesMPRIS 恢复的曲目应同步给外部消费者（onTrack 回调）。
+func TestResumeNotifiesMPRIS(t *testing.T) {
+	var got *model.Track
+	m, _ := newResumeTestModel(t, sessionState(10, false), func(track *model.Track) {
+		got = track
+	})
+	if got == nil || got.ID != "b" {
+		t.Errorf("onTrack 应收到恢复曲目 b, got %+v", got)
+	}
+	_ = m
+}
+
+// TestSaveOnQuitWritesSession 播放中按 q 退出 → 会话写入（队列 + 进度 + ended）。
+func TestSaveOnQuitWritesSession(t *testing.T) {
+	m, _ := newResumeTestModel(t, nil, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 42, Duration: 200}})
+
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	// 退出 cmd 应包含 Quit
+	var quit bool
+	for _, msg := range execCmds(cmd) {
+		if _, ok := msg.(tea.QuitMsg); ok {
+			quit = true
+		}
+	}
+	if !quit {
+		t.Error("q 应产生 Quit 消息")
+	}
+	// 会话文件已写入（内存态即磁盘态，session 包单测已验证写盘 roundtrip）
+	st := m.session.State()
+	if st == nil {
+		t.Fatal("退出后会话应为非空")
+	}
+	if st.Position != 42 || st.Ended {
+		t.Errorf("会话 = %+v, want position=42 ended=false", st)
+	}
+	if len(st.Queue.Tracks) != 2 || st.Queue.CurrentIdx != 0 {
+		t.Errorf("会话队列 = %+v, want 2 条 current=0", st.Queue)
+	}
+}
+
+// TestSaveThrottledOnProgress 播放中自动保存按 saveInterval 节流。
+func TestSaveThrottledOnProgress(t *testing.T) {
+	m, _ := newResumeTestModel(t, nil, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	// 第一次进度事件（lastSave 零值）→ 立即保存 position=10
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 10, Duration: 200}})
+	st := m.session.State()
+	if st == nil || st.Position != 10 {
+		t.Fatalf("首事件应保存: %+v", st)
+	}
+
+	// 节流窗口内 → 不保存
+	m.lastSave = time.Now()
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 11, Duration: 200}})
+	if st := m.session.State(); st.Position != 10 {
+		t.Errorf("节流窗口内不应保存: %+v", st)
+	}
+
+	// 超过节流窗口 → 保存
+	m.lastSave = time.Now().Add(-saveInterval - time.Second)
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 200}})
+	if st := m.session.State(); st.Position != 12 {
+		t.Errorf("超窗口应保存: %+v", st)
+	}
+}
+
+// TestQuitWithoutTrackClearsSession 无播放中曲目时退出 → 清除会话文件。
+func TestQuitWithoutTrackClearsSession(t *testing.T) {
+	m, _ := newResumeTestModel(t, nil, nil)
+	// 预置一个遗留会话（模拟上次退出残留）
+	if err := m.session.Save(*sessionState(10, false)); err != nil {
+		t.Fatal(err)
+	}
+	if m.state.Track != nil {
+		t.Fatal("前置状态错误：应无播放中曲目")
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if st := m.session.State(); st != nil {
+		t.Error("无播放退出后会话应为空")
+	}
+}
