@@ -22,6 +22,7 @@ type fakeMpvServer struct {
 	commands     [][]interface{} // 收到的所有命令（已解码）
 	pushCh       chan string     // 待推送的事件行
 	duration     float64         // get_property("duration") 的返回值（可配置）
+	volume       float64         // get_property("volume") 的返回值（可配置）
 	respondToGet bool            // false 时对 get_property 不响应（模拟 mpv 挂死）
 	silent       bool            // true 时对所有命令不响应（模拟 mpv 挂死；需用 setSilent 设置避免竞态）
 }
@@ -33,7 +34,7 @@ func newFakeMpvServer(t *testing.T) *fakeMpvServer {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	f := &fakeMpvServer{t: t, ln: ln, pushCh: make(chan string, 32), duration: 217.0, respondToGet: true}
+	f := &fakeMpvServer{t: t, ln: ln, pushCh: make(chan string, 32), duration: 217.0, volume: 100.0, respondToGet: true}
 	go f.acceptLoop()
 	t.Cleanup(func() { _ = f.Close() })
 	return f
@@ -77,12 +78,20 @@ func (f *fakeMpvServer) readLoop(conn net.Conn) {
 			f.mu.Lock()
 			respond := f.respondToGet
 			dur := f.duration
+			vol := f.volume
 			f.mu.Unlock()
 			if !respond {
 				continue // 模拟 mpv 挂死：不回复，客户端 Call 永久阻塞
 			}
-			if prop, ok := req.Command[1].(string); ok && prop == "duration" {
-				data = dur
+			if prop, ok := req.Command[1].(string); ok {
+				switch prop {
+				case "duration":
+					data = dur
+				case "volume":
+					data = vol
+				default:
+					status = "property unavailable"
+				}
 			} else {
 				status = "property unavailable"
 			}
@@ -540,5 +549,107 @@ func TestMpvPlayerCloseIsIdempotent(t *testing.T) {
 	}
 	if err := p.Close(); err != nil {
 		t.Fatalf("重复 Close 应返回 nil: %v", err)
+	}
+}
+
+// ---- Subscribe 广播 ----
+
+func TestMpvPlayerSubscribeReceivesBroadcast(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+	defer p.Close()
+	events, unsub := p.Subscribe()
+	defer unsub()
+
+	fake.pushEvent(`{"event":"property-change","id":1,"data":42.0}`)
+
+	ev := waitEvent(t, p, 2*time.Second) // Events() 主通道不受影响
+	pe, ok := ev.(ProgressEvent)
+	if !ok || pe.Position != 42.0 {
+		t.Fatalf("主通道事件异常: %#v", ev)
+	}
+	select {
+	case ev := <-events:
+		pe, ok := ev.(ProgressEvent)
+		if !ok || pe.Position != 42.0 {
+			t.Fatalf("订阅通道事件异常: %#v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("订阅通道未收到广播事件")
+	}
+}
+
+func TestMpvPlayerSubscribeUnsubscribeStopsDelivery(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+	defer p.Close()
+	events, unsub := p.Subscribe()
+
+	fake.pushEvent(`{"event":"property-change","id":1,"data":1.0}`)
+	select {
+	case <-events:
+	case <-time.After(2 * time.Second):
+		t.Fatal("退订前应能收到事件")
+	}
+	unsub()
+	fake.pushEvent(`{"event":"property-change","id":1,"data":2.0}`)
+	select {
+	case ev := <-events:
+		t.Fatalf("退订后仍收到事件: %#v", ev)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// ---- 音量 ----
+
+func TestMpvPlayerSetVolume(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+	defer p.Close()
+
+	if err := p.SetVolume(55); err != nil {
+		t.Fatalf("SetVolume: %v", err)
+	}
+	cmds := fake.recordedCommands()
+	last := cmds[len(cmds)-1]
+	if len(last) != 3 || last[0] != "set_property" || last[1] != "volume" || last[2] != 55.0 {
+		t.Fatalf("set_property 命令异常: %#v", last)
+	}
+
+	// 越界钳制
+	_ = p.SetVolume(-5)
+	last = fake.recordedCommands()[len(fake.recordedCommands())-1]
+	if last[2] != 0.0 {
+		t.Fatalf("负值未钳制到 0: %#v", last)
+	}
+	_ = p.SetVolume(150)
+	last = fake.recordedCommands()[len(fake.recordedCommands())-1]
+	if last[2] != 100.0 {
+		t.Fatalf("超界未钳制到 100: %#v", last)
+	}
+}
+
+func TestMpvPlayerVolume(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	fake.volume = 60 // 新增字段：get_property("volume") 的返回值
+	p := connectTestPlayer(t, fake)
+	defer p.Close()
+
+	v, err := p.Volume()
+	if err != nil {
+		t.Fatalf("Volume: %v", err)
+	}
+	if v != 60 {
+		t.Fatalf("Volume = %v, want 60", v)
+	}
+}
+
+func TestMpvPlayerVolumeFailsWhenNotConnected(t *testing.T) {
+	p := NewMpvPlayer("mpv", filepath.Join(t.TempDir(), "x.sock"))
+	if _, err := p.Volume(); err == nil {
+		t.Fatal("未连接时 Volume 应报错")
+	}
+	if err := p.SetVolume(50); err == nil {
+		t.Fatal("未连接时 SetVolume 应报错")
 	}
 }
