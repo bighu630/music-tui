@@ -15,6 +15,10 @@ var tabInactiveStyle = lipgloss.NewStyle().Faint(true)
 
 // tabBar 渲染顶部标签栏：四页标题 + 当前页高亮 + 首页播放状态图标 +
 // 队列数量标记。纯函数（无状态），由 View 拼在页面内容上方。
+//
+// 注意：labels 的元素顺序耦合 page 枚举的 iota 顺序（pageHome/
+// pageSearch/pageHistory/pageQueue = 0..3），循环里用 page(i) 与当前页
+// 比对决定高亮；若未来调换标签顺序，必须同步调整枚举顺序，否则高亮错位。
 func (m Model) tabBar() string {
 	labels := []string{m.homeTabLabel(), "搜索", "历史", m.queueTabLabel()}
 	var sb strings.Builder

@@ -26,11 +26,6 @@ func TestMain(m *testing.M) {
 // 等价替代：lipgloss v2 的 RemoveANSI 即 x/ansi 的 Strip 包装）。
 func stripANSI(s string) string { return ansi.Strip(s) }
 
-// activeTab 当前页标签样式（与 tabs.go 实现保持一致，测试据此断言高亮）。
-func activeTab() lipgloss.Style {
-	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-}
-
 // 四标题齐全（初始无曲目 → 首页标签带 ⏹）。
 func TestTabBarShowsFourTitles(t *testing.T) {
 	fp := newFakePlayer()
@@ -44,19 +39,20 @@ func TestTabBarShowsFourTitles(t *testing.T) {
 }
 
 // 初始在首页：首页标签高亮（Bold+212），其余 Faint；当前页不得同时 Faint。
+// 直接复用 tabs.go 的包级样式变量，避免本地重复声明与实现不同步。
 func TestTabBarHighlightsCurrentPage(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	view := m.View()
-	if !strings.Contains(view, activeTab().Render("⏹ 首页")) {
-		t.Errorf("当前页标签应高亮（%q），view = %q", activeTab().Render("⏹ 首页"), view)
+	if !strings.Contains(view, tabStyle.Render("⏹ 首页")) {
+		t.Errorf("当前页标签应高亮（%q），view = %q", tabStyle.Render("⏹ 首页"), view)
 	}
 	for _, title := range []string{"搜索", "历史", "队列"} {
-		if !strings.Contains(view, lipgloss.NewStyle().Faint(true).Render(title)) {
+		if !strings.Contains(view, tabInactiveStyle.Render(title)) {
 			t.Errorf("非当前页 %q 应为 Faint 样式", title)
 		}
 	}
-	if strings.Contains(view, lipgloss.NewStyle().Faint(true).Render("⏹ 首页")) {
+	if strings.Contains(view, tabInactiveStyle.Render("⏹ 首页")) {
 		t.Error("当前页不应为 Faint 样式")
 	}
 }
@@ -67,14 +63,14 @@ func TestTabBarHighlightsFollowsSwitch(t *testing.T) {
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // → 搜索
 	view := m.View()
-	if !strings.Contains(view, activeTab().Render("搜索")) {
+	if !strings.Contains(view, tabStyle.Render("搜索")) {
 		t.Error("切到搜索页后标签应高亮“搜索”")
 	}
-	if strings.Contains(view, activeTab().Render("⏹ 首页")) {
+	if strings.Contains(view, tabStyle.Render("⏹ 首页")) {
 		t.Error("首页标签不应再高亮")
 	}
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // → 队列
-	if !strings.Contains(m.View(), activeTab().Render("队列")) {
+	if !strings.Contains(m.View(), tabStyle.Render("队列")) {
 		t.Error("按 4 后标签应高亮“队列”")
 	}
 }
