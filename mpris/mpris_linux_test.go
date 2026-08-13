@@ -357,6 +357,14 @@ func TestSetPosition(t *testing.T) {
 	if err == nil || err.Name != "org.freedesktop.DBus.Error.InvalidArgs" {
 		t.Fatalf("无曲目应返回 InvalidArgs: %v", err)
 	}
+	// 无曲目 + 空 ObjectPath → InvalidArgs（旧校验会绕过 trackId 检查误放行到 Seek）
+	err = s.SetPosition("", 3e6)
+	if err == nil || err.Name != "org.freedesktop.DBus.Error.InvalidArgs" {
+		t.Fatalf("无曲目 + 空 trackId 应返回 InvalidArgs: %v", err)
+	}
+	if fp.hasCall("Seek") {
+		t.Fatal("拒绝场景不应转调 Seek")
+	}
 
 	s.SetTrack(&model.Track{ID: "vid1", Title: "T"})
 	// 匹配 trackId → Seek(3)
@@ -419,6 +427,29 @@ func TestVolumeCallback(t *testing.T) {
 	// 注意：props 未变化（回调失败时 prop 包不会写入）
 	if got := fpr.GetMust(ifacePlayer, "Volume"); got != nil && got != 1.0 {
 		t.Logf("Volume 属性当前值: %v（本测试不校验）", got)
+	}
+}
+
+// TestCloseIdempotentAndPumpSafety Close 幂等且 Close 后 handleEvent 仍安全：
+// 覆盖修复前的竞态 bug——Close 把 closeCh/conn/props 置 nil，pump goroutine
+// 在 Close 后短暂存活期内读这些字段会空指针 panic。
+func TestCloseIdempotentAndPumpSafety(t *testing.T) {
+	s := newTestServer()
+	fpr := s.props.(*fakeProps)
+
+	// 连续两次 Close：不 panic、均返回 nil
+	if err := s.Close(); err != nil {
+		t.Fatalf("首次 Close 应返回 nil: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("重复 Close 应返回 nil: %v", err)
+	}
+
+	// Close 后 handleEvent 仍不 panic（模拟 pump 已出队、Close 后仍在处理的事件）
+	s.SetTrack(&model.Track{ID: "vid1", Title: "T"})
+	s.handleEvent(player.ProgressEvent{Position: 1.0, Duration: 100})
+	if got := fpr.GetMust(ifacePlayer, "Position"); got != int64(1e6) {
+		t.Errorf("Close 后 handleEvent 应仍更新属性: %v", got)
 	}
 }
 
@@ -556,13 +587,14 @@ func TestIntegrationMPRIS(t *testing.T) {
 		t.Errorf("Metadata title = %v, want T", md["xesam:title"])
 	}
 
-	// SetPosition：先错误 trackId，再正确 trackId
+	// SetPosition：先错误 trackId（原始路径格式，正好验证旧格式被 hex 后拒绝），
+	// 再正确 trackId（hex 编码后的合法路径）
 	if err := obj.Call("org.mpris.MediaPlayer2.Player.SetPosition", 0,
 		dbus.ObjectPath("/org/mpris/MediaPlayer2/TrackList/wrong"), int64(3e6)).Err; err == nil {
 		t.Fatal("错误 trackId 应被拒绝")
 	}
 	if err := obj.Call("org.mpris.MediaPlayer2.Player.SetPosition", 0,
-		dbus.ObjectPath("/org/mpris/MediaPlayer2/TrackList/vid1"), int64(3e6)).Err; err != nil {
+		trackIDPath("vid1"), int64(3e6)).Err; err != nil {
 		t.Fatalf("SetPosition: %v", err)
 	}
 	if !fp.hasCall("Seek,3") {

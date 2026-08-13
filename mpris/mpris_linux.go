@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/prop"
@@ -39,6 +40,7 @@ const trackIDPrefix = "/org/mpris/MediaPlayer2/TrackList/"
 // trackIDPath 把曲目 ID 编码为合法 D-Bus 对象路径段。YouTube ID 可含 '-'，
 // 而对象路径元素只允许 [A-Za-z0-9_]：godbus 封送非法路径直接 panic，会把
 // 整个应用带崩（真实播放中实测复现）。hex 编码保证唯一、可逆、全合法字符。
+// 前置条件：id 非空（UI 侧曲目 ID 恒非空；空 ID 会生成带尾部斜杠的非法路径）。
 func trackIDPath(id string) dbus.ObjectPath {
 	return dbus.ObjectPath(trackIDPrefix + hex.EncodeToString([]byte(id)))
 }
@@ -79,6 +81,8 @@ type Server struct {
 	conn    bus
 	props   propsStore
 	closeCh chan struct{}
+
+	closed atomic.Bool // Close 幂等保护；Close 后 pump 可能短暂存活，字段不再置 nil
 
 	mu    sync.Mutex
 	track *model.Track // 当前/最后曲目（ui 通过 SetTrack 回调写入）
@@ -142,17 +146,22 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Close 停止事件泵并断开总线；未启动或重复调用均安全。
+// Close 停止事件泵并断开总线；幂等，可重复调用。
+// 注意：不得把 conn/props/closeCh 置 nil——Close 后 pump goroutine 可能仍在
+// 短暂存活（已出队事件尚未处理完，handleEvent 读 props/conn、select 读 closeCh），
+// 置 nil 会引发空指针 panic，进而中止 main.go 的 defer 清理。godbus conn.Close()
+// 用 closeOnce 幂等，关闭后 Emit 走 sendAndIfClosed 的 closed 分支为安全 no-op，
+// props.SetMust 仅写本地 prop 值不碰总线，因此 pump 短暂存活是安全的。
 func (s *Server) Close() error {
+	if !s.closed.CompareAndSwap(false, true) {
+		return nil
+	}
 	if s.closeCh != nil {
 		close(s.closeCh)
-		s.closeCh = nil
 	}
 	if s.conn != nil {
 		_ = s.conn.Close()
-		s.conn = nil
 	}
-	s.props = nil
 	return nil
 }
 
@@ -319,10 +328,12 @@ func (h *playerHandler) Seek(offset offsetUs) *dbus.Error {
 	return nil
 }
 
-// SetPosition 绝对跳转；trackId 与当前曲目不匹配时返回 InvalidArgs。
-// position 单位微秒。
+// SetPosition 绝对跳转；无曲目或 trackId 与当前曲目不匹配时返回 InvalidArgs。
+// position 单位微秒。注意：无曲目时必须显式拦截（currentTrackID 返回空路径，
+// 客户端传空 ObjectPath 会绕过 trackId 校验，对未加载文件的 mpv 发起 seek，
+// 返回 Failed 而非 InvalidArgs）。
 func (h *playerHandler) SetPosition(trackId dbus.ObjectPath, position int64) *dbus.Error {
-	if trackId != h.s.currentTrackID() {
+	if !h.s.hasTrack() || trackId != h.s.currentTrackID() {
 		return dbus.NewError("org.freedesktop.DBus.Error.InvalidArgs", nil)
 	}
 	if err := h.s.p.Seek(float64(position) / 1e6); err != nil {
@@ -343,6 +354,13 @@ func (h *playerHandler) OpenUri(uri string) *dbus.Error { return notSupported() 
 // notSupported 构造 NotSupported 错误。
 func notSupported() *dbus.Error {
 	return dbus.NewError("org.freedesktop.DBus.Error.NotSupported", nil)
+}
+
+// hasTrack 返回当前是否有已加载曲目（mutex 保护读）。
+func (s *Server) hasTrack() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.track != nil
 }
 
 // currentTrackID 返回当前曲目的 mpris trackid；无曲目时返回空对象路径。
