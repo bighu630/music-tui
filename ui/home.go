@@ -49,9 +49,10 @@ type homeModel struct {
 	lyrics      *lyrics.Lyrics
 	currentLine int // 当前高亮行下标；-1 = 无高亮
 
-	coverWidget   *termimg.ImageWidget
-	coverFallback bool   // 降级链全部失败 → 占位框
-	coverTrackID  string // 当前封面所属歌曲 ID
+	coverWidget      *termimg.ImageWidget
+	coverRenderCache string // 封面渲染缓存：setCover 时渲染一次；setSize/resetForTrack 时失效
+	coverFallback    bool   // 降级链全部失败 → 占位框
+	coverTrackID     string // 当前封面所属歌曲 ID
 }
 
 func newHomeModel(p player.Player) homeModel {
@@ -113,6 +114,7 @@ func (m homeModel) resetForTrack(track *model.Track) homeModel {
 	m.currentLine = -1
 	m.lyricView.SetContent("")
 	m.coverWidget = nil
+	m.coverRenderCache = ""
 	m.coverFallback = false
 	m.coverTrackID = track.ID
 	return m
@@ -191,12 +193,18 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 	m.coverWidget = w
 	m.coverFallback = false
 	m.coverTrackID = trackID
+	// 创建后立即渲染并缓存：go-termimg 渲染涉及图片加载/缩放，代价高，
+	// 不能在 view 每帧重复调用；渲染失败时留空，由 coverView 兜底重试。
+	if s, err := w.Render(); err == nil && s != "" {
+		m.coverRenderCache = s
+	}
 	return m
 }
 
 // setSize 响应窗口尺寸变化。
 func (m homeModel) setSize(width, height int) homeModel {
 	m.width, m.height = width, height
+	m.coverRenderCache = "" // 渲染输出可能依赖终端尺寸，尺寸变化后失效重渲
 	m.lyricView.Width = width
 	lyricH := height - topH - 2
 	if lyricH < 3 {
@@ -249,9 +257,14 @@ func (m homeModel) view() string {
 }
 
 // coverView 渲染封面；无封面（失败/加载中）时显示占位框。
+// 命中 coverRenderCache 直接返回（避免每帧 Render）；无缓存才 Render 并回填。
 func (m homeModel) coverView() string {
 	if m.coverWidget != nil {
+		if m.coverRenderCache != "" {
+			return m.coverRenderCache
+		}
 		if s, err := m.coverWidget.Render(); err == nil && s != "" {
+			m.coverRenderCache = s
 			return s
 		}
 	}

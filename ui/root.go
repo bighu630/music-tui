@@ -89,6 +89,7 @@ type Model struct {
 	state     model.PlaybackState
 	current   page
 	lastError string
+	ended     bool // 当前歌曲是否已播放结束/出错（空格语义：重播同曲而非 Resume）
 
 	home        homeModel
 	searchPage  searchModel
@@ -112,8 +113,9 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 }
 
 // Init 启动两个常驻 cmd：播放器事件监听 + spinner 全局 tick。
+// （不用包级 spinner.Tick：bubbles v1.0.0 的包级 Tick 无延时，会形成忙循环。）
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(waitForPlayerEvents(m.player), spinner.Tick)
+	return tea.Batch(waitForPlayerEvents(m.player), spinnerTick)
 }
 
 // Update 全局消息路由：先处理播放器事件/服务结果/全局按键，
@@ -227,6 +229,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.togglePlay()
 		case "q", "ctrl+c":
+			// 注意：搜索输入框聚焦时 ctrl+c 会被 textinput 吞掉
+			// （bubbles v1.0.0 textinput 无 ctrl+c 绑定，按键被消费且不转发），
+			// 此时无法用 ctrl+c 退出，只能按 q。
 			if m.current == pageSearch && m.searchPage.typing() {
 				return m.delegate(msg)
 			}
@@ -269,13 +274,16 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.state.Playing = ev.Playing
 		m.home = m.home.syncState(m.state)
 	case player.TrackStartedEvent:
+		m.ended = false
 		m.state.Duration = ev.Duration
 		m.home = m.home.syncState(m.state)
 	case player.TrackEndedEvent:
-		// 第一版无队列：停在当前位置等待用户操作
+		// 第一版无队列：停在当前位置等待用户操作；空格重播同曲（见 restartSameTrack）
+		m.ended = true
 		m.state.Playing = false
 		m.home = m.home.syncState(m.state)
 	case player.ErrorEvent:
+		m.ended = true
 		m.lastError = ev.Err.Error()
 		m.state.Playing = false
 		m.home = m.home.syncState(m.state)
@@ -295,17 +303,21 @@ func waitForPlayerEvents(p player.Player) tea.Cmd {
 }
 
 // startPlay 播放歌曲：切首页、置播放状态，同步调用 player.Play（
-// root_test 的 TestPlayFlow 在 update 返回后立即断言 playCount，故必须同步），
-// 并行触发 歌词 / 封面 / 历史 三个异步 cmd（核心链路 1）。
+// root_test 的 TestPlayFlow 在 update 返回后立即断言 playCount，故必须同步）。
+// 成功时并行触发 歌词 / 封面 / 历史 三个异步 cmd（核心链路 1）；
+// Play 失败时跳过全部异步 cmd（失败播放不进历史、不请求歌词/封面），
+// 状态重置为空回到“未在播放”空态 + 错误横幅。
 func (m Model) startPlay(track model.Track) (Model, tea.Cmd) {
+	m.ended = false
 	m.current = pageHome
 	m.state = model.PlaybackState{Track: &track, Playing: true, Duration: track.Duration}
 	m.lastError = ""
 	m.home = m.home.resetForTrack(&track)
 	if err := m.player.Play(track.URL); err != nil {
 		m.lastError = "播放失败: " + err.Error()
-		m.state.Playing = false
+		m.state = model.PlaybackState{}
 		m.home = m.home.syncState(m.state)
+		return m, nil
 	}
 	return m, tea.Batch(
 		fetchLyricsCmd(m.lyrics, track),
@@ -338,8 +350,12 @@ func addHistoryCmd(h *history.Store, track model.Track) tea.Cmd {
 	}
 }
 
-// togglePlay 全局空格：播放中→暂停，暂停→继续；未播放时忽略。
+// togglePlay 全局空格：播放中→暂停；已结束/出错→重播同曲（ended）；
+// 暂停→继续；未播放时忽略。
 func (m Model) togglePlay() (Model, tea.Cmd) {
+	if m.ended {
+		return m.restartSameTrack()
+	}
 	if m.state.Track == nil {
 		return m, nil
 	}
@@ -351,6 +367,16 @@ func (m Model) togglePlay() (Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		return playerOpResultMsg{err: m.player.Resume()}
 	}
+}
+
+// restartSameTrack 播放结束/出错后空格 → 重播当前歌曲。
+// mpv 存活时正常重载；mpv 已死时 Play 失败会走 startPlay 失败路径
+// （重置状态并报错），行为自洽。Track 为 nil（如播放失败已重置）时忽略。
+func (m Model) restartSameTrack() (Model, tea.Cmd) {
+	if m.state.Track == nil {
+		return m, nil
+	}
+	return m.startPlay(*m.state.Track)
 }
 
 // seekCmd 首页 ←/→ 触发的 seek（绝对位置，UI 侧已 clamp）。

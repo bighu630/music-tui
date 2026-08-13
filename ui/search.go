@@ -26,7 +26,6 @@ const (
 
 // searchResultsMsg 搜索结果（search 页 cmd 产出，root 路由回 search 页）。
 type searchResultsMsg struct {
-	query  string
 	tracks []model.Track
 	err    error
 }
@@ -79,7 +78,8 @@ func newSearchModel(adapter search.SearchAdapter) searchModel {
 	}
 }
 
-// typing 返回输入框是否聚焦（聚焦时全局键让位给输入，如空格/数字/q）。
+// typing 返回输入框是否聚焦（聚焦时空格/q 让位给输入；数字 1/2/3
+// 仍由 root 全局切页，其余数字字符由输入框消费）。
 func (s searchModel) typing() bool { return s.input.Focused() }
 
 // Update 处理搜索页局部按键。
@@ -136,7 +136,7 @@ func (s searchModel) doSearch(query string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		tracks, err := s.adapter.Search(ctx, query)
-		return searchResultsMsg{query: query, tracks: tracks, err: err}
+		return searchResultsMsg{tracks: tracks, err: err}
 	}
 }
 

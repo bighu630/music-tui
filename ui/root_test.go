@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -400,14 +401,111 @@ func TestPlayFailureShowsError(t *testing.T) {
 	fp.playErr = true
 	m := newTestModel(t, fp, &fakeSearchAdapter{})
 	m, cmd := m.startPlay(testTrack("t1"))
-	msgs := execCmds(cmd)
-	for _, msg := range msgs {
-		m, _ = update(m, msg)
+	if cmd != nil {
+		t.Error("播放失败后不应再发异步 cmd（歌词/封面/历史）")
 	}
-	if m.lastError == "" {
-		t.Error("播放失败应显示错误")
+	if !strings.Contains(m.lastError, "播放失败") {
+		t.Errorf("lastError = %q, want 含“播放失败”", m.lastError)
 	}
 	if m.state.Playing {
 		t.Error("播放失败后 Playing 应为 false")
+	}
+	if m.state.Track != nil {
+		t.Error("播放失败后 state.Track 应为 nil（回到未播放空态）")
+	}
+	if m.home.state.Track != nil {
+		t.Error("播放失败后 home 应回到未在播放空态")
+	}
+	if entries := m.history.Entries(); len(entries) != 0 {
+		t.Errorf("播放失败不应写入历史，entries = %d 条", len(entries))
+	}
+	if got := m.home.view(); !strings.Contains(got, "未在播放") {
+		t.Errorf("home.view 应显示未在播放，got %q", got)
+	}
+	// 失败后空格应被忽略（无 Track 可重播，也不走暂停/继续）
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if cmd != nil || fp.playCount() != 0 {
+		t.Error("播放失败后空格应被忽略且不触发任何播放操作")
+	}
+}
+
+func TestErrorEventSetsEndedAndSpaceReplays(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	if fp.playCount() != 1 {
+		t.Fatalf("playCount = %d, want 1", fp.playCount())
+	}
+
+	m, _ = update(m, playerEventMsg{ev: player.ErrorEvent{Err: errors.New("mpv 崩溃")}})
+	if !strings.Contains(m.lastError, "mpv 崩溃") {
+		t.Errorf("lastError = %q, want 含 mpv 崩溃", m.lastError)
+	}
+	if m.state.Playing {
+		t.Error("ErrorEvent 后 Playing 应为 false")
+	}
+	if !m.ended {
+		t.Error("ErrorEvent 后 ended 应为 true")
+	}
+
+	// 出错后空格 = 重播同曲（而非 Resume）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t1").URL {
+		t.Errorf("空格应重播同曲: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	if fp.resumeCount() != 0 {
+		t.Errorf("出错后空格不应走 Resume，resumeCount=%d", fp.resumeCount())
+	}
+	if m.ended || !m.state.Playing {
+		t.Errorf("重播后 ended=%v Playing=%v, want false/true", m.ended, m.state.Playing)
+	}
+}
+
+func TestSpaceAfterTrackEndedReplaysSameTrack(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	if fp.playCount() != 1 {
+		t.Fatalf("playCount = %d, want 1", fp.playCount())
+	}
+
+	// 播放结束：Playing 复位、ended 置位
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if m.state.Playing || !m.ended {
+		t.Fatalf("TrackEnded 后 Playing=%v ended=%v, want false/true", m.state.Playing, m.ended)
+	}
+
+	// 结束态空格 → 重播同曲（Track 仍在，走 startPlay 而非 Resume）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t1").URL {
+		t.Errorf("空格应重播同曲: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	if fp.resumeCount() != 0 {
+		t.Errorf("结束后空格不应走 Resume，resumeCount=%d", fp.resumeCount())
+	}
+	if !m.state.Playing || m.ended {
+		t.Errorf("重播后 state=%+v ended=%v, want Playing=true ended=false", m.state, m.ended)
+	}
+}
+
+func TestTabWrapsAround(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	if m.current != pageHome {
+		t.Fatalf("初始 current = %v, want pageHome", m.current)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // home → search
+	if m.current != pageSearch {
+		t.Fatalf("current = %v, want pageSearch", m.current)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // search → history
+	if m.current != pageHistory {
+		t.Fatalf("current = %v, want pageHistory", m.current)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // history → home（循环 wrap）
+	if m.current != pageHome {
+		t.Errorf("tab 循环后 current = %v, want pageHome", m.current)
 	}
 }

@@ -97,6 +97,37 @@ func TestHomeCoverStates(t *testing.T) {
 	}
 }
 
+func TestHomeCoverRenderCache(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	pngPath := filepath.Join(t.TempDir(), "cover.png")
+	writeTestPNG(t, pngPath)
+
+	m, _ = update(m, coverResultMsg{trackID: "t1", path: pngPath})
+	if m.home.coverWidget == nil {
+		t.Fatal("封面下载成功应创建 widget")
+	}
+	// setCover 后应立即渲染并缓存（避免 view 每帧重复 Render）
+	if m.home.coverRenderCache == "" {
+		t.Fatal("setCover 后 coverRenderCache 应为非空")
+	}
+	if got := m.home.coverView(); got != m.home.coverRenderCache {
+		t.Error("coverView 应直接返回缓存")
+	}
+
+	// setSize 失效 → coverView 重新渲染（仍可用、非空）
+	m.home = m.home.setSize(120, 40)
+	if m.home.coverRenderCache != "" {
+		t.Error("setSize 后 coverRenderCache 应失效（置空）")
+	}
+	if got := m.home.coverView(); got == "" {
+		t.Error("缓存失效后 coverView 应重新渲染封面")
+	}
+}
+
 func TestHomeSeekKeys(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{})
