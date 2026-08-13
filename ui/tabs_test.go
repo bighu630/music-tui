@@ -157,7 +157,10 @@ func TestMouseClickSwitchesPage(t *testing.T) {
 	for _, id := range []string{"q1", "q2", "q3"} {
 		m, _ = update(m, trackAppendMsg{track: testTrack(id)})
 	}
-	for _, lb := range mouseTabCols() {
+	seps := mouseTabCols()
+	// 先注入悬停状态：悬停在“搜索”标签上（hoverTab=1），验证点击会清除悬停
+	m, _ = update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: seps[1].col + 1, Y: 0})
+	for _, lb := range seps {
 		click := lb.col + 1 // 标签内部一列（0-based）
 		m2, _ := update(m, tea.MouseMsg{
 			Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: click, Y: 0,
@@ -165,6 +168,22 @@ func TestMouseClickSwitchesPage(t *testing.T) {
 		if m2.current != lb.want {
 			t.Errorf("点击 %q (x=%d) 后 current = %v, want %v", lb.text, click, m2.current, lb.want)
 		}
+		if m2.hoverTab != -1 {
+			t.Errorf("点击 %q (x=%d) 后 hoverTab = %d, want -1（点击应清除悬停）", lb.text, click, m2.hoverTab)
+		}
+	}
+	// 幂等：先切到搜索页，再点当前页“搜索”应保持 pageSearch
+	m, _ = update(m, tea.MouseMsg{
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[1].col + 1, Y: 0,
+	})
+	if m.current != pageSearch {
+		t.Fatalf("点击“搜索”后 current = %v, want pageSearch", m.current)
+	}
+	m2, _ := update(m, tea.MouseMsg{
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[1].col + 1, Y: 0,
+	})
+	if m2.current != pageSearch {
+		t.Errorf("点击当前页“搜索”应幂等, current = %v, want pageSearch", m2.current)
 	}
 }
 

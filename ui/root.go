@@ -818,7 +818,7 @@ func emitClearHistory() tea.Cmd {
 
 // onMouse 处理鼠标事件：Tab 栏（首行 Y==0，bubbletea X/Y 为 0-based）——
 // 点击标签（左键按下）切换页面，移动更新悬停高亮；其余区域事件不拦截，
-// 交给当前页面（bubbles 列表/歌词区原生获得滚轮滚动与点击选择）。
+// 交给当前页面（歌词区 viewport 原生支持滚轮；bubbles v1.0.0 的列表/输入框暂无鼠标处理）。
 func (m Model) onMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	if msg.Y != 0 {
 		// 鼠标不在 Tab 栏：清除悬停高亮，事件交给页面
