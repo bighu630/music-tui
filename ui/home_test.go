@@ -2,11 +2,13 @@ package ui
 
 import (
 	"bytes"
+	"errors"
 	"image"
 	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -114,17 +116,133 @@ func TestHomeCoverRenderCache(t *testing.T) {
 	if m.home.coverRenderCache == "" {
 		t.Fatal("setCover 后 coverRenderCache 应为非空")
 	}
+	if m.home.coverFailed {
+		t.Error("渲染成功后 coverFailed 应为 false")
+	}
 	if got := m.home.coverView(); got != m.home.coverRenderCache {
 		t.Error("coverView 应直接返回缓存")
 	}
 
-	// setSize 失效 → coverView 重新渲染（仍可用、非空）
+	// setSize 失效并立即重试渲染一次（结果赋回模型）：缓存回填后仍命中
 	m.home = m.home.setSize(120, 40)
-	if m.home.coverRenderCache != "" {
-		t.Error("setSize 后 coverRenderCache 应失效（置空）")
+	if m.home.coverRenderCache == "" {
+		t.Error("setSize 后应立即重渲并回填 coverRenderCache")
 	}
-	if got := m.home.coverView(); got == "" {
-		t.Error("缓存失效后 coverView 应重新渲染封面")
+	if m.home.coverFailed {
+		t.Error("setSize 重渲成功后 coverFailed 应为 false")
+	}
+	if got := m.home.coverView(); got != m.home.coverRenderCache {
+		t.Error("setSize 后 coverView 应直接返回缓存")
+	}
+}
+
+// failCover 渲染总是失败的 fake 封面 widget（用于验证首次 Render 失败后
+// coverView 不再每帧重试；渲染成功后可翻转）。
+type failCover struct {
+	mu    sync.Mutex
+	calls int
+	fail  bool // true 时 Render 返回错误
+	out   string
+}
+
+func (f *failCover) Render() (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.fail {
+		return "", errors.New("render boom")
+	}
+	return f.out, nil
+}
+
+func (f *failCover) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// setFail 切换渲染失败/成功模式。
+func (f *failCover) setFail(fail bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail = fail
+}
+
+// TestHomeCoverRenderFailureStopsPerFrameRetry 守护：setCover 首次 Render
+// 失败（等价状态：widget 存在、缓存为空、coverFailed=true）后，coverView
+// 不再每帧重试（16MiB 解码+缩放）；仅 setSize 时允许重试一次，再失败重新置位。
+func TestHomeCoverRenderFailureStopsPerFrameRetry(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	// 构造 setCover 首次 Render 失败后的状态
+	fc := &failCover{fail: true}
+	m.home.coverWidget = fc
+	m.home.coverRenderCache = ""
+	m.home.coverFailed = true
+
+	// 失败标记置位：coverView 应直接占位框，不触发任何 Render
+	if got := m.home.coverView(); got == "" || !strings.Contains(got, "No Cover") {
+		t.Errorf("coverView 应显示占位框, got %q", got)
+	}
+	if n := fc.callCount(); n != 0 {
+		t.Errorf("coverFailed 置位后 coverView 不应重试 Render, calls = %d", n)
+	}
+
+	// setSize 失效缓存并重置失败标记 → 仅重试一次，仍失败则重新置位
+	m.home = m.home.setSize(120, 40)
+	if got := m.home.coverView(); got == "" || !strings.Contains(got, "No Cover") {
+		t.Errorf("重试失败后 coverView 应显示占位框, got %q", got)
+	}
+	if n := fc.callCount(); n != 1 {
+		t.Errorf("setSize 后应只重试一次 Render, calls = %d", n)
+	}
+	if !m.home.coverFailed {
+		t.Error("重试仍失败应重新置位 coverFailed")
+	}
+
+	// 再次渲染（如下一帧）不得再触发 Render
+	_ = m.home.coverView()
+	if n := fc.callCount(); n != 1 {
+		t.Errorf("重试失败后 coverView 不应再每帧重试, calls = %d", n)
+	}
+}
+
+// TestHomeCoverRenderRetryAfterSetSizeRecovers 守护：setSize 重试一次成功
+// 后应回填缓存并正常展示，后续 view 不再触发 Render。
+func TestHomeCoverRenderRetryAfterSetSizeRecovers(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	fc := &failCover{fail: true, out: "▶" + strings.Repeat("\n", 4)}
+	m.home.coverWidget = fc
+	m.home.coverRenderCache = ""
+	m.home.coverFailed = true
+
+	// setSize 触发一次重试：成功 → 缓存回填，coverFailed 复位
+	fc.setFail(false)
+	m.home = m.home.setSize(120, 40)
+	if got := m.home.coverView(); got == "" || !strings.Contains(got, "▶") {
+		t.Errorf("重试成功后 coverView 应返回渲染结果, got %q", got)
+	}
+	if m.home.coverFailed {
+		t.Error("重试成功后 coverFailed 应为 false")
+	}
+	if m.home.coverRenderCache == "" {
+		t.Error("重试成功后应回填 coverRenderCache")
+	}
+	if n := fc.callCount(); n != 1 {
+		t.Errorf("重试成功应只渲染一次, calls = %d", n)
+	}
+	// 命中缓存：后续 view 不再触发 Render
+	_ = m.home.coverView()
+	_ = m.home.coverView()
+	if n := fc.callCount(); n != 1 {
+		t.Errorf("命中缓存后不应再 Render, calls = %d", n)
 	}
 }
 

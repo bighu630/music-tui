@@ -32,6 +32,12 @@ const (
 	lyricsNone                       // 无歌词
 )
 
+// coverRenderer 封面渲染接口（*termimg.ImageWidget 实现；测试可注入
+// 渲染失败的 fake，验证首次 Render 失败后不再每帧重试）。
+type coverRenderer interface {
+	Render() (string, error)
+}
+
 // homeModel 首页：封面 + 歌曲信息 + 进度条 + 播放控制 + 同步歌词。
 // 播放状态由 root 通过 syncState 推入，页面自身不持有服务。
 type homeModel struct {
@@ -49,8 +55,9 @@ type homeModel struct {
 	lyrics      *lyrics.Lyrics
 	currentLine int // 当前高亮行下标；-1 = 无高亮
 
-	coverWidget      *termimg.ImageWidget
+	coverWidget      coverRenderer
 	coverRenderCache string // 封面渲染缓存：setCover 时渲染一次；setSize/resetForTrack 时失效
+	coverFailed      bool   // 封面渲染失败标记：置位后 coverView 不再每帧重试（仅 setSize 时重置重试一次）
 	coverFallback    bool   // 降级链全部失败 → 占位框
 	coverTrackID     string // 当前封面所属歌曲 ID
 }
@@ -115,6 +122,7 @@ func (m homeModel) resetForTrack(track *model.Track) homeModel {
 	m.lyricView.SetContent("")
 	m.coverWidget = nil
 	m.coverRenderCache = ""
+	m.coverFailed = false
 	m.coverFallback = false
 	m.coverTrackID = track.ID
 	return m
@@ -194,9 +202,13 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 	m.coverFallback = false
 	m.coverTrackID = trackID
 	// 创建后立即渲染并缓存：go-termimg 渲染涉及图片加载/缩放，代价高，
-	// 不能在 view 每帧重复调用；渲染失败时留空，由 coverView 兜底重试。
+	// 不能在 view 每帧重复调用；首次渲染失败置 coverFailed，禁止 coverView
+	// 每帧重试（仅 setSize 时重置允许重试一次）。
+	m.coverFailed = false
 	if s, err := w.Render(); err == nil && s != "" {
 		m.coverRenderCache = s
+	} else {
+		m.coverFailed = true
 	}
 	return m
 }
@@ -205,6 +217,17 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 func (m homeModel) setSize(width, height int) homeModel {
 	m.width, m.height = width, height
 	m.coverRenderCache = "" // 渲染输出可能依赖终端尺寸，尺寸变化后失效重渲
+	// 尺寸变化后重试一次封面渲染：重置 coverFailed 允许重试（含此前失败
+	// 的场景），成功回填缓存，失败重新置位。setSize 的返回值会被赋回模型，
+	// 写盘持久——view 侧（值接收者）的写入会丢失，故渲染不能放在 coverView。
+	m.coverFailed = false
+	if m.coverWidget != nil {
+		if s, err := m.coverWidget.Render(); err == nil && s != "" {
+			m.coverRenderCache = s
+		} else {
+			m.coverFailed = true
+		}
+	}
 	m.lyricView.Width = width
 	lyricH := height - topH - 2
 	if lyricH < 3 {
@@ -257,16 +280,13 @@ func (m homeModel) view() string {
 }
 
 // coverView 渲染封面；无封面（失败/加载中）时显示占位框。
-// 命中 coverRenderCache 直接返回（避免每帧 Render）；无缓存才 Render 并回填。
+// 纯读取：渲染只发生在 setCover（首次）与 setSize（尺寸变化后重试一次），
+// 成功回填 coverRenderCache，失败置 coverFailed；coverView 绝不触发 Render，
+// 避免每帧重复 16MiB 解码+缩放（值接收者写入不持久，渲染写回必须在
+// setCover/setSize 这类结果被赋回模型的路径上完成）。
 func (m homeModel) coverView() string {
-	if m.coverWidget != nil {
-		if m.coverRenderCache != "" {
-			return m.coverRenderCache
-		}
-		if s, err := m.coverWidget.Render(); err == nil && s != "" {
-			m.coverRenderCache = s
-			return s
-		}
+	if m.coverWidget != nil && !m.coverFailed && m.coverRenderCache != "" {
+		return m.coverRenderCache
 	}
 	return lipgloss.NewStyle().
 		Width(coverW).

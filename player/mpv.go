@@ -226,13 +226,31 @@ func (p *MpvPlayer) handlePropertyChange(ev *mpvipc.Event) {
 	}
 }
 
+// callWithTimeout 带超时执行一条 mpv IPC 命令：mpv 挂死时 mpvipc 的
+// Call 会永久阻塞（关闭连接也不通知 waitingRequests），必须加超时兜底。
+// 超时返回错误；内部 goroutine 可能永久挂起（每次超时泄漏一个，与 Close
+// 的 quit goroutine 同款权衡）——mpv 挂死属罕见故障，可接受。
+func callWithTimeout(fn func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(500 * time.Millisecond):
+		return errors.New("mpv 命令超时（500ms 未响应）")
+	}
+}
+
 // Play 开始播放指定 URL（loadfile 替换当前歌曲）。
 func (p *MpvPlayer) Play(url string) error {
 	if p.conn == nil || p.conn.IsClosed() {
 		return errors.New("mpv 未连接")
 	}
 	p.setDuration(0)
-	if _, err := p.conn.Call("loadfile", url); err != nil {
+	if err := callWithTimeout(func() error {
+		_, err := p.conn.Call("loadfile", url)
+		return err
+	}); err != nil {
 		return fmt.Errorf("loadfile: %w", err)
 	}
 	return nil
@@ -243,7 +261,9 @@ func (p *MpvPlayer) Pause() error {
 	if p.conn == nil || p.conn.IsClosed() {
 		return errors.New("mpv 未连接")
 	}
-	if err := p.conn.Set("pause", true); err != nil {
+	if err := callWithTimeout(func() error {
+		return p.conn.Set("pause", true)
+	}); err != nil {
 		return fmt.Errorf("pause: %w", err)
 	}
 	return nil
@@ -254,7 +274,9 @@ func (p *MpvPlayer) Resume() error {
 	if p.conn == nil || p.conn.IsClosed() {
 		return errors.New("mpv 未连接")
 	}
-	if err := p.conn.Set("pause", false); err != nil {
+	if err := callWithTimeout(func() error {
+		return p.conn.Set("pause", false)
+	}); err != nil {
 		return fmt.Errorf("resume: %w", err)
 	}
 	return nil
@@ -265,7 +287,10 @@ func (p *MpvPlayer) Seek(seconds float64) error {
 	if p.conn == nil || p.conn.IsClosed() {
 		return errors.New("mpv 未连接")
 	}
-	if _, err := p.conn.Call("seek", seconds, "absolute"); err != nil {
+	if err := callWithTimeout(func() error {
+		_, err := p.conn.Call("seek", seconds, "absolute")
+		return err
+	}); err != nil {
 		return fmt.Errorf("seek: %w", err)
 	}
 	return nil

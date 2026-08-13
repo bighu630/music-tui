@@ -275,7 +275,11 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.home = m.home.syncState(m.state)
 	case player.TrackStartedEvent:
 		m.ended = false
-		m.state.Duration = ev.Duration
+		// 仅在拿到真实时长时覆盖：Duration=0 表示 observe 与 Get 兜底
+		// 均失败（直播/特殊流），此时保留搜索元数据提供的时长，避免被抹零。
+		if ev.Duration > 0 {
+			m.state.Duration = ev.Duration
+		}
 		m.home = m.home.syncState(m.state)
 	case player.TrackEndedEvent:
 		// 第一版无队列：停在当前位置等待用户操作；空格重播同曲（见 restartSameTrack）

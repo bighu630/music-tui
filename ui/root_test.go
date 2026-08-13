@@ -429,6 +429,29 @@ func TestPlayFailureShowsError(t *testing.T) {
 	}
 }
 
+// TrackStartedEvent 携带 Duration=0（observe 与 Get 兜底均失败，如直播/
+// 特殊流）时不应覆盖搜索元数据提供的真实时长，避免进度条被抹零。
+func TestTrackStartedEventZeroDurationKeepsMetadata(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m, cmd := m.startPlay(testTrack("t1")) // 搜索元数据 Duration=200
+	_ = execCmds(cmd)
+	if m.state.Duration != 200 {
+		t.Fatalf("startPlay 后 Duration = %v, want 200", m.state.Duration)
+	}
+
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 0}})
+	if m.state.Duration != 200 {
+		t.Errorf("Duration=0 的 TrackStartedEvent 不应覆盖已有时长: got %v, want 200", m.state.Duration)
+	}
+
+	// 非零时长仍正常覆盖
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 217}})
+	if m.state.Duration != 217 {
+		t.Errorf("Duration=217 的 TrackStartedEvent 应覆盖: got %v", m.state.Duration)
+	}
+}
+
 func TestErrorEventSetsEndedAndSpaceReplays(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{})

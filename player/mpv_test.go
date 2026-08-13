@@ -23,6 +23,7 @@ type fakeMpvServer struct {
 	pushCh       chan string     // 待推送的事件行
 	duration     float64         // get_property("duration") 的返回值（可配置）
 	respondToGet bool            // false 时对 get_property 不响应（模拟 mpv 挂死）
+	silent       bool            // true 时对所有命令不响应（模拟 mpv 挂死；需用 setSilent 设置避免竞态）
 }
 
 func newFakeMpvServer(t *testing.T) *fakeMpvServer {
@@ -64,7 +65,11 @@ func (f *fakeMpvServer) readLoop(conn net.Conn) {
 		}
 		f.mu.Lock()
 		f.commands = append(f.commands, req.Command)
+		silent := f.silent
 		f.mu.Unlock()
+		if silent {
+			continue // 模拟 mpv 挂死：不回复任何命令，客户端 Call 永久阻塞
+		}
 
 		status := "success"
 		var data interface{}
@@ -113,6 +118,13 @@ func (f *fakeMpvServer) recordedCommands() [][]interface{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([][]interface{}(nil), f.commands...)
+}
+
+// setSilent 切换命令静默模式（连接建立后调用，线程安全）。
+func (f *fakeMpvServer) setSilent(silent bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.silent = silent
 }
 
 // Close 关闭连接与监听，模拟 mpv 退出/崩溃。
@@ -418,6 +430,37 @@ func TestMpvPlayerCommands(t *testing.T) {
 			if got[i][j] != want[i][j] {
 				t.Fatalf("cmd[%d] = %v, want %v", i, got[i], want[i])
 			}
+		}
+	}
+}
+
+// mpv 挂死（对命令不响应）时 Play/Pause/Resume/Seek 应在 ~500ms 内
+// 超时返回错误，而不是永久阻塞（否则同步调用会冻结整个 TUI）。
+func TestMpvPlayerCommandsTimeoutWhenMpvHangs(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+	fake.setSilent(true) // 之后不回复任何命令，模拟 mpv 挂死
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"Play", func() error { return p.Play("https://example.com/a.mp3") }},
+		{"Pause", func() error { return p.Pause() }},
+		{"Resume", func() error { return p.Resume() }},
+		{"Seek", func() error { return p.Seek(30) }},
+	} {
+		start := time.Now()
+		err := tc.call()
+		if err == nil {
+			t.Errorf("%s: mpv 不响应时应超时报错", tc.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "超时") {
+			t.Errorf("%s: err = %v, want 超时消息", tc.name, err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Errorf("%s: 超时未及时生效: %v（超过 500ms 超时 + 余量）", tc.name, elapsed)
 		}
 	}
 }
