@@ -654,7 +654,9 @@ func TestMpvPlayerVolume(t *testing.T) {
 }
 
 func TestMpvPlayerVolumeFailsWhenNotConnected(t *testing.T) {
-	p := NewMpvPlayer("mpv", filepath.Join(t.TempDir(), "x.sock"))
+	// binPath 用不存在的路径：ensureConnected 会触发重连但 exec 必然失败，
+	// 命令应快速返回错误（不能用 "mpv"——本机真实 mpv 会被启动并连接成功）。
+	p := NewMpvPlayer(filepath.Join(t.TempDir(), "no-such-mpv"), filepath.Join(t.TempDir(), "x.sock"))
 	if _, err := p.Volume(); err == nil {
 		t.Fatal("未连接时 Volume 应报错")
 	}

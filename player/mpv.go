@@ -521,8 +521,13 @@ func (p *MpvPlayer) Seek(seconds float64) error {
 }
 
 // SetVolume 设置 mpv 音量（0-100，越界钳制）。
+// 与 Play/Pause/Resume/Seek 一致：断开时自动重连（见 ensureConnected）。
 func (p *MpvPlayer) SetVolume(percent float64) error {
-	if p.conn == nil || p.conn.IsClosed() {
+	if err := p.ensureConnected(); err != nil {
+		return err
+	}
+	conn := p.currentConn()
+	if conn == nil {
 		return errors.New("mpv 未连接")
 	}
 	if percent < 0 {
@@ -531,7 +536,7 @@ func (p *MpvPlayer) SetVolume(percent float64) error {
 		percent = 100
 	}
 	if err := callWithTimeout(func() error {
-		return p.conn.Set("volume", percent)
+		return conn.Set("volume", percent)
 	}); err != nil {
 		return fmt.Errorf("set volume: %w", err)
 	}
@@ -539,14 +544,19 @@ func (p *MpvPlayer) SetVolume(percent float64) error {
 }
 
 // Volume 读取 mpv 音量（0-100）。
+// 与 Play/Pause/Resume/Seek 一致：断开时自动重连（见 ensureConnected）。
 func (p *MpvPlayer) Volume() (float64, error) {
-	if p.conn == nil || p.conn.IsClosed() {
+	if err := p.ensureConnected(); err != nil {
+		return 0, err
+	}
+	conn := p.currentConn()
+	if conn == nil {
 		return 0, errors.New("mpv 未连接")
 	}
 	var v interface{}
 	var err error
 	if err = callWithTimeout(func() error {
-		v, err = p.conn.Get("volume")
+		v, err = conn.Get("volume")
 		return err
 	}); err != nil {
 		return 0, fmt.Errorf("get volume: %w", err)
