@@ -279,3 +279,49 @@ mpv 进度事件（50ms）→ root 更新 PlaybackState.Position
 - 续播（历史 Entry 增加进度字段）
 - 搜索历史
 - chafa 等外部工具增强封面画质
+
+## 13. MPRIS 协议支持（追加需求，主体完成后实现）
+
+### 13.1 概述
+- 支持 Linux 桌面媒体控制协议 MPRIS（D-Bus），使桌面媒体键、playerctl、GNOME/KDE 媒体控件能控制播放器
+- 仅 Linux 编译；非 Linux 平台提供 no-op 桩，不影响构建
+- 技术路线：godbus/dbus v5（v5.2.2，2025 年末恢复活跃维护）+ godbus/prop 包手写服务端（无成熟现成库，社区共识路线；参考 mpd-mpris、go-musicfox）
+
+### 13.2 模块结构
+```
+mpris/
+├── mpris_linux.go        # //go:build linux：D-Bus 服务端实现
+└── mpris_unsupported.go  # //go:build !linux：no-op 桩
+```
+- 服务名：org.mpris.MediaPlayer2.music-tui；对象路径：/org/mpris/MediaPlayer2
+- 实现接口：org.mpris.MediaPlayer2（根）与 org.mpris.MediaPlayer2.Player
+
+### 13.3 数据流（双向，复用 player 事件流）
+播放器 → D-Bus（订阅 player.Events()）：
+- ProgressEvent（~50ms）→ props.Set 静默更新 Position（EmitFalse，微秒单位，无总线流量）；检测到进度跳变 >2s（用户/外部 seek）→ conn.Emit 发 Seeked 信号
+- StateEvent → PlaybackStatus（Playing/Paused/Stopped）+ Rate 同步
+- TrackStartedEvent → Metadata 整包替换：mpris:trackid（/org/mpris/MediaPlayer2/TrackList/<id>）、mpris:length（微秒）、xesam:title、xesam:artist（as 数组）、mpris:artUrl（封面 URL）
+- TrackEndedEvent → PlaybackStatus=Stopped；Metadata 保留最后曲目
+
+D-Bus → 播放器（方法转调 Player 接口）：
+- Play / Pause / PlayPause / Seek(offset) / SetPosition(校验 trackId 匹配后 Seek(abs-current))
+- Stop → Pause + Seek(0)（无队列时最接近停止语义）
+- Next / Previous：CanGoNext=CanGoPrevious=false，方法返回 NotSupported（第一版无播放队列）
+- OpenUri：返回 NotSupported
+- 错误统一返回 *dbus.Error
+
+属性清单：
+- PlaybackStatus / Position / Metadata / Rate（固定 1.0，Min=Max=1.0）/ LoopStatus（固定 None）/ Shuffle（false）/ Volume（读写，映射 mpv volume）
+- CanControl / CanPlay / CanPause / CanSeek = true；CanGoNext / CanGoPrevious / CanQuit / CanRaise / HasTrackList = false
+
+### 13.4 降级策略
+- 先检查 DBUS_SESSION_BUS_ADDRESS 或使用 SessionBusPrivateNoAutoStartup（避免 godbus 自动 dbus-launch 泄漏进程）
+- 连接失败 / RequestName 失败（被占用、无权限）→ log 警告并禁用 MPRIS，绝不影响播放器主功能
+
+### 13.5 测试策略
+- Seeked 判定、Metadata 构建、PlaybackStatus 映射等纯逻辑抽成纯函数单测
+- D-Bus 集成测试依赖真实 session bus，CI 中跳过
+
+### 13.6 与主实现的衔接
+- 依赖主体完成的 player 包（Events() 通道、Play/Pause/Resume/Seek 接口）与 model 包（Track 含 CoverURL）
+- 主体 10 个 Task 完成后，追加实现计划 Task 11 执行本章节
