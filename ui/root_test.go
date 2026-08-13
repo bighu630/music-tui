@@ -939,13 +939,13 @@ func TestResumeLoadFailNoAutoRetry(t *testing.T) {
 		t.Fatal("恢复场景应置 resuming 标记")
 	}
 
-	// PlayPaused + Seek IPC 成功 → resumeResultMsg 成功（resuming 保持，
-	// 等待 mpv 异步加载结果：TrackStartedEvent 或 end-file error）
+	// PlayPaused（含 start= 原子定位，不再单独 Seek）IPC 成功 → resumeResultMsg
+	// 成功（resuming 保持，等待 mpv 异步加载结果：TrackStartedEvent 或 end-file error）
 	msgs := execCmds(resumeCmd(m))
 	m, cmd := update(m, msgs[0])
 	_ = execCmds(cmd) // 歌词/封面加载结果与本测试无关
-	if fp.pausedCount() != 1 || len(fp.seeks) != 1 {
-		t.Fatalf("恢复应 PlayPaused+Seek: paused=%d seeks=%v", fp.pausedCount(), fp.seeks)
+	if fp.pausedCount() != 1 || len(fp.seeks) != 0 || fp.pausedStart() != 66.6 {
+		t.Fatalf("恢复应 PlayPaused(url, 66.6): paused=%d seeks=%v start=%v", fp.pausedCount(), fp.seeks, fp.pausedStart())
 	}
 
 	// 实际取流失败（end-file error）：不得自动重试，保留恢复失败语义
@@ -961,8 +961,8 @@ func TestResumeLoadFailNoAutoRetry(t *testing.T) {
 	if !strings.Contains(m.lastError, "恢复播放失败") || !strings.Contains(m.lastError, "风控") {
 		t.Errorf("lastError = %q, want 含“恢复播放失败”与 hint 诊断（风控）", m.lastError)
 	}
-	if m.queue.Len() != 0 {
-		t.Errorf("失败后队列应清空: Len = %d", m.queue.Len())
+	if m.queue.Len() != 3 {
+		t.Errorf("失败后队列应保留展示: Len = %d, want 3", m.queue.Len())
 	}
 	if m.state.Track != nil || m.state.Playing {
 		t.Errorf("失败后状态应重置: %+v", m.state)

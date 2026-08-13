@@ -306,14 +306,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case resumeResultMsg:
 		if msg.err != nil {
-			// 恢复失败：清空内存中的恢复队列（当前曲播放不了）；磁盘会话
-			// 保留——下次启动重试（mpv 瞬时故障可恢复），用户播放新曲或
-			// 退出时自然覆盖/清除。
+			// 恢复失败：状态重置（当前曲播放不了），但队列保留展示——用户仍
+			// 可查看/跳转播放其他曲目；磁盘会话保留，下次启动重试（mpv 瞬时
+			// 故障可恢复），用户播放新曲或退出时自然覆盖/清除。
 			m.resuming = false // 恢复上下文作废
 			m.lastError = "恢复播放失败: " + msg.err.Error()
 			m.state = model.PlaybackState{}
 			m.home = m.home.syncState(m.state)
-			m.queue = queue.New()
 			m.queueSkip = false
 			m.notifyTrack(nil)
 			return m.syncQueueViews(), nil
@@ -507,14 +506,14 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		if errors.As(ev.Err, &le) {
 			// 续播恢复（PlayPaused 静默加载）期间撞取流失败：不自动重试——
 			// 恢复上下文已作废（重试会走 beginPlay→Play()：发声、从 0:00、
-			// 非暂停，静默丢弃恢复语义），保留“恢复播放失败”语义：清空内存
-			// 队列 + 横幅带 hint 诊断；磁盘会话保留，下次启动重试。
+			// 非暂停，静默丢弃恢复语义），保留“恢复播放失败”语义：状态重置 + 横幅
+			// 带 hint 诊断，队列保留展示（可查看/跳转其他曲目）；磁盘会话保留，
+			// 下次启动重试。
 			if m.resuming {
 				m.resuming = false
 				m.lastError = "恢复播放失败: " + loadFailureHint(le.FileError)
 				m.state = model.PlaybackState{}
 				m.home = m.home.syncState(m.state)
-				m.queue = queue.New()
 				m.queueSkip = false
 				m.notifyTrack(nil)
 				return m.syncQueueViews(), tea.Batch(cmds...)

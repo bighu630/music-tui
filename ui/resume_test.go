@@ -194,8 +194,8 @@ func TestResumeFailureResets(t *testing.T) {
 	if m.state.Track != nil || m.state.Playing {
 		t.Errorf("失败后状态应重置: %+v", m.state)
 	}
-	if m.queue.Len() != 0 {
-		t.Errorf("失败后队列应清空: Len = %d", m.queue.Len())
+	if m.queue.Len() != 3 {
+		t.Errorf("失败后队列应保留展示（不播但可见）: Len = %d, want 3", m.queue.Len())
 	}
 	if got := m.home.view(); !strings.Contains(got, "未在播放") {
 		t.Errorf("home 应回到未播放空态: %q", got)

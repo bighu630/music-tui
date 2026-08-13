@@ -453,7 +453,8 @@ main 加载 session.Store（损坏→备份重建）→ NewModel：
       home 同步（进度条定位、歌词置加载中）
       Init 返回 resumeCmd：PlayPaused(url) → Seek(pos) → resumeResultMsg
       → 成功后异步加载歌词/封面（暂停态也可展示）
-      → 失败：状态重置 + 内存队列清空 + 错误横幅；磁盘会话保留（下次启动重试，
+      → 失败（IPC 或 mpv 异步取流）：状态重置 + 错误横幅，**队列保留展示**
+        （用户可查看/跳转播放其他曲目）；磁盘会话保留（下次启动重试，
         用户播放新曲或退出时自然覆盖/清除）
   → session 无状态 / 队列无当前曲目（损坏/手改）：从空态开始
 恢复的 ended 语义：
@@ -467,6 +468,11 @@ main 加载 session.Store（损坏→备份重建）→ NewModel：
 - **播放中**：ProgressEvent 更新时按 `saveInterval=5s` 节流保存（lastSave 记录）
 - **无播放中曲目时退出**：删除会话文件（会话自然结束，避免下次恢复陈旧状态）
 - 保存失败仅记日志，不影响播放主链路（尽力而为）
+
+### 15.6 已知问题：恢复定位竞态（已修复）
+- 初版恢复流程为 `PlayPaused(url)` + 单独 `Seek(pos)`：loadfile 是异步的（yt-dlp 解析网络曲目需数秒），加载完成前 seek 被 mpv 拒绝（`error running command`）→ 恢复必然失败
+- 修复（a7573e1，2026-08-13）：`PlayPaused(url, start)` 用 mpv ≥0.38 的 4 参 loadfile 语法 `loadfile <url> replace -1 start=<pos>` 随加载原子定位；start=0 时用 2 参语法兼容旧版
+- 实测注意：YouTube 风控（403）为间歇性环境问题，恢复失败时队列保留展示（见 15.4），不阻塞用户查看/跳转
 
 ### 15.6 测试策略
 | 模块 | 策略 |
