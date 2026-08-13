@@ -67,8 +67,19 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
     单飞（并发只启动一次）、crash-loop 双循环、重连中再断恢复；全量 -race + -count=3 全绿
   - 验证：断开后无需重启应用，按空格/回车自动恢复播放；重连失败时界面显示明确错误；
     下次断线时终端日志（mpv 进程已退出: signal: killed / exit status N）可定位断开原因
-- [ ] end-file reason=error 根因排查（本次修复覆盖"出错→mpv 退出→断连→自动重连"链路，
-  但内容层根因——yt-dlp 取流失败/视频不可用等——未定位，需另查）
+- [x] end-file reason=error 根因排查 + 修复 ✅（分支 fix/mpv-endfile-error，已实现待合并）
+  - 根因（实证）：取流链路 ui → mpv loadfile → mpv 内置 ytdl_hook 调系统 yt-dlp 解析成功 →
+    mpv/ffmpeg 打开 googlevideo 直链时**间歇性 HTTP 403 Forbidden**（YouTube 服务端风控/限流，
+    本机 mpv v0.41 + yt-dlp 2026.07.04 复现，8 次试验失败 2 次）→ end-file reason=error，
+    file_error="no audio or video data played"；失败后立即重试（重新解析拿新签名 URL）均成功——瞬态错误
+  - 修复：
+    1. pump 的 end-file error 透传 file_error 诊断文本（新类型 player.LoadFailedError，错误消息保留原前缀）
+    2. mpv 启动参数 + --ytdl-format=bestaudio（纯音频播放器只需音频流，避免同时开视频+音频两个流，403 暴露面减半）
+    3. UI 取流失败自动重试：每曲最多 2 次（延迟 2s，重新 loadfile=重新取流拿新 URL），
+       代际计数器（playGen）保证用户换曲后过期重试丢弃；重试耗尽后队列有下一首则跳过继续连播
+       （不再中断整个连播），单曲则停止并提示手动重试；file_error 映射为可操作中文提示
+  - 测试：LoadFailedError 携带/缺失 file_error、--ytdl-format 启动参数、重试成功/耗尽跳过/耗尽停止/过期重试丢弃、
+    hint 映射；全量 build/vet/test -race + player/ui -count=3 全绿
 
 ## 顶部 Tab 标签栏追加需求（用户已确认样式/图标细节）
 
