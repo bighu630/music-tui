@@ -46,6 +46,12 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 创建 feature_lead 实现播放队列（与 MPRIS 并行，注意 git 协作）✅（commit 5f560c5 + 16d1f06，已合并 master）
 - [x] 验收：连播、随机、添加/删除/清空、首页位置显示 ✅（测试全绿含 -race；review 循环修复删除当前曲连播衔接缺陷 9bfec4e；真机听感验收待用户确认）
 
+## 续播追加需求（用户已确认方案 B）
+
+- [x] 设计确认：记住队列+进度，重启暂停恢复；退出保存 + 5s 节流自动保存
+- [x] 实现：session/ 包 + queue Snapshot/Restore + player PlayPaused + ui 恢复/保存 ✅（commit 261bd92 + 4f4820f + 修复 7335251，已合并 master）
+- [ ] 验收：真机验证（播放中退出→重启→空格继续；崩溃恢复）
+
 ## Bug 修复（bugfix_lead session_ba4ba596-692 处理中）
 
 - [x] 创建 bugfix_lead：修复 "播放失败: mpv 未连接"（连接断开不重连）
@@ -63,3 +69,10 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
     下次断线时终端日志（mpv 进程已退出: signal: killed / exit status N）可定位断开原因
 - [ ] end-file reason=error 根因排查（本次修复覆盖"出错→mpv 退出→断连→自动重连"链路，
   但内容层根因——yt-dlp 取流失败/视频不可用等——未定位，需另查）
+
+## 顶部 Tab 标签栏追加需求（用户已确认样式/图标细节）
+
+- [x] 设计确认：四标题 + 当前页高亮（Bold+212 粉）+ 首页播放状态图标（⏵/⏸/⏹）+ 队列数量（仅 >0 时显示）+ Tab 栏占首行高度减 1
+- [x] 实现：ui/tabs.go（tabBar 纯函数）+ root.go（View 拼 tabBar、WindowSizeMsg 四页 height-1）+ 补 queuePage.setSize 既有遗漏 ✅（commit 3bd374c + f2a7d12 + 7df653b，已合并 master）
+- [x] 审查：reviewer 两轮批准（go mod tidy + 测试复用 tabStyle + 注释修正）✅
+- [ ] 验收：真机确认标签栏视觉（高亮样式/图标/队列数量显示是否满意）
