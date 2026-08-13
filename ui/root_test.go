@@ -24,14 +24,15 @@ import (
 // ---- fakes ----
 
 type fakePlayer struct {
-	mu      sync.Mutex
-	plays   []string
-	paused  []string // PlayPaused 调用记录（续播恢复）
-	pauses  int
-	resumes int
-	seeks   []float64
-	playErr bool // 为 true 时 Play 返回错误（测试注入）
-	events  chan player.Event
+	mu           sync.Mutex
+	plays        []string  // Play 调用记录
+	paused       []string  // PlayPaused 调用记录（续播恢复）
+	pausedStarts []float64 // PlayPaused 的 start 参数记录（恢复起点）
+	pauses       int
+	resumes      int
+	seeks        []float64
+	playErr      bool // 为 true 时 Play 返回错误（测试注入）
+	events       chan player.Event
 }
 
 func newFakePlayer() *fakePlayer {
@@ -48,13 +49,14 @@ func (f *fakePlayer) Play(url string) error {
 	return nil
 }
 
-func (f *fakePlayer) PlayPaused(url string) error {
+func (f *fakePlayer) PlayPaused(url string, start float64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.playErr {
 		return context.DeadlineExceeded
 	}
 	f.paused = append(f.paused, url)
+	f.pausedStarts = append(f.pausedStarts, start)
 	return nil
 }
 
@@ -105,6 +107,16 @@ func (f *fakePlayer) pausedCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.paused)
+}
+
+// pausedStart 返回最近一次 PlayPaused 的 start 参数（无调用返回 0）。
+func (f *fakePlayer) pausedStart() float64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.pausedStarts) == 0 {
+		return 0
+	}
+	return f.pausedStarts[len(f.pausedStarts)-1]
 }
 
 func (f *fakePlayer) lastPaused() string {

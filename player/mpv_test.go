@@ -495,19 +495,39 @@ func TestMpvPlayerCommands(t *testing.T) {
 
 // PlayPaused 加载指定 URL 但保持暂停（续播恢复用，不发声）。
 // 命令序列：set pause=true → loadfile（mpv 的 pause 属性不随文件重置）。
+// start>0 时用 4 参 loadfile（mpv ≥0.38）随加载原子定位，避免加载窗口内
+// 单独 seek 被 mpv 拒绝（error running command）的竞态。
 func TestMpvPlayerPlayPaused(t *testing.T) {
 	fake := newFakeMpvServer(t)
 	p := connectTestPlayer(t, fake)
 
-	if err := p.PlayPaused("https://www.youtube.com/watch?v=abc"); err != nil {
+	// start>0：4 参 loadfile（replace -1 + start= 选项），定位随加载原子完成
+	if err := p.PlayPaused("https://www.youtube.com/watch?v=abc", 66.6); err != nil {
 		t.Fatal(err)
 	}
-
 	cmds := fake.recordedCommands()
 	got := cmds[3:] // 前 3 条是 observe_property
 	want := [][]interface{}{
 		{"set_property", "pause", true},
-		{"loadfile", "https://www.youtube.com/watch?v=abc"},
+		{"loadfile", "https://www.youtube.com/watch?v=abc", "replace", float64(-1), "start=66.6"},
+	}
+	for i := range want {
+		for j := range want[i] {
+			if got[i][j] != want[i][j] {
+				t.Fatalf("cmd[%d] = %v, want %v", i, got[i], want[i])
+			}
+		}
+	}
+
+	// start=0：2 参 loadfile（兼容 mpv <0.38，从头加载）
+	if err := p.PlayPaused("https://www.youtube.com/watch?v=def", 0); err != nil {
+		t.Fatal(err)
+	}
+	cmds = fake.recordedCommands()
+	got = cmds[5:] // 前 5 条是 observe_property + 上一条 PlayPaused 的 2 条命令
+	want = [][]interface{}{
+		{"set_property", "pause", true},
+		{"loadfile", "https://www.youtube.com/watch?v=def"},
 	}
 	for i := range want {
 		for j := range want[i] {
@@ -530,7 +550,7 @@ func TestMpvPlayerCommandsTimeoutWhenMpvHangs(t *testing.T) {
 		call func() error
 	}{
 		{"Play", func() error { return p.Play("https://example.com/a.mp3") }},
-		{"PlayPaused", func() error { return p.PlayPaused("https://example.com/a.mp3") }},
+		{"PlayPaused", func() error { return p.PlayPaused("https://example.com/a.mp3", 30) }},
 		{"Pause", func() error { return p.Pause() }},
 		{"Resume", func() error { return p.Resume() }},
 		{"Seek", func() error { return p.Seek(30) }},
@@ -559,7 +579,7 @@ func TestMpvPlayerCommandsFailWhenNotConnected(t *testing.T) {
 		call func() error
 	}{
 		{"Play", func() error { return p.Play("https://example.com/a.mp3") }},
-		{"PlayPaused", func() error { return p.PlayPaused("https://example.com/a.mp3") }},
+		{"PlayPaused", func() error { return p.PlayPaused("https://example.com/a.mp3", 30) }},
 		{"Pause", func() error { return p.Pause() }},
 		{"Resume", func() error { return p.Resume() }},
 		{"Seek", func() error { return p.Seek(10) }},

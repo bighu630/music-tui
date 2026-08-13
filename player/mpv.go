@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -479,8 +480,12 @@ func (p *MpvPlayer) Play(url string) error {
 
 // PlayPaused 加载指定 URL 但保持暂停（续播恢复用）：先置 pause=yes
 // 再 loadfile——mpv 的 pause 属性不随文件重置，新文件加载后保持暂停
-// 不发声，随后由调用方 Seek 定位。
-func (p *MpvPlayer) PlayPaused(url string) error {
+// 不发声。start>0 时随 loadfile 的 start= 选项原子定位（mpv ≥0.38 的
+// 4 参语法 loadfile <url> replace <index> <options>）：loadfile 响应是
+// 即时的（文件异步加载，网络曲目加载窗口达数秒），加载完成前单独下发
+// seek 会被 mpv 拒绝（error running command），故定位必须由 loadfile
+// 一并完成，消除"加载后立即 seek"的竞态。
+func (p *MpvPlayer) PlayPaused(url string, start float64) error {
 	if err := p.ensureConnected(); err != nil {
 		return err
 	}
@@ -495,7 +500,17 @@ func (p *MpvPlayer) PlayPaused(url string) error {
 		return fmt.Errorf("set pause: %w", err)
 	}
 	if err := callWithTimeout(func() error {
-		_, err := conn.Call("loadfile", url)
+		// start 极端值兜底：NaN/负值落入 start<=0 走 2 参从头加载（安全）；
+		// +Inf 落入 4 参分支会生成 "start=+Inf"，mpv 接受并钳制到 EOF（无害）；实际来自 time-pos 不会出现。
+		if start > 0 {
+			// 4 参语法（mpv ≥0.38）：loadfile <url> replace <index> <options>，
+			// start= 选项随加载原子定位；旧 3 参 options 语法在 0.38+ 已改为
+			// playlist index（传 options 会 invalid parameter），本环境 mpv 0.41.0。
+			posStr := strconv.FormatFloat(start, 'f', -1, 64) // 避免 %g 科学计数法（1e+09 不被 mpv 选项解析器接受）
+			_, err := conn.Call("loadfile", url, "replace", -1, "start="+posStr)
+			return err
+		}
+		_, err := conn.Call("loadfile", url) // 2 参：兼容 mpv <0.38，从头加载
 		return err
 	}); err != nil {
 		return fmt.Errorf("loadfile: %w", err)
