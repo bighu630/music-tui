@@ -86,4 +86,10 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 设计确认：四标题 + 当前页高亮（Bold+212 粉）+ 首页播放状态图标（⏵/⏸/⏹）+ 队列数量（仅 >0 时显示）+ Tab 栏占首行高度减 1
 - [x] 实现：ui/tabs.go（tabBar 纯函数）+ root.go（View 拼 tabBar、WindowSizeMsg 四页 height-1）+ 补 queuePage.setSize 既有遗漏 ✅（commit 3bd374c + f2a7d12 + 7df653b，已合并 master）
 - [x] 审查：reviewer 两轮批准（go mod tidy + 测试复用 tabStyle + 注释修正）✅
-- [ ] 验收：真机确认标签栏视觉（高亮样式/图标/队列数量显示是否满意）
+
+## Tab 栏鼠标交互追加需求（用户确认：点击切换 + hover 高亮）
+
+- [x] 设计确认：点击标签切换页面（MouseMsg 0-based 首行 Y==0 + 标签列区间命中）+ 悬停下划线高亮（Underline，当前页高亮优先，移出清除）+ 启用 WithMouseAllMotion
+- [x] 实现：main.go 加 WithMouseAllMotion；ui/tabs.go 重构 tabSegments/tabHitAt + tabHoverStyle；ui/root.go onMouse + hoverTab 字段 ✅（commit 22a1b4d + 4e69755，merge 7e87b3a 已合并 master）
+- [x] 审查：reviewer 两轮批准（文档措辞如实修正：bubbles v1.0.0 列表无鼠标处理，仅歌词 viewport 滚轮；补幂等/hover 清除断言）✅
+- [ ] 验收：全量 build/vet/test -race 全绿；真机确认——标签栏视觉（高亮样式/图标/队列数量）+ 鼠标点击切换 + 悬停效果
