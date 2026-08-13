@@ -941,8 +941,10 @@ func TestResumeLoadFailNoAutoRetry(t *testing.T) {
 	if fp.playCount() != 0 {
 		t.Errorf("恢复加载失败不应调用 Play: %d", fp.playCount())
 	}
-	if cmd != nil {
-		t.Error("恢复加载失败不应调度自动重试 cmd")
+	// cmd 非 nil = waitForPlayerEvents 监听链存活（回归：resuming 分支曾返回 nil，
+	// 事件监听永久失聪、播放状态机冻结）。该 cmd 阻塞在播放器事件通道，测试不执行。
+	if cmd == nil {
+		t.Fatal("恢复加载失败后事件监听链应存活（cmd 应为 waitForPlayerEvents，非 nil）")
 	}
 	if !strings.Contains(m.lastError, "恢复播放失败") || !strings.Contains(m.lastError, "风控") {
 		t.Errorf("lastError = %q, want 含“恢复播放失败”与 hint 诊断（风控）", m.lastError)

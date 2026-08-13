@@ -517,7 +517,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 				m.queue = queue.New()
 				m.queueSkip = false
 				m.notifyTrack(nil)
-				return m.syncQueueViews(), nil
+				return m.syncQueueViews(), tea.Batch(cmds...)
 			}
 			if m.retryCount < maxPlayRetries {
 				m.retryCount++
