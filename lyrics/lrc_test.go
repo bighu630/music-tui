@@ -129,13 +129,21 @@ func TestLineAtEmpty(t *testing.T) {
 }
 
 func TestParseLRCRejectsOverflowMinutes(t *testing.T) {
-	// 19 位分钟数：超出 int64（Atoi 失败）或 mm*60 溢出，均视为非法时间标签。
-	lrc := "[9999999999999999999:00.00]Atoi溢出\n[9000000000000000000:00.00]乘法溢出\n[00:10.00]正常"
+	// 19 位分钟数：超出 int64（Atoi 失败）或超过 MaxInt64/60 守卫，均视为非法时间标签；
+	// 恰好等于 MaxInt64/60 的边界值（mm*60+ss 在 int 下溢出为负）必须由 float64
+	// 计算兜底为巨大正数，绝不产生负时间行破坏 LineAt。
+	lrc := "[9999999999999999999:00.00]Atoi溢出\n[9000000000000000000:00.00]守卫拒绝\n[153722867280912930:08]边界\n[00:10.00]正常"
 	ly, err := ParseLRC([]byte(lrc))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ly.Lines) != 1 || ly.Lines[0].Time != 10.0 || ly.Lines[0].Text != "正常" {
-		t.Errorf("lines = %+v, want 仅正常行", ly.Lines)
+	if len(ly.Lines) != 2 {
+		t.Fatalf("lines = %d, want 2（边界行 + 正常行）", len(ly.Lines))
+	}
+	if ly.Lines[0].Time != 10.0 || ly.Lines[0].Text != "正常" {
+		t.Errorf("Lines[0] = %+v, want 正常行", ly.Lines[0])
+	}
+	if ly.Lines[1].Time < 9e18 || ly.Lines[1].Text != "边界" {
+		t.Errorf("Lines[1] = %+v, want 巨大正时间边界行", ly.Lines[1])
 	}
 }

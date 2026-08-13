@@ -78,7 +78,10 @@ func parseTimeTag(tag string) (float64, bool) {
 			frac = (float64(m[3][0]-'0')*100 + float64(m[3][1]-'0')*10 + float64(m[3][2]-'0')) / 1000
 		}
 	}
-	return float64(mm*60+ss) + frac, true
+	// 用 float64 计算彻底消除 int 溢出：mm 接近 MaxInt64/60 时
+	// mm*60+ss 可能环绕为负，float64 范围大不可能溢出（超大 mm 的
+	// 精度损失无害，结果仍是巨大正数，排序靠后）。
+	return float64(mm)*60 + float64(ss) + frac, true
 }
 
 // extractTimestamps 剥离行首连续的时间标签，返回剩余文本与时间列表。
