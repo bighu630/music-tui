@@ -8,5 +8,7 @@
 - [x] 分节呈现设计并逐节确认（模块结构/数据结构/交互流程/错误处理）
 - [ ] 写设计文档 docs/superpowers/specs/ 并提交（已派 worker）
 - [ ] 设计文档自查
-- [ ] 用户审阅设计文档
-- [ ] 转入实现计划（writing-plans skill）
+- [x] 用户审阅设计文档并确认
+- [x] 写实现计划 docs/superpowers/plans/（4874 行/10 Task，已自查）
+- [x] 用户确认执行方式（Subagent-Driven）
+- [x] 创建 feature_lead 接手实现（session_1033a216-f42，进行中）
