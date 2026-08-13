@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/blacktop/go-termimg"
@@ -211,7 +212,16 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 		m.coverFallback = true
 		return m
 	}
-	w.SetSize(coverW, coverH).SetProtocol(termimg.Auto)
+	w.SetSize(coverW, coverH)
+	if os.Getenv("TMUX") != "" {
+		// tmux 下强制字符模式：tmux 对 kitty/sixel 的像素尺寸查询（CSI 16t）
+		// 不响应，go-termimg 的无超时读 goroutine 会永久阻塞在 /dev/tty 并
+		// 劫持后续按键输入（与 bubbletea 抢同一终端）。字符模式无需像素尺寸。
+		// 回归：tmux 中恢复会话后按键全部失效（空格无法继续播放）。
+		w.SetProtocol(termimg.Halfblocks)
+	} else {
+		w.SetProtocol(termimg.Auto)
+	}
 	m.coverWidget = w
 	m.coverFallback = false
 	m.coverTrackID = trackID
