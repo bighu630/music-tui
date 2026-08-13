@@ -789,6 +789,189 @@ func TestStaleRetryDroppedOnNewPlay(t *testing.T) {
 	}
 }
 
+// 回归（P1）：重试等待期间删除当前曲（queueSkip=true、指针顺延）→ 重试触发时
+// 必须清除 queueSkip（重试与队列当前状态重新对齐），否则残留标记会让
+// TrackEnded 重复播放顺延曲目：队列 [t1,t2]，t1 失败重试挂起 → 删 t1
+// → 重试播放 t2 → t2 播完 TrackEnded 走 queueSkip 分支 Current()=t2 → t2 重播一次。
+func TestRetryPlayClearsQueueSkip(t *testing.T) {
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	defer func() { retryBackoff = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")}) // 队列 [t1, t2]
+
+	// t1 取流失败：调度自动重试（代际匹配）
+	m, cmd = update(m, playerEventMsg{ev: player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}})
+	if cmd == nil {
+		t.Fatal("应调度重试 cmd")
+	}
+
+	// 重试等待期间删除当前曲 t1 → queueSkip=true，指针顺延到 t2
+	m, _ = update(m, queueDeleteMsg{index: m.queue.CurrentIndex()})
+	if !m.queueSkip {
+		t.Fatal("删除当前曲后应置 queueSkip")
+	}
+	if cur, _ := m.queue.Current(); cur.ID != "t2" {
+		t.Fatalf("删除后当前曲应为 t2, got %s", cur.ID)
+	}
+
+	// 重试触发：播放顺延曲目 t2，并清除 queueSkip（与队列当前状态重新对齐）
+	m = execRetryBatch(m, cmd, fp)
+	if m.queueSkip {
+		t.Error("重试播放后应清除 queueSkip")
+	}
+	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t2").URL {
+		t.Fatalf("重试应播放顺延曲目 t2: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+
+	// t2 播完：不得因 queueSkip 残留而重复播放 t2
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if fp.playCount() != 2 {
+		t.Errorf("t2 播完不应重复播放: playCount = %d, want 2", fp.playCount())
+	}
+}
+
+// 回归（P1 分支镜像）：重试耗尽跳过时若存在删除解耦标记（queueSkip=true、
+// 指针已顺延），应播放顺延曲目（Current 兜底）而非 Next()——不跳过头
+// （镜像 TrackEnded 的解耦逻辑）。场景：t1 两次重试均失败后删除 t1
+// （最后一次重试加载期间），第 3 次失败耗尽 → 应接 t2 而非 t3。
+func TestLoadFailExhaustedSkipRespectsQueueSkip(t *testing.T) {
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	defer func() { retryBackoff = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
+
+	loadErr := player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}
+	// 前两次失败各触发一次自动重试（重载 t1），重试均正常执行
+	for i := 0; i < 2; i++ {
+		m, cmd = update(m, playerEventMsg{ev: loadErr})
+		m = execRetryBatch(m, cmd, fp)
+	}
+	if fp.playCount() != 3 {
+		t.Fatalf("两次重试后 playCount = %d, want 3", fp.playCount())
+	}
+
+	// 最后一次重试加载期间删除当前曲 t1 → queueSkip=true，指针顺延 t2
+	m, _ = update(m, queueDeleteMsg{index: m.queue.CurrentIndex()})
+	if !m.queueSkip {
+		t.Fatal("删除当前曲后应置 queueSkip")
+	}
+
+	// 第 3 次失败：重试耗尽且存在解耦标记 → 播放顺延曲目 t2（Current 兜底）
+	// 而非 Next() 的 t3——不跳过头
+	m, _ = update(m, playerEventMsg{ev: loadErr})
+	if fp.playCount() != 4 || fp.lastPlayed() != testTrack("t2").URL {
+		t.Errorf("耗尽跳过应播放顺延曲目 t2: playCount=%d lastPlayed=%q, want 4 次 t2", fp.playCount(), fp.lastPlayed())
+	}
+	if m.queueSkip {
+		t.Error("耗尽跳过后应清除 queueSkip")
+	}
+	if m.state.Track == nil || m.state.Track.ID != "t2" || !m.state.Playing {
+		t.Errorf("state = %+v, want t2 播放中", m.state)
+	}
+	if !strings.Contains(m.lastError, "跳过") || !strings.Contains(m.lastError, "测试歌曲 t1") {
+		t.Errorf("lastError = %q, want 含“跳过”与 t1 标题", m.lastError)
+	}
+}
+
+// 回归（P3）：重试等待期间队列被清空 → 重试触发时无曲可播，不得 panic，
+// 停止重试并给出合理横幅（不能悬挂“正在自动重试”）。
+func TestRetryOnClearedQueueStops(t *testing.T) {
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	defer func() { retryBackoff = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	// t1 取流失败 → 重试等待期间队列被清空
+	m, cmd = update(m, playerEventMsg{ev: player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}})
+	m, _ = update(m, queueClearMsg{})
+	if m.queue.Len() != 0 {
+		t.Fatalf("清空后队列 Len = %d, want 0", m.queue.Len())
+	}
+
+	// 重试触发：队列已空 → 停止重试，不 panic，横幅合理
+	m = execRetryBatch(m, cmd, fp)
+	if fp.playCount() != 1 {
+		t.Errorf("队列清空后重试不应播放: playCount = %d, want 1", fp.playCount())
+	}
+	if !strings.Contains(m.lastError, "队列已清空") {
+		t.Errorf("lastError = %q, want 含队列已清空", m.lastError)
+	}
+	if m.state.Playing {
+		t.Error("停止后 Playing 应为 false")
+	}
+}
+
+// 回归（P2）：续播恢复（PlayPaused 静默加载 + Seek 定位）的 IPC 成功只代表
+// 命令被接受，mpv 异步取流失败（end-file error → LoadFailedError）随后才到。
+// 此时不得自动重试（重试会走 beginPlay→Play()：发声、从 0:00、非暂停，静默
+// 丢弃恢复语义），应保留“恢复播放失败”语义（清空内存队列 + 横幅带 hint 诊断，
+// 磁盘会话保留下次启动重试）；恢复上下文作废后取流失败恢复正常自动重试。
+func TestResumeLoadFailNoAutoRetry(t *testing.T) {
+	m, fp := newResumeTestModel(t, sessionState(66.6, false), nil)
+	if !m.resuming {
+		t.Fatal("恢复场景应置 resuming 标记")
+	}
+
+	// PlayPaused + Seek IPC 成功 → resumeResultMsg 成功（resuming 保持，
+	// 等待 mpv 异步加载结果：TrackStartedEvent 或 end-file error）
+	msgs := execCmds(resumeCmd(m))
+	m, cmd := update(m, msgs[0])
+	_ = execCmds(cmd) // 歌词/封面加载结果与本测试无关
+	if fp.pausedCount() != 1 || len(fp.seeks) != 1 {
+		t.Fatalf("恢复应 PlayPaused+Seek: paused=%d seeks=%v", fp.pausedCount(), fp.seeks)
+	}
+
+	// 实际取流失败（end-file error）：不得自动重试，保留恢复失败语义
+	m, cmd = update(m, playerEventMsg{ev: player.ErrorEvent{Err: &player.LoadFailedError{FileError: "403 Forbidden"}}})
+	if fp.playCount() != 0 {
+		t.Errorf("恢复加载失败不应调用 Play: %d", fp.playCount())
+	}
+	if cmd != nil {
+		t.Error("恢复加载失败不应调度自动重试 cmd")
+	}
+	if !strings.Contains(m.lastError, "恢复播放失败") || !strings.Contains(m.lastError, "风控") {
+		t.Errorf("lastError = %q, want 含“恢复播放失败”与 hint 诊断（风控）", m.lastError)
+	}
+	if m.queue.Len() != 0 {
+		t.Errorf("失败后队列应清空: Len = %d", m.queue.Len())
+	}
+	if m.state.Track != nil || m.state.Playing {
+		t.Errorf("失败后状态应重置: %+v", m.state)
+	}
+	if m.resuming {
+		t.Error("失败处理后 resuming 应复位")
+	}
+
+	// 恢复上下文已作废：手动播放新曲后，取流失败恢复正常自动重试
+	m, cmd = m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	if fp.playCount() != 1 {
+		t.Fatalf("手动播放后 playCount = %d, want 1", fp.playCount())
+	}
+	m, cmd = update(m, playerEventMsg{ev: player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}})
+	if cmd == nil {
+		t.Fatal("正常播放取流失败应调度自动重试 cmd")
+	}
+	if !strings.Contains(m.lastError, "正在自动重试（1/2）") {
+		t.Errorf("lastError = %q, want 含“正在自动重试（1/2）”", m.lastError)
+	}
+}
+
 // loadFailureHint 把 mpv file_error 诊断文本映射为可操作的中文提示。
 func TestLoadFailHint(t *testing.T) {
 	cases := []struct {

@@ -131,8 +131,12 @@ type Model struct {
 	retryCount int // 当前曲目已自动重试次数（新曲加载成功/结束/手动播放时重置）
 	playGen    int // 播放代际计数器：每次 beginPlay 自增；过期重试消息（用户已换曲）丢弃
 
-	resume   *resumeInfo // 续播恢复信息（NewModel 填充，Init 消费；nil = 无会话）
-	lastSave time.Time   // 最近一次自动保存会话的时刻（节流）
+	resume *resumeInfo // 续播恢复信息（NewModel 填充，Init 消费；nil = 无会话）
+	// resuming 续播恢复进行中标记：恢复加载（PlayPaused 静默加载）撞取流失败时
+	// 不自动重试（重试会走 beginPlay→Play()：发声、从 0:00、非暂停，静默丢弃
+	// 恢复语义），保留“恢复播放失败”语义（回归：TestResumeLoadFailNoAutoRetry）。
+	resuming bool
+	lastSave time.Time // 最近一次自动保存会话的时刻（节流）
 
 	home        homeModel
 	searchPage  searchModel
@@ -187,6 +191,9 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 			m.home = m.home.syncState(m.state)
 			m.notifyTrack(&cur)
 			m.resume = &resumeInfo{track: cur, pos: pos}
+			// 续播恢复进行中。注：不能放在 Init——bubbletea 调用 Init 的是模型
+			// 副本（值接收者修改不回流），标记须随恢复上下文在此一起设置。
+			m.resuming = true
 			// 预置节流基准：恢复后 loadfile 会触发 time-pos=0 的 ProgressEvent
 			//（先于 Seek 定位到达），若 lastSave 为零值会立即触发保存，
 			// 把磁盘上的恢复进度覆盖为 0（回归：TestResumeFirstProgressEventDoesNotOverwriteDisk）
@@ -282,6 +289,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.gen != m.playGen {
 			return m, waitForPlayerEvents(m.player)
 		}
+		// 重试与队列当前状态重新对齐：删除当前曲已使指针顺延，残留标记
+		// 会让 TrackEnded 重复播放顺延曲目（回归：TestRetryPlayClearsQueueSkip）。
+		m.queueSkip = false
+		if _, ok := m.queue.Current(); !ok {
+			// 重试等待期间队列被清空/删光：无曲可播，停止重试
+			//（避免“正在自动重试”横幅悬挂）。
+			m.ended = true
+			m.lastError = "播放失败：队列已清空，已停止自动重试"
+			m.state.Playing = false
+			m.home = m.home.syncState(m.state)
+			return m, waitForPlayerEvents(m.player)
+		}
 		m2, cmd := m.playQueueTrack()
 		return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
 
@@ -290,6 +309,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 恢复失败：清空内存中的恢复队列（当前曲播放不了）；磁盘会话
 			// 保留——下次启动重试（mpv 瞬时故障可恢复），用户播放新曲或
 			// 退出时自然覆盖/清除。
+			m.resuming = false // 恢复上下文作废
 			m.lastError = "恢复播放失败: " + msg.err.Error()
 			m.state = model.PlaybackState{}
 			m.home = m.home.syncState(m.state)
@@ -298,7 +318,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifyTrack(nil)
 			return m.syncQueueViews(), nil
 		}
-		// 恢复成功：暂停态也加载歌词/封面展示
+		// 恢复成功：暂停态也加载歌词/封面展示。
+		// 注意：不在成功分支清除 resuming——PlayPaused/Seek 的 IPC 成功只代表
+		// 命令被接受，mpv 异步取流失败（end-file error → LoadFailedError）随后
+		// 才到；resuming 须保持到 TrackStartedEvent（加载真成功）或
+		// LoadFailedError（真失败）或 beginPlay（用户新意图）。
 		if m.state.Track == nil {
 			return m, nil
 		}
@@ -447,7 +471,8 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.state.Playing = ev.Playing
 		m.home = m.home.syncState(m.state)
 	case player.TrackStartedEvent:
-		m.retryCount = 0 // 新曲加载成功，重试预算重置
+		m.retryCount = 0   // 新曲加载成功，重试预算重置
+		m.resuming = false // 恢复加载成功：进入正常播放态，恢复上下文作废
 		m.ended = false
 		// 仅在拿到真实时长时覆盖：Duration=0 表示 observe 与 Get 兜底
 		// 均失败（直播/特殊流），此时保留搜索元数据提供的时长，避免被抹零。
@@ -480,6 +505,20 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		// 其他错误（连接断开/重连失败）保持原有行为，不自动重试。
 		var le *player.LoadFailedError
 		if errors.As(ev.Err, &le) {
+			// 续播恢复（PlayPaused 静默加载）期间撞取流失败：不自动重试——
+			// 恢复上下文已作废（重试会走 beginPlay→Play()：发声、从 0:00、
+			// 非暂停，静默丢弃恢复语义），保留“恢复播放失败”语义：清空内存
+			// 队列 + 横幅带 hint 诊断；磁盘会话保留，下次启动重试。
+			if m.resuming {
+				m.resuming = false
+				m.lastError = "恢复播放失败: " + loadFailureHint(le.FileError)
+				m.state = model.PlaybackState{}
+				m.home = m.home.syncState(m.state)
+				m.queue = queue.New()
+				m.queueSkip = false
+				m.notifyTrack(nil)
+				return m.syncQueueViews(), nil
+			}
 			if m.retryCount < maxPlayRetries {
 				m.retryCount++
 				hint := loadFailureHint(le.FileError)
@@ -489,17 +528,22 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(waitForPlayerEvents(m.player), retryPlayCmd(m.playGen))
 			}
 			hint := loadFailureHint(le.FileError)
-			if tr, ok := m.queue.Next(); ok {
-				// 重试耗尽：跳过失败曲目继续连播（横幅保留告知用户哪首失败）。
-				// 失败曲目标题须在 beginPlay 前捕获（beginPlay 会替换 state.Track）。
-				failed := m.state.Track
-				m.retryCount = 0
-				m2, cmd := m.beginPlay(tr)
-				failedTitle := "当前歌曲"
-				if failed != nil {
-					failedTitle = failed.Title
+			if m.queueSkip {
+				// 重试耗尽且存在删除解耦标记：镜像 TrackEnded 的兜底逻辑——
+				// 指针已顺延，播放顺延曲目（当前位）而非 Next()，避免跳过头
+				// （回归：TestLoadFailExhaustedSkipRespectsQueueSkip）。
+				m.queueSkip = false
+				if tr, ok := m.queue.Current(); ok {
+					m2, cmd := m.skipFailedTrack(tr, hint)
+					return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
 				}
-				m2.lastError = fmt.Sprintf("「%s」播放失败：%s，已重试 %d 次，跳过继续播放", failedTitle, hint, maxPlayRetries)
+				if tr, ok := m.queue.Next(); ok {
+					m2, cmd := m.skipFailedTrack(tr, hint)
+					return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
+				}
+			} else if tr, ok := m.queue.Next(); ok {
+				// 重试耗尽：跳过失败曲目继续连播（横幅保留告知用户哪首失败）。
+				m2, cmd := m.skipFailedTrack(tr, hint)
 				return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
 			}
 			// 单曲重试耗尽：停止播放，等待用户操作（空格重播同曲）
@@ -558,6 +602,20 @@ func loadFailureHint(fileErr string) string {
 	}
 }
 
+// skipFailedTrack 重试耗尽后跳过失败曲目：播放 tr 并设置跳过横幅。
+// 失败曲目标题须在 beginPlay 前捕获（beginPlay 会替换 state.Track）。
+func (m Model) skipFailedTrack(tr model.Track, hint string) (Model, tea.Cmd) {
+	failed := m.state.Track
+	m.retryCount = 0
+	m2, cmd := m.beginPlay(tr)
+	failedTitle := "当前歌曲"
+	if failed != nil {
+		failedTitle = failed.Title
+	}
+	m2.lastError = fmt.Sprintf("「%s」播放失败：%s，已重试 %d 次，跳过继续播放", failedTitle, hint, maxPlayRetries)
+	return m2, cmd
+}
+
 // stopAfterEnd 播放结束且无下一首：停在当前位置等待用户操作（空格重播同曲）。
 func (m Model) stopAfterEnd() (Model, tea.Cmd) {
 	m.ended = true
@@ -595,6 +653,8 @@ func (m Model) playQueueTrack() (Model, tea.Cmd) {
 // 永不耗尽（回归：TestLoadFailRetriesExhaustedSkipsInQueue/StopsSingle）；
 // 预算在 TrackStarted/TrackEnded/手动播放入口重置。
 func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
+	m.resuming = false // 任何 beginPlay = 用户新意图或重试：恢复上下文作废
+	// （重试路径不会在 resuming=true 时发生——恢复中取流失败走恢复失败分支，不调度重试）
 	m.playGen++ // 播放代际递增：使在途重试消息过期（用户换曲后不再重试旧曲）
 	m.ended = false
 	m.state = model.PlaybackState{Track: &track, Playing: true, Duration: track.Duration}
