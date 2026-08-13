@@ -79,6 +79,27 @@ func TestSearchBinaryMissing(t *testing.T) {
 	}
 }
 
+// fakeYTDLPFlatOutput 模拟 yt-dlp --flat-playlist 的实际输出：
+// 无 singular thumbnail 字段，仅 thumbnails 数组（实测含 hqdefault URL）。
+const fakeYTDLPFlatOutput = `{"id":"ghi789","title":"稻香","channel":"周杰倫","duration":223.0,"webpage_url":"https://www.youtube.com/watch?v=ghi789","thumbnails":[{"url":"https://i.ytimg.com/vi/ghi789/hqdefault.jpg?sqp=xyz","id":"hqdefault"}]}`
+
+func TestParseYTDLPOutputFlatThumbnailsFallback(t *testing.T) {
+	tracks, err := parseYTDLPOutput([]byte(fakeYTDLPFlatOutput))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("len = %d, want 1", len(tracks))
+	}
+	want := "https://i.ytimg.com/vi/ghi789/hqdefault.jpg?sqp=xyz"
+	if tracks[0].CoverURL != want {
+		t.Errorf("CoverURL = %q, want %q（flat 模式无 thumbnail 字段时应取 thumbnails[0].url）", tracks[0].CoverURL, want)
+	}
+	if tracks[0].ID != "ghi789" || tracks[0].Duration != 223.0 {
+		t.Errorf("tracks[0] = %+v", tracks[0])
+	}
+}
+
 func TestParseYTDLPOutputSkipsLongGarbageLine(t *testing.T) {
 	// 单行 100KB，超过 bufio.Scanner 默认 64KB token 上限；
 	// 应被跳过且不破坏后续解析。

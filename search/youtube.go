@@ -31,12 +31,19 @@ type ytdlpEntry struct {
 	Duration   float64 `json:"duration"`
 	WebpageURL string  `json:"webpage_url"`
 	Thumbnail  string  `json:"thumbnail"`
+	// Thumbnails 是 --flat-playlist 模式下的缩略图数组：
+	// flat 输出无 singular thumbnail 字段，须用 thumbnails[0].url 兜底。
+	Thumbnails []struct {
+		URL string `json:"url"`
+	} `json:"thumbnails"`
 }
 
 // YouTubeAdapter 通过 yt-dlp 子进程搜索 YouTube（ytsearch: 前缀）。
-// 使用 --flat-playlist 直接读取搜索结果元数据，避免逐个全量提取；
-// 代价是 duration/thumbnail 等字段可能缺失——Task 10 验收项 4 实测
-// 确认，若缺失则去掉该参数改全量提取（变慢）。
+// 使用 --flat-playlist 直接读取搜索结果元数据，避免逐个全量提取。
+// Task 10 验收项 4 实测：flat 输出缺 singular thumbnail 字段但有
+// thumbnails 数组（duration 正常）；全量提取 ytsearch20 实测需 90s，
+// 远超 searchTimeout 不可行——故保留 flat，CoverURL 以 thumbnail 优先、
+// thumbnails[0].url 兜底（实测为 hqdefault URL）。
 type YouTubeAdapter struct {
 	ytdlpPath string
 	timeout   time.Duration
@@ -113,6 +120,10 @@ func parseYTDLPOutput(out []byte) ([]model.Track, error) {
 		if e.ID == "" {
 			continue
 		}
+		cover := e.Thumbnail
+		if cover == "" && len(e.Thumbnails) > 0 {
+			cover = e.Thumbnails[0].URL
+		}
 		tracks = append(tracks, model.Track{
 			ID:       e.ID,
 			Title:    e.Title,
@@ -120,7 +131,7 @@ func parseYTDLPOutput(out []byte) ([]model.Track, error) {
 			Duration: e.Duration,
 			URL:      e.WebpageURL,
 			Source:   "youtube",
-			CoverURL: e.Thumbnail,
+			CoverURL: cover,
 		})
 	}
 	if err := sc.Err(); err != nil {
