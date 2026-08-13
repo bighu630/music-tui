@@ -50,7 +50,7 @@ func appendSelected(t *testing.T, m Model) Model {
 // TestQueueTabShowsEmptyView 第 4 个 Tab：空队列显示空态提示。
 func TestQueueTabShowsEmptyView(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	for i := 0; i < 3; i++ {
 		m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
 	}
@@ -69,7 +69,7 @@ func TestQueueTabShowsEmptyView(t *testing.T) {
 func TestSearchAppendBuildsQueue(t *testing.T) {
 	fp := newFakePlayer()
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1"), testTrack("t2")}}
-	m := newTestModel(t, fp, fa)
+	m := newTestModel(t, fp, fa, nil)
 	m = searchAndPick(t, m, fa)
 
 	m = appendSelected(t, m) // 追加 t1
@@ -98,7 +98,7 @@ func TestSearchAppendBuildsQueue(t *testing.T) {
 func TestSearchEnterReplacesQueue(t *testing.T) {
 	fp := newFakePlayer()
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1"), testTrack("t2")}}
-	m := newTestModel(t, fp, fa)
+	m := newTestModel(t, fp, fa, nil)
 	m = searchAndPick(t, m, fa)
 
 	// 先 a 追加 t1、t2 建立队列
@@ -138,7 +138,7 @@ func TestSearchEnterReplacesQueue(t *testing.T) {
 // TestAppendDoesNotInterruptPlayback a 追加不打断当前播放，首页显示队列位置。
 func TestAppendDoesNotInterruptPlayback(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	if fp.playCount() != 1 {
@@ -163,7 +163,7 @@ func TestAppendDoesNotInterruptPlayback(t *testing.T) {
 // TestTrackEndedAutoAdvances TrackEnded 自动连播：依次播放下一首，播完停止。
 func TestTrackEndedAutoAdvances(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	for _, msg := range execCmds(cmd) {
 		m, _ = update(m, msg) // 回灌 BatchMsg（历史写入等）
@@ -219,7 +219,7 @@ func TestTrackEndedAutoAdvances(t *testing.T) {
 // TestTrackEndedKeepsCurrentPage 自动连播不应把用户从当前页面拽走。
 func TestTrackEndedKeepsCurrentPage(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
@@ -243,7 +243,7 @@ func TestTrackEndedKeepsCurrentPage(t *testing.T) {
 // TestQueuePageJumpPlay 队列页 Enter 跳转语义：保留队列，播放所选曲目。
 func TestQueuePageJumpPlay(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
@@ -283,7 +283,7 @@ func TestQueuePageJumpPlay(t *testing.T) {
 // TestQueuePageDeleteAndClear 队列页 d 删除（删当前曲顺延下一首）、c 清空。
 func TestQueuePageDeleteAndClear(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
@@ -338,7 +338,7 @@ func TestQueuePageDeleteAndClear(t *testing.T) {
 // TestQueueModeToggle 队列页 s 切换顺序/随机，首页同步显示模式。
 func TestQueueModeToggle(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
@@ -388,7 +388,7 @@ func TestQueueModeToggle(t *testing.T) {
 // TestHistoryAppend 历史页 a 追加到队尾。
 func TestHistoryAppend(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	if err := m.history.Add(testTrack("t1")); err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +418,7 @@ func TestHistoryAppend(t *testing.T) {
 // 播完应播放顺延曲目（不跳过）：队列 [t1▶,t2,t3] 删 t1 → t1 播完 → 播 t2 → 播 t3。
 func TestDeleteCurrentThenTrackEndedPlaysSlidTrack(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
@@ -461,7 +461,7 @@ func TestDeleteCurrentThenTrackEndedPlaysSlidTrack(t *testing.T) {
 // 播完从头继续；首页显示 0/N（无当前曲）。
 func TestDeleteLastCurrentThenTrackEndedPlaysFromHead(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
@@ -496,7 +496,7 @@ func TestDeleteLastCurrentThenTrackEndedPlaysFromHead(t *testing.T) {
 // TestAutoAdvancePlayFailure 回归：自动连播 Play 失败 → 状态重置 + 错误横幅，不写历史。
 func TestAutoAdvancePlayFailure(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	for _, msg := range execCmds(cmd) {
 		m, _ = update(m, msg) // 回灌 BatchMsg（t1 入历史）
@@ -522,7 +522,7 @@ func TestAutoAdvancePlayFailure(t *testing.T) {
 // TestSpaceReplayReplacesQueue 锁定既定行为：结束后空格重播走替换语义（清空队列）。
 func TestSpaceReplayReplacesQueue(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
@@ -550,7 +550,7 @@ func TestSpaceReplayReplacesQueue(t *testing.T) {
 // clamp 到邻近项（不越界），Enter/d 不静默失效。
 func TestQueueDeleteKeepsSelectionValid(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})

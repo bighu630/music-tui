@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/dexterlb/mpvipc v0.0.0-20260722094525-0cf47d745b36
+	github.com/godbus/dbus/v5 v5.2.2
 )
 
 require (

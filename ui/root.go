@@ -107,16 +107,20 @@ type Model struct {
 	searchPage  searchModel
 	historyPage historyModel
 	queuePage   queueModel
+
+	onTrack func(*model.Track) // 外部消费者（MPRIS）感知当前曲目；nil 安全
 }
 
-// NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h 为具体服务。
-func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store) Model {
+// NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h 为具体服务，
+// onTrack 在播放状态变化时同步回调当前曲目（nil 表示无曲目；可为 nil）。
+func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store, onTrack func(*model.Track)) Model {
 	m := Model{
 		player:      p,
 		lyrics:      l,
 		cover:       c,
 		history:     h,
 		queue:       queue.New(),
+		onTrack:     onTrack,
 		current:     pageHome,
 		home:        newHomeModel(p),
 		searchPage:  newSearchModel(s),
@@ -415,13 +419,24 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 		m.state = model.PlaybackState{}
 		m.home = m.home.syncState(m.state)
 		m.queuePage = m.queuePage.sync(m.queue)
+		m.notifyTrack(nil)
 		return m, nil
 	}
+	m.notifyTrack(&track)
 	return m.syncQueueViews(), tea.Batch(
 		fetchLyricsCmd(m.lyrics, track),
 		fetchCoverCmd(m.cover, track),
 		addHistoryCmd(m.history, track),
 	)
+}
+
+// notifyTrack 把当前曲目同步给外部消费者（如 MPRIS 服务）。回调在 tea
+// update 循环内同步执行，外部实现需自行保证并发安全；onTrack 为 nil 时
+// 直接跳过。
+func (m Model) notifyTrack(t *model.Track) {
+	if m.onTrack != nil {
+		m.onTrack(t)
+	}
 }
 
 func fetchLyricsCmd(c *lyrics.Client, track model.Track) tea.Cmd {

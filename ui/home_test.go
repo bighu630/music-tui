@@ -32,7 +32,7 @@ func writeTestPNG(t *testing.T, path string) {
 
 func TestHomeLyricsStates(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 
@@ -79,7 +79,7 @@ func TestHomeLyricsStates(t *testing.T) {
 
 func TestHomeCoverStates(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 
@@ -101,7 +101,7 @@ func TestHomeCoverStates(t *testing.T) {
 
 func TestHomeCoverRenderCache(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 
@@ -173,7 +173,7 @@ func (f *failCover) setFail(fail bool) {
 // 不再每帧重试（16MiB 解码+缩放）；仅 setSize 时允许重试一次，再失败重新置位。
 func TestHomeCoverRenderFailureStopsPerFrameRetry(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 
@@ -214,7 +214,7 @@ func TestHomeCoverRenderFailureStopsPerFrameRetry(t *testing.T) {
 // 后应回填缓存并正常展示，后续 view 不再触发 Render。
 func TestHomeCoverRenderRetryAfterSetSizeRecovers(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 
@@ -248,7 +248,7 @@ func TestHomeCoverRenderRetryAfterSetSizeRecovers(t *testing.T) {
 
 func TestHomeSeekKeys(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	tr := testTrack("t1")
 	m.state = model.PlaybackState{Track: &tr, Playing: true, Position: 100, Duration: 200}
 	m.home = m.home.syncState(m.state)
@@ -276,7 +276,7 @@ func TestHomeSeekKeys(t *testing.T) {
 }
 
 func TestHomeViewNoTrack(t *testing.T) {
-	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{})
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	if got := m.home.view(); got == "" || !strings.Contains(got, "未在播放") {
 		t.Errorf("view 应提示未在播放，got %q", got)
 	}

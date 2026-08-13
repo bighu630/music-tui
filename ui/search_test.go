@@ -13,7 +13,7 @@ import (
 func TestSearchTypingAndEnter(t *testing.T) {
 	fp := newFakePlayer()
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1")}}
-	m := newTestModel(t, fp, fa)
+	m := newTestModel(t, fp, fa, nil)
 
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
 	if m.current != pageSearch {
@@ -51,7 +51,7 @@ func TestSearchTypingAndEnter(t *testing.T) {
 
 func TestSearchEmptyQueryIgnored(t *testing.T) {
 	fa := &fakeSearchAdapter{}
-	m := newTestModel(t, newFakePlayer(), fa)
+	m := newTestModel(t, newFakePlayer(), fa, nil)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd != nil {
@@ -64,7 +64,7 @@ func TestSearchEmptyQueryIgnored(t *testing.T) {
 
 func TestSearchErrorState(t *testing.T) {
 	fa := &fakeSearchAdapter{err: errors.New("yt-dlp 搜索失败")}
-	m := newTestModel(t, newFakePlayer(), fa)
+	m := newTestModel(t, newFakePlayer(), fa, nil)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
@@ -86,7 +86,7 @@ func TestSearchErrorState(t *testing.T) {
 
 func TestSearchEmptyResults(t *testing.T) {
 	fa := &fakeSearchAdapter{}
-	m := newTestModel(t, newFakePlayer(), fa)
+	m := newTestModel(t, newFakePlayer(), fa, nil)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("zzz")})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
@@ -105,7 +105,7 @@ func TestSearchEmptyResults(t *testing.T) {
 
 func TestSearchEnterPlaysSelected(t *testing.T) {
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1"), testTrack("t2")}}
-	m := newTestModel(t, newFakePlayer(), fa)
+	m := newTestModel(t, newFakePlayer(), fa, nil)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")})
 	_ = execCmds(cmd)

@@ -18,7 +18,7 @@ func historyEntry(tr model.Track) history.Entry {
 
 func TestHistoryReplayDeleteClear(t *testing.T) {
 	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{})
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	tr1, tr2 := testTrack("t1"), testTrack("t2")
 	if err := m.history.Add(tr1); err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestHistoryReplayDeleteClear(t *testing.T) {
 }
 
 func TestHistoryEmptyView(t *testing.T) {
-	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{})
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
 	if got := m.historyPage.view(); !strings.Contains(got, "暂无播放历史") {
 		t.Errorf("空历史 view = %q", got)

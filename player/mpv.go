@@ -35,6 +35,9 @@ type MpvPlayer struct {
 	mu       sync.Mutex
 	duration float64
 	closed   atomic.Bool
+
+	subsMu sync.Mutex
+	subs   map[chan Event]struct{} // Subscribe() 广播订阅者
 }
 
 // NewMpvPlayer 创建播放器实例。binPath 为 mpv 可执行文件路径。
@@ -296,16 +299,81 @@ func (p *MpvPlayer) Seek(seconds float64) error {
 	return nil
 }
 
+// SetVolume 设置 mpv 音量（0-100，越界钳制）。
+func (p *MpvPlayer) SetVolume(percent float64) error {
+	if p.conn == nil || p.conn.IsClosed() {
+		return errors.New("mpv 未连接")
+	}
+	if percent < 0 {
+		percent = 0
+	} else if percent > 100 {
+		percent = 100
+	}
+	if err := callWithTimeout(func() error {
+		return p.conn.Set("volume", percent)
+	}); err != nil {
+		return fmt.Errorf("set volume: %w", err)
+	}
+	return nil
+}
+
+// Volume 读取 mpv 音量（0-100）。
+func (p *MpvPlayer) Volume() (float64, error) {
+	if p.conn == nil || p.conn.IsClosed() {
+		return 0, errors.New("mpv 未连接")
+	}
+	var v interface{}
+	var err error
+	if err = callWithTimeout(func() error {
+		v, err = p.conn.Get("volume")
+		return err
+	}); err != nil {
+		return 0, fmt.Errorf("get volume: %w", err)
+	}
+	f, ok := toFloat64(v)
+	if !ok {
+		return 0, errors.New("mpv volume 属性返回非数值")
+	}
+	return f, nil
+}
+
 // Events 返回播放器事件流。
 func (p *MpvPlayer) Events() <-chan Event {
 	return p.events
 }
 
-// emit 非阻塞推送事件；缓冲满时丢弃（避免阻塞 mpv 事件读取）。
+// Subscribe 返回一个广播事件通道与退订函数。与 Events() 不同，Subscribe
+// 可被多个消费者同时使用（如 MPRIS 服务）；每个订阅者独立接收全部事件，
+// 缓冲满时丢弃（与 emit 语义一致）。退订后不再收到事件。
+func (p *MpvPlayer) Subscribe() (<-chan Event, func()) {
+	ch := make(chan Event, 64)
+	p.subsMu.Lock()
+	defer p.subsMu.Unlock()
+	if p.subs == nil {
+		p.subs = make(map[chan Event]struct{})
+	}
+	p.subs[ch] = struct{}{}
+	return ch, func() {
+		p.subsMu.Lock()
+		defer p.subsMu.Unlock()
+		delete(p.subs, ch)
+	}
+}
+
+// emit 非阻塞广播事件：主通道（Events()）+ 所有订阅者；缓冲满时丢弃
+// （避免阻塞 mpv 事件读取）。
 func (p *MpvPlayer) emit(ev Event) {
 	select {
 	case p.events <- ev:
 	default:
+	}
+	p.subsMu.Lock()
+	defer p.subsMu.Unlock()
+	for ch := range p.subs {
+		select {
+		case ch <- ev:
+		default:
+		}
 	}
 }
 
