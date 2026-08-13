@@ -15,7 +15,7 @@ import (
 
 // TestMain 强制默认渲染器输出 ANSI 颜色码：测试环境（非 TTY）下 lipgloss
 // 默认按 Ascii profile 渲染，不产生任何转义序列，样式断言（高亮/Faint）
-// 无从谈起。显式设为 TrueColor 后 activeTab/Faint 断言才有区分度；
+// 无从谈起。显式设为 TrueColor 后 tabStyle/Faint 断言才有区分度；
 // 现有其他测试只做纯文本 Contains 断言，转义码仅包裹整段文本不受影响。
 func TestMain(m *testing.M) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
