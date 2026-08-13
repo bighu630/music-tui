@@ -1,14 +1,15 @@
-# music-tui 设计阶段任务清单
+# music-tui 实现阶段任务清单（Subagent-Driven Development）
 
-- [x] 探索项目上下文（目录现状、技术栈/搜索源/播放器/lrclib 调研）
-- [x] 决策技术栈：Go (bubbletea + bubbles + lipgloss)
-- [x] 澄清需求：搜索源=YouTube 主源；播放环境=系统音频输出；依赖策略=检测缺失即报错
-- [x] 澄清需求：历史记录=只记录播放过的歌曲；首页进度条可滑动 seek
-- [x] 提出 2-3 个架构方案并推荐（方案 A 确认）
-- [x] 分节呈现设计并逐节确认（模块结构/数据结构/交互流程/错误处理）
-- [ ] 写设计文档 docs/superpowers/specs/ 并提交（已派 worker）
-- [ ] 设计文档自查
-- [x] 用户审阅设计文档并确认
-- [x] 写实现计划 docs/superpowers/plans/（4874 行/10 Task，已自查）
-- [x] 用户确认执行方式（Subagent-Driven）
-- [x] 创建 feature_lead 接手实现（session_1033a216-f42，进行中）
+计划：docs/superpowers/plans/2026-08-13-music-tui.md（10 个 Task，每 Task 走 TDD 五步 + 两阶段审查）
+
+- [ ] Task 1: 项目初始化（go mod、依赖、目录结构）
+- [ ] Task 2: model 包（Track、PlaybackState）
+- [ ] Task 3: lyrics 包（LRC 解析器、lrclib 客户端）
+- [ ] Task 4: history 包（JSON 存储、去重置顶、上限裁剪）
+- [ ] Task 5: cover 包（封面下载、404 降级链、磁盘缓存）
+- [ ] Task 6: search 包（yt-dlp 搜索适配器）
+- [ ] Task 7: player 包（mpv 进程管理与 JSON IPC 事件分发）
+- [ ] Task 8: ui 包（三页面、全局按键与事件路由）
+- [ ] Task 9: main.go 入口（依赖检测、服务组装、退出清理）
+- [ ] Task 10: 手动验收清单（文档 + 验收执行）
+- [ ] 最终全量验证（go build / vet / test）+ 最终代码审查
