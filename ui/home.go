@@ -214,10 +214,14 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 	}
 	w.SetSize(coverW, coverH)
 	if os.Getenv("TMUX") != "" {
-		// tmux 下强制字符模式：tmux 对 kitty/sixel 的像素尺寸查询（CSI 16t）
-		// 不响应，go-termimg 的无超时读 goroutine 会永久阻塞在 /dev/tty 并
-		// 劫持后续按键输入（与 bubbletea 抢同一终端）。字符模式无需像素尺寸。
-		// 回归：tmux 中恢复会话后按键全部失效（空格无法继续播放）。
+		// tmux 下强制字符模式并跳过终端特性探测：tmux 对 kitty/sixel 的像素
+		// 尺寸查询（CSI 16t）不响应，且 go-termimg 的探测在 tmux 下每个查询
+		// 超时 100ms（多次查询合计 ~500ms 同步冻结 UI）。TERMIMG_BYPASS_DETECTION
+		// 是库原生支持的环境变量（detect.go getBypassedFeatures），设为
+		// halfblocks 后不查询终端、直接字符模式渲染。
+		// 回归：tmux 中恢复会话后按键全部失效（go-termimg 无超时读 goroutine
+		// 劫持 /dev/tty 输入，32b4b3b 已在库内修复）。
+		_ = os.Setenv("TERMIMG_BYPASS_DETECTION", "halfblocks")
 		w.SetProtocol(termimg.Halfblocks)
 	} else {
 		w.SetProtocol(termimg.Auto)

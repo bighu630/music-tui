@@ -113,8 +113,10 @@ type TerminalFeatures struct {
 	TrueColor bool
 }
 
-// Global cache for terminal features
+// Global cache for terminal features（featuresMu 保护：QueryTerminalFeatures
+// 可能被并发调用，如测试中的并行渲染）
 var (
+	featuresMu     sync.Mutex
 	cachedFeatures *TerminalFeatures
 	featuresCached bool
 )
@@ -191,7 +193,10 @@ func (tq *TerminalQuerier) Query(query string, timeout time.Duration) (string, e
 	}
 	tv := syscall.NsecToTimeval(int64(timeout))
 	n, err := syscall.Select(fd+1, &rfds, nil, nil, &tv)
-	if n <= 0 || err != nil {
+	if err != nil {
+		return "", wrapError("failed to wait for terminal query response", err)
+	}
+	if n <= 0 {
 		return "", context.DeadlineExceeded
 	}
 	buf := make([]byte, QueryBufferSize)
@@ -207,9 +212,13 @@ func (tq *TerminalQuerier) Query(query string, timeout time.Duration) (string, e
 
 // QueryTerminalFeatures performs unified terminal capability detection
 func QueryTerminalFeatures() *TerminalFeatures {
+	featuresMu.Lock()
 	if featuresCached && cachedFeatures != nil {
-		return cachedFeatures
+		f := cachedFeatures
+		featuresMu.Unlock()
+		return f
 	}
+	featuresMu.Unlock()
 
 	// Check for bypass environment variable
 	if bypass := os.Getenv("TERMIMG_BYPASS_DETECTION"); bypass != "" {
@@ -245,8 +254,10 @@ func QueryTerminalFeatures() *TerminalFeatures {
 	features.TrueColor = detectTrueColorSupport(features.TermName, features.TermProgram)
 
 	// Cache the result
+	featuresMu.Lock()
 	cachedFeatures = features
 	featuresCached = true
+	featuresMu.Unlock()
 
 	return features
 }
@@ -576,8 +587,10 @@ func isInteractiveTerminal() bool {
 
 // ClearFeatureCache clears the cached terminal features (mainly for testing)
 func ClearFeatureCache() {
+	featuresMu.Lock()
 	featuresCached = false
 	cachedFeatures = nil
+	featuresMu.Unlock()
 	ClearEnvironmentCache()
 }
 
@@ -637,7 +650,9 @@ func getBypassedFeatures(protocol string) *TerminalFeatures {
 	}
 
 	// Cache and return
+	featuresMu.Lock()
 	cachedFeatures = features
 	featuresCached = true
+	featuresMu.Unlock()
 	return features
 }

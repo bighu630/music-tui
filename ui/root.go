@@ -320,7 +320,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.syncQueueViews(), nil
 		}
 		// 恢复成功：暂停态也加载歌词/封面展示。
-		// 注意：不在成功分支清除 resuming——PlayPaused/Seek 的 IPC 成功只代表
+		// 注意：不在成功分支清除 resuming——PlayPaused 的 IPC 成功只代表
 		// 命令被接受，mpv 异步取流失败（end-file error → LoadFailedError）随后
 		// 才到；resuming 须保持到 TrackStartedEvent（加载真成功）或
 		// LoadFailedError（真失败）或 beginPlay（用户新意图）。
