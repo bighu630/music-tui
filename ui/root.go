@@ -1,4 +1,4 @@
-// Package ui 实现 bubbletea 三页面（首页/搜索/历史）与全局事件路由。
+// Package ui 实现 bubbletea 五页面（首页/队列/播放列表/搜索/历史）与全局事件路由。
 package ui
 
 import (
@@ -18,19 +18,21 @@ import (
 	"music-tui/lyrics"
 	"music-tui/model"
 	"music-tui/player"
+	"music-tui/playlists"
 	"music-tui/queue"
 	"music-tui/search"
 	"music-tui/session"
 )
 
-// page 页面枚举。
+// page 页面枚举（顺序即 Tab 栏从左到右的顺序）。
 type page int
 
 const (
 	pageHome page = iota
+	pageQueue
+	pagePlaylists
 	pageSearch
 	pageHistory
-	pageQueue
 )
 
 // ---- 消息类型 ----
@@ -108,7 +110,7 @@ const saveInterval = 5 * time.Second
 const maxPlayRetries = 2           // 每首曲目最多自动重试次数
 var retryBackoff = 2 * time.Second // 重试间隔（包级变量：测试可调小以缩短等待）
 
-// Model 顶层模型：持有共享播放状态、播放队列与四个页面，负责全局按键、
+// Model 顶层模型：持有共享播放状态、播放队列与五个页面，负责全局按键、
 // 页面切换、服务调用与结果路由。
 type Model struct {
 	player  player.Player
@@ -117,13 +119,15 @@ type Model struct {
 	history *history.Store
 	queue   *queue.Queue
 	session *session.Store
+	pl      *playlists.Store
 
 	state     model.PlaybackState
 	current   page
 	width     int // 窗口宽度（分隔线按此宽度渲染，不写死）
 	hoverTab  int // Tab 栏悬停标签下标（= page 枚举值）；-1 = 无悬停
 	lastError string
-	ended     bool // 当前歌曲是否已播放结束/出错（空格语义：重播同曲而非 Resume）
+	notice    string // 绿色成功提示（如“已添加到「xxx」”；新按键分发时清除）
+	ended     bool   // 当前歌曲是否已播放结束/出错（空格语义：重播同曲而非 Resume）
 	// queueSkip 标记删除当前曲导致的指针解耦：mpv 仍播放被删曲目，
 	// 但队列指针已顺延。下次 TrackEnded 应播放顺延曲目（不推进），
 	// 避免跳过顺延曲目（回归：TestDeleteCurrentThenTrackEndedPlaysSlidTrack）。
@@ -144,15 +148,18 @@ type Model struct {
 	searchPage  searchModel
 	historyPage historyModel
 	queuePage   queueModel
+	plPage      playlistModel
+
+	plPicker *plPickerModel // 全局 p 键“添加到播放列表”选择器；nil = 未打开
 
 	onTrack func(*model.Track) // 外部消费者（MPRIS）感知当前曲目；nil 安全
 }
 
-// NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h/sess 为具体服务，
+// NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h/sess/pl 为具体服务，
 // onTrack 在播放状态变化时同步回调当前曲目（nil 表示无曲目；可为 nil）。
 // 若 sess 存在已保存会话（队列 + 进度），同步恢复队列与播放状态（暂停态），
 // mpv 的静默加载由 Init 返回的 resumeCmd 完成。
-func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store, sess *session.Store, onTrack func(*model.Track)) Model {
+func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, onTrack func(*model.Track)) Model {
 	m := Model{
 		player:      p,
 		lyrics:      l,
@@ -160,6 +167,7 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 		history:     h,
 		queue:       queue.New(),
 		session:     sess,
+		pl:          pl,
 		onTrack:     onTrack,
 		current:     pageHome,
 		hoverTab:    -1,
@@ -167,6 +175,7 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 		searchPage:  newSearchModel(s),
 		historyPage: newHistoryModel(),
 		queuePage:   newQueueModel(),
+		plPage:      newPlaylistModel(),
 	}
 	// 续播恢复：会话存在且队列有当前曲目才恢复；否则丢弃会话从空态开始
 	if st := sess.State(); st != nil {
@@ -208,6 +217,7 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 	}
 	m = m.syncQueueViews()
 	m.historyPage = m.historyPage.setEntries(h.Entries())
+	m.plPage = m.plPage.setLists(pl.Lists())
 	return m
 }
 
@@ -269,6 +279,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.queue.SetMode(mode)
 		return m.syncQueueViews(), nil
+
+	case plLoadMsg:
+		// 播放列表详情 Enter：整列表替换进队列，从选中曲开始播放
+		// （替换语义同 startPlay：清空队列 → 新队列 → 播放）。
+		tracks := m.pl.Tracks(msg.name)
+		if tracks == nil {
+			m.lastError = "播放列表「" + msg.name + "」不存在"
+			return m, nil
+		}
+		m.queue.ReplaceAll(tracks, msg.index)
+		m.retryCount = 0    // 手动播放：全新重试预算
+		m.queueSkip = false // 替换即重新对齐，解除删除解耦标记
+		m.current = pageHome
+		m = m.syncQueueViews()
+		return m.playQueueTrack()
+
+	case plCreateMsg:
+		m.lastError = ""
+		if _, err := m.pl.Create(msg.name); err != nil {
+			m.lastError = "新建播放列表失败: " + err.Error()
+		} else {
+			m.plPage = m.plPage.exitNaming() // 成功退出命名输入；失败保留输入便于修改
+		}
+		m.plPage = m.plPage.setLists(m.pl.Lists())
+		return m, nil
+
+	case plRenameMsg:
+		m.lastError = ""
+		if err := m.pl.Rename(msg.oldName, msg.newName); err != nil {
+			m.lastError = "重命名失败: " + err.Error()
+		} else {
+			m.plPage = m.plPage.exitNaming()
+		}
+		m.plPage = m.plPage.setLists(m.pl.Lists())
+		return m, nil
+
+	case plDeleteMsg:
+		m.lastError = ""
+		if err := m.pl.Delete(msg.name); err != nil {
+			m.lastError = "删除播放列表失败: " + err.Error()
+		}
+		m.plPage = m.plPage.setLists(m.pl.Lists())
+		return m, nil
+
+	case plRemoveTrackMsg:
+		m.lastError = ""
+		if err := m.pl.RemoveTrack(msg.name, msg.index); err != nil {
+			m.lastError = "移除歌曲失败: " + err.Error()
+		}
+		m.plPage = m.plPage.setLists(m.pl.Lists())
+		return m, nil
 
 	case playResultMsg:
 		// 预留分支：若未来把 player.Play 改回异步 cmd，此分支处理其失败结果。
@@ -401,39 +462,74 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.searchPage = m.searchPage.setSize(msg.Width, msg.Height-2)
 		m.historyPage = m.historyPage.setSize(msg.Width, msg.Height-2)
 		m.queuePage = m.queuePage.setSize(msg.Width, msg.Height-2)
+		m.plPage = m.plPage.setSize(msg.Width, msg.Height-2)
+		if m.plPicker != nil {
+			picker := m.plPicker.setSize(msg.Width, msg.Height-2)
+			m.plPicker = &picker
+		}
 		return m, nil
 
 	case tea.MouseMsg:
 		return m.onMouse(msg)
 
 	case tea.KeyMsg:
+		// 选择器打开时：所有按键交给选择器（完成/取消时带回成功提示并刷新列表页）。
+		if m.plPicker != nil {
+			var cmd tea.Cmd
+			var picker plPickerModel
+			picker, cmd = m.plPicker.Update(msg)
+			if picker.closed {
+				if picker.notice != "" {
+					m.notice = picker.notice
+				}
+				m.plPicker = nil
+				m.plPage = m.plPage.setLists(m.pl.Lists())
+				return m, cmd
+			}
+			m.plPicker = &picker
+			m.notice = "" // 新按键分发前清除提示
+			return m, cmd
+		}
+		m.notice = "" // 新按键分发前清除提示
 		switch msg.String() {
 		case "tab", "ctrl+right":
 			return m.switchPage(msg.String()), nil
 		case "shift+tab", "ctrl+left":
 			return m.switchPage(msg.String()), nil
-		case "1", "2", "3", "4":
+		case "1", "2", "3", "4", "5":
 			// 数字键始终切页。注：计划原代码在搜索输入框聚焦时把数字让给输入框，
 			// 但 TestTabSwitchesPages 要求搜索页聚焦时按 3/1 仍能切页，故取消例外。
 			return m.switchPage(msg.String()), nil
 		case " ":
-			// 搜索输入框聚焦时空格是输入字符。
+			// 输入框聚焦（搜索关键词/播放列表命名）时空格是输入字符。
 			// bubbletea 把空格解析为 KeySpace 类型（真实终端解析会带 Runes，
 			// 但测试构造的 KeySpace 无 Runes）；textinput 按 msg.Runes 插字符，
 			// 统一转成 KeyRunes(' ') 保证插入。
-			if m.current == pageSearch && m.searchPage.typing() {
+			if m.typingText() {
 				return m.delegate(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
 			}
 			return m.togglePlay()
 		case "q", "ctrl+c":
-			// 注意：搜索输入框聚焦时 ctrl+c 会被 textinput 吞掉
+			// 注意：输入框聚焦时 ctrl+c 会被 textinput 吞掉
 			// （bubbles v1.0.0 textinput 无 ctrl+c 绑定，按键被消费且不转发），
 			// 此时无法用 ctrl+c 退出，只能按 q。
-			if m.current == pageSearch && m.searchPage.typing() {
+			if m.typingText() {
 				return m.delegate(msg)
 			}
 			m.saveSession() // 退出前持久化会话（队列 + 进度）
 			return m, tea.Quit
+		case "p":
+			// 输入框聚焦时 p 是输入字符（同空格/q 模式）。
+			if m.typingText() {
+				return m.delegate(msg)
+			}
+			track, ok := m.selectedTrack()
+			if !ok {
+				m.lastError = "当前没有可添加的歌曲（请先在搜索/历史/播放列表页选中歌曲）"
+				return m, nil
+			}
+			m.plPicker = newPlPicker(m.pl, track)
+			return m, nil
 		}
 		return m.delegate(msg)
 	}
@@ -441,23 +537,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m.delegate(msg)
 }
 
-// View 渲染当前页面，底部附全局错误横幅。
+// View 渲染当前页面（选择器打开时全屏替换），底部附错误/成功横幅。
 func (m Model) View() string {
 	var body string
-	switch m.current {
-	case pageHome:
-		body = m.home.view()
-	case pageSearch:
-		body = m.searchPage.view()
-	case pageHistory:
-		body = m.historyPage.view()
-	case pageQueue:
-		body = m.queuePage.view()
+	if m.plPicker != nil {
+		body = m.plPicker.view()
+	} else {
+		switch m.current {
+		case pageHome:
+			body = m.home.view()
+		case pageQueue:
+			body = m.queuePage.view()
+		case pagePlaylists:
+			body = m.plPage.view()
+		case pageSearch:
+			body = m.searchPage.view()
+		case pageHistory:
+			body = m.historyPage.view()
+		}
 	}
 	if m.lastError != "" {
 		body += "\n\n" + lipgloss.NewStyle().
 			Foreground(lipgloss.Color("9")).
 			Render("⚠ "+m.lastError)
+	}
+	if m.notice != "" {
+		body += "\n\n" + lipgloss.NewStyle().
+			Foreground(lipgloss.Color("10")).
+			Render("✔ "+m.notice)
 	}
 	return m.tabBar() + "\n" + body
 }
@@ -849,22 +956,25 @@ func (m Model) onMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	return m, nil // 其余（释放/滚轮等）在 Tab 栏上不处理
 }
 
-// switchPage 处理切页按键：Tab/Ctrl+Right 正向循环（首页→搜索→历史→队列→首页）、
-// Shift+Tab/Ctrl+Left 反向循环、1/2/3/4 直达。
+// switchPage 处理切页按键：Tab/Ctrl+Right 正向循环
+// （首页→队列→播放列表→搜索→历史→首页）、Shift+Tab/Ctrl+Left 反向循环、
+// 1/2/3/4/5 直达。
 func (m Model) switchPage(key string) Model {
 	switch key {
 	case "1":
 		m.current = pageHome
 	case "2":
-		m.current = pageSearch
-	case "3":
-		m.current = pageHistory
-	case "4":
 		m.current = pageQueue
+	case "3":
+		m.current = pagePlaylists
+	case "4":
+		m.current = pageSearch
+	case "5":
+		m.current = pageHistory
 	case "shift+tab", "ctrl+left":
-		m.current = page((int(m.current) + 3) % 4)
+		m.current = page((int(m.current) + 4) % 5)
 	default: // tab, ctrl+right
-		m.current = page((int(m.current) + 1) % 4)
+		m.current = page((int(m.current) + 1) % 5)
 	}
 	return m
 }
@@ -876,6 +986,14 @@ func (m Model) delegate(msg tea.Msg) (Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.home, cmd = m.home.Update(msg)
 		return m, cmd
+	case pageQueue:
+		var cmd tea.Cmd
+		m.queuePage, cmd = m.queuePage.Update(msg)
+		return m, cmd
+	case pagePlaylists:
+		var cmd tea.Cmd
+		m.plPage, cmd = m.plPage.Update(msg)
+		return m, cmd
 	case pageSearch:
 		var cmd tea.Cmd
 		m.searchPage, cmd = m.searchPage.Update(msg)
@@ -884,12 +1002,34 @@ func (m Model) delegate(msg tea.Msg) (Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.historyPage, cmd = m.historyPage.Update(msg)
 		return m, cmd
-	case pageQueue:
-		var cmd tea.Cmd
-		m.queuePage, cmd = m.queuePage.Update(msg)
-		return m, cmd
 	}
 	return m, nil
+}
+
+// typingText 返回是否有输入框处于聚焦（搜索关键词/播放列表命名）：
+// 聚焦时字符类全局键（空格/p/q）让位给输入框。
+func (m Model) typingText() bool {
+	switch m.current {
+	case pageSearch:
+		return m.searchPage.typing()
+	case pagePlaylists:
+		return m.plPage.typing()
+	}
+	return false
+}
+
+// selectedTrack 返回当前页面选中的歌曲（供全局 p 键添加到播放列表）；
+// 首页/队列页无选中歌曲语义，返回 false。
+func (m Model) selectedTrack() (model.Track, bool) {
+	switch m.current {
+	case pageSearch:
+		return m.searchPage.selectedTrack()
+	case pageHistory:
+		return m.historyPage.selectedTrack()
+	case pagePlaylists:
+		return m.plPage.selectedTrack()
+	}
+	return model.Track{}, false
 }
 
 // syncQueueViews 队列变化后同步队列页与首页的队列信息展示。

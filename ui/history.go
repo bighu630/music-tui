@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"music-tui/history"
+	"music-tui/model"
 )
 
 // deleteEntryMsg 历史页请求删除单条记录（root 执行）。
@@ -89,6 +90,14 @@ func (h historyModel) setEntries(entries []history.Entry) historyModel {
 	}
 	h.list.SetItems(items)
 	return h
+}
+
+// selectedTrack 返回当前选中的历史记录（供全局 p 键添加到播放列表）。
+func (h historyModel) selectedTrack() (model.Track, bool) {
+	if item, ok := h.list.SelectedItem().(historyItem); ok {
+		return item.entry.Track, true
+	}
+	return model.Track{}, false
 }
 
 // setSize 响应窗口尺寸变化。

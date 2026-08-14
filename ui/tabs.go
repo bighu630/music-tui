@@ -29,11 +29,11 @@ type tabSeg struct {
 	width int // 渲染后可见宽度（ANSI 剥离，中文按 2 列）
 }
 
-// tabSegments 计算四个标签的渲染信息。
-// 注意：labels 顺序必须与 page 枚举 iota 顺序一致（pageHome..pageQueue = 0..3），
+// tabSegments 计算五个标签的渲染信息。
+// 注意：labels 顺序必须与 page 枚举 iota 顺序一致（pageHome..pageHistory = 0..4），
 // 调换顺序须同步调整枚举，否则高亮与鼠标命中会错位。
 func (m Model) tabSegments() []tabSeg {
-	labels := []string{m.homeTabLabel(), "搜索", "历史", m.queueTabLabel()}
+	labels := []string{m.homeTabLabel(), m.queueTabLabel(), "播放列表", "搜索", "历史"}
 	segs := make([]tabSeg, 0, len(labels))
 	col := 0
 	for i, label := range labels {
@@ -59,7 +59,7 @@ func (m Model) tabSegments() []tabSeg {
 	return segs
 }
 
-// tabBar 渲染顶部标签栏：标签行（四页标题 + 当前页高亮 + 首页播放状态图标 +
+// tabBar 渲染顶部标签栏：标签行（五页标题 + 当前页高亮 + 首页播放状态图标 +
 // 队列数量标记 + 悬停下划线）后追加一条横贯全宽的分隔线
 // （宽度 m.width 由 WindowSizeMsg 下发；为 0 时不输出，避免空行）。
 // 纯函数（无状态），由 View 拼在页面内容上方。

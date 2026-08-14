@@ -78,9 +78,21 @@ func newSearchModel(adapter search.SearchAdapter) searchModel {
 	}
 }
 
-// typing 返回输入框是否聚焦（聚焦时空格/q 让位给输入；数字 1/2/3
+// typing 返回输入框是否聚焦（聚焦时空格/q/p 让位给输入；数字 1-5
 // 仍由 root 全局切页，其余数字字符由输入框消费）。
 func (s searchModel) typing() bool { return s.input.Focused() }
+
+// selectedTrack 返回当前选中的搜索结果（供全局 p 键添加到播放列表）；
+// 未完成搜索/无结果/无选中项时返回 false。
+func (s searchModel) selectedTrack() (model.Track, bool) {
+	if s.state != searchDone || len(s.results) == 0 {
+		return model.Track{}, false
+	}
+	if item, ok := s.list.SelectedItem().(trackItem); ok {
+		return item.track, true
+	}
+	return model.Track{}, false
+}
 
 // Update 处理搜索页局部按键。
 func (s searchModel) Update(msg tea.Msg) (searchModel, tea.Cmd) {

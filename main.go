@@ -18,6 +18,7 @@ import (
 	"music-tui/lyrics"
 	"music-tui/mpris"
 	"music-tui/player"
+	"music-tui/playlists"
 	"music-tui/search"
 	"music-tui/session"
 	"music-tui/ui"
@@ -60,6 +61,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("加载会话失败: %w", err)
 	}
+	pls, err := loadPlaylists(filepath.Join(cfgRoot, "music-tui", "playlists.json"))
+	if err != nil {
+		return fmt.Errorf("加载播放列表失败: %w", err)
+	}
 	cacheRoot, err := os.UserCacheDir()
 	if err != nil {
 		return fmt.Errorf("获取用户缓存目录失败: %w", err)
@@ -94,6 +99,7 @@ func run() error {
 		covers,
 		hist,
 		sess,
+		pls,
 		mprisSrv.SetTrack,
 	)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
@@ -116,6 +122,25 @@ func loadHistory(path string) (*history.Store, error) {
 	}
 	fmt.Fprintf(os.Stderr, "music-tui: 警告：历史文件损坏，已备份至 %s 并重建\n", backup)
 	store, retryErr := history.NewStore(path)
+	if retryErr != nil {
+		return nil, retryErr
+	}
+	return store, nil
+}
+
+// loadPlaylists 加载播放列表文件；文件损坏（崩溃/断电截断）时备份后重建，
+// 避免缓存文件阻止应用启动（与 loadHistory 同款降级）。
+func loadPlaylists(path string) (*playlists.Store, error) {
+	store, err := playlists.NewStore(path)
+	if err == nil {
+		return store, nil
+	}
+	backup := fmt.Sprintf("%s.corrupt-%d", path, time.Now().UnixNano())
+	if berr := os.Rename(path, backup); berr != nil {
+		return nil, err // 备份失败（如权限问题），按原样返回错误
+	}
+	fmt.Fprintf(os.Stderr, "music-tui: 警告：播放列表文件损坏，已备份至 %s 并重建\n", backup)
+	store, retryErr := playlists.NewStore(path)
 	if retryErr != nil {
 		return nil, retryErr
 	}
