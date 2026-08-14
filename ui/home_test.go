@@ -842,3 +842,36 @@ func TestHomeLyricsWheelScroll(t *testing.T) {
 		t.Errorf("无歌词态滚轮不应滚动, got %d", got)
 	}
 }
+
+// TestHomeLyricsCenterFallback 回归：超宽歌词行（屏幕中心放不下）退化为
+// 歌词列内居中而非左对齐（80 宽终端 + 长中文行曾 clamp 到 0 左对齐）。
+func TestHomeLyricsCenterFallback(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	longLine := "我順著琴聲方向看見薔薇依附十八世紀的油畫上" // 22 字 = 44 列
+	ly, err := lyrics.ParseLRC([]byte("[00:10.00]" + longLine + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m.home = m.home.setSize(80, 24) // midX=40，屏幕中心放不下 44 列行
+
+	for _, ln := range strings.Split(m.home.view(), "\n") {
+		vis := stripAnsiForTest(ln)
+		if !strings.Contains(vis, "我順著琴聲") {
+			continue
+		}
+		idx := strings.Index(vis, "我順著琴聲")
+		col := ansi.StringWidth(vis[:idx])
+		// 列内居中：歌词列 [33, 79)（宽 46）→ 44 列行 pad ≈ (46-44)/2 = 1 → 起点 ≈ 34；
+		// 左对齐（回归）起点 = 33。
+		if col < 34 {
+			t.Errorf("超宽歌词行起始列 = %d, want ≥ 34（列内居中兜底，非左对齐）", col)
+		}
+		return
+	}
+	t.Error("view 中未找到歌词行")
+}

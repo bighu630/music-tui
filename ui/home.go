@@ -551,7 +551,12 @@ func (m homeModel) centerLyrics(s string) string {
 		vis := ansi.StringWidth(trimmed)
 		pad := midX - colStart - vis/2
 		if pad < 0 {
-			pad = 0
+			// 超宽行无法屏幕居中（如 80 宽终端 + 长中文歌词行）：
+			// 退化为歌词列内居中，绝不左对齐（回归：曾 clamp 0 导致左对齐）。
+			pad = (lyricsW - vis) / 2
+			if pad < 0 {
+				pad = 0
+			}
 		}
 		tail := lyricsW - pad - vis
 		if tail < 0 {
