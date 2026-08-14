@@ -107,7 +107,7 @@ func TestTracksReturnsCopy(t *testing.T) {
 
 // ---- Next ----
 
-func TestNextSequentialOrderAndStopAtEnd(t *testing.T) {
+func TestNextSequentialOrderAndWrapsAtEnd(t *testing.T) {
 	q := New()
 	q.Replace(testTrack("a"))
 	q.Add(testTrack("b"))
@@ -118,11 +118,18 @@ func TestNextSequentialOrderAndStopAtEnd(t *testing.T) {
 			t.Fatalf("Next[%d] = %v/%v, want %s", i, tr.ID, ok, want)
 		}
 	}
-	if _, ok := q.Next(); ok {
-		t.Error("播完应停止（不循环）")
+	// 末尾回绕到队首（列表循环）
+	tr, ok := q.Next()
+	if !ok || tr.ID != "a" {
+		t.Fatalf("末尾 Next = %v/%v, want a（回绕）", tr.ID, ok)
 	}
-	if q.CurrentIndex() != 2 {
-		t.Errorf("播完后 CurrentIndex = %d, want 2（停在末位）", q.CurrentIndex())
+	if q.CurrentIndex() != 0 {
+		t.Errorf("回绕后 CurrentIndex = %d, want 0", q.CurrentIndex())
+	}
+	// 回绕后可继续按顺序推进
+	tr, ok = q.Next()
+	if !ok || tr.ID != "b" {
+		t.Errorf("回绕后 Next = %v/%v, want b", tr.ID, ok)
 	}
 }
 
@@ -150,6 +157,116 @@ func TestNextEmptyQueue(t *testing.T) {
 	q := New()
 	if _, ok := q.Next(); ok {
 		t.Error("空队列 Next 应返回 false")
+	}
+}
+
+func TestNextWrapsInShuffleMode(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.Add(testTrack("c"))
+	q.SetMode(Shuffle)
+	order := ids(q.Tracks()) // 洗牌后显示顺序即播放顺序
+	if order[0] != "a" {
+		t.Fatalf("洗牌不应动当前曲: order[0] = %s, want a", order[0])
+	}
+	q.Next() // order[1]
+	q.Next() // order[2]（末位）
+	tr, ok := q.Next()
+	if !ok || tr.ID != order[0] {
+		t.Errorf("Shuffle 末尾 Next = %v/%v, want %s（回绕，不重洗）", tr.ID, ok, order[0])
+	}
+	if q.CurrentIndex() != 0 {
+		t.Errorf("回绕后 CurrentIndex = %d, want 0", q.CurrentIndex())
+	}
+	if got := ids(q.Tracks()); !eq(got, order) {
+		t.Errorf("回绕不应重洗队列: %v vs %v", got, order)
+	}
+}
+
+func TestNextAdvancesNormallyInRepeatOne(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.Add(testTrack("c"))
+	q.SetMode(RepeatOne)
+	for i, want := range []string{"b", "c"} {
+		tr, ok := q.Next()
+		if !ok || tr.ID != want {
+			t.Fatalf("RepeatOne Next[%d] = %v/%v, want %s", i, tr.ID, ok, want)
+		}
+	}
+	// 单曲循环模式下队列推进同 Sequential：末尾回绕
+	tr, ok := q.Next()
+	if !ok || tr.ID != "a" {
+		t.Errorf("RepeatOne 末尾 Next = %v/%v, want a（回绕）", tr.ID, ok)
+	}
+	if q.Mode() != RepeatOne {
+		t.Errorf("Next 不应改变模式: %v", q.Mode())
+	}
+}
+
+// ---- Prev ----
+
+func TestPrevWrapsAround(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.Add(testTrack("c"))
+	// 首位 Prev 回绕到末尾
+	tr, ok := q.Prev()
+	if !ok || tr.ID != "c" {
+		t.Fatalf("首位 Prev = %v/%v, want c（回绕到末尾）", tr.ID, ok)
+	}
+	if q.CurrentIndex() != 2 {
+		t.Errorf("Prev 后 CurrentIndex = %d, want 2", q.CurrentIndex())
+	}
+	// 继续逐首回退
+	for i, want := range []string{"b", "a"} {
+		tr, ok = q.Prev()
+		if !ok || tr.ID != want {
+			t.Fatalf("Prev[%d] = %v/%v, want %s", i, tr.ID, ok, want)
+		}
+	}
+}
+
+func TestPrevWithoutCurrentPointsToTail(t *testing.T) {
+	q := New()
+	q.Add(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.Add(testTrack("c"))
+	tr, ok := q.Prev()
+	if !ok || tr.ID != "c" {
+		t.Errorf("无当前曲目 Prev = %v/%v, want c（指向末尾）", tr.ID, ok)
+	}
+	if q.CurrentIndex() != 2 {
+		t.Errorf("Prev 后 CurrentIndex = %d, want 2", q.CurrentIndex())
+	}
+}
+
+func TestPrevEmptyQueue(t *testing.T) {
+	q := New()
+	if _, ok := q.Prev(); ok {
+		t.Error("空队列 Prev 应返回 false")
+	}
+}
+
+func TestPrevSingleTrack(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	tr, ok := q.Prev()
+	if !ok || tr.ID != "a" {
+		t.Errorf("单曲 Prev = %v/%v, want a（回绕到自身）", tr.ID, ok)
+	}
+	if q.CurrentIndex() != 0 {
+		t.Errorf("Prev 后 CurrentIndex = %d, want 0", q.CurrentIndex())
+	}
+	// 无当前曲目的单曲队列：Prev 也应指向该曲
+	q2 := New()
+	q2.Add(testTrack("a"))
+	tr, ok = q2.Prev()
+	if !ok || tr.ID != "a" {
+		t.Errorf("无当前曲目单曲 Prev = %v/%v, want a", tr.ID, ok)
 	}
 }
 
@@ -304,15 +421,16 @@ func TestJumpToMovesCurrentKeepingQueue(t *testing.T) {
 	if got := ids(q.Tracks()); !eq(got, []string{"a", "b", "c"}) {
 		t.Errorf("跳转不应改变队列内容: %v", got)
 	}
-	// 跳转到末位后无下一首
-	if _, ok := q.Next(); ok {
-		t.Error("跳转到末位后 Next 应返回 false")
+	// 跳转到末位后 Next 回绕到第一首
+	tr, ok := q.Next()
+	if !ok || tr.ID != "a" {
+		t.Fatalf("跳转到末位后 Next = %v/%v, want a（回绕）", tr.ID, ok)
 	}
 	// 跳回中间后从跳转处继续
 	if !q.JumpTo(0) {
 		t.Fatal("JumpTo(0) 应成功")
 	}
-	tr, ok := q.Next()
+	tr, ok = q.Next()
 	if !ok || tr.ID != "b" {
 		t.Errorf("跳回后 Next = %s/%v, want b", tr.ID, ok)
 	}
@@ -426,8 +544,10 @@ func TestSetModeShuffleKeepsCurrentAndPrefix(t *testing.T) {
 			t.Fatalf("Next[%d] = %s/%v, want 显示顺序 %s", i, tr.ID, ok, after[i])
 		}
 	}
-	if _, ok := q.Next(); ok {
-		t.Error("随机模式播完也应停止（不循环）")
+	// 随机模式播完回绕到队首（不重洗）
+	tr, ok := q.Next()
+	if !ok || tr.ID != after[0] {
+		t.Errorf("随机模式末尾 Next = %v/%v, want %s（回绕）", tr.ID, ok, after[0])
 	}
 }
 

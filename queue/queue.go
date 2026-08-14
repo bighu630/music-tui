@@ -12,15 +12,19 @@ import (
 type Mode int
 
 const (
-	// Sequential 顺序播放：按队列显示顺序逐首推进。
+	// Sequential 列表循环：按队列显示顺序逐首推进，Next 在末尾回绕到队首。
 	Sequential Mode = iota
 	// Shuffle 随机播放：切入时一次性洗牌"当前曲之后"，
-	// 洗牌后数组顺序即 UI 显示顺序，也即实际播放顺序。
+	// 洗牌后数组顺序即 UI 显示顺序，也即实际播放顺序；
+	// Next 在末尾回绕到队首（不重洗）。
 	Shuffle
+	// RepeatOne 单曲循环：队列推进语义同 Sequential（手动下一首正常推进）；
+	// 无缝循环在 player 层实现，queue 不特殊处理。
+	RepeatOne
 )
 
 // Queue 播放队列。tracks 的下标即 UI 展示的序号（currentIdx 高亮）；
-// 顺序/随机播完列表均停止（不循环）。
+// 三种模式下 Next 播完列表均回绕到队首（循环）。
 type Queue struct {
 	tracks     []model.Track
 	currentIdx int // 当前曲目下标；-1 = 无当前曲目
@@ -68,7 +72,7 @@ func (q *Queue) Clear() {
 }
 
 // Next 推进到下一首并返回（当前曲目不变时返回 false 且不移动）。
-// 播完列表停止（不循环）；无当前曲目（如删除了末位当前曲）时从头开始。
+// 播完列表回绕到队首（三种模式一致）；无当前曲目（如删除了末位当前曲）时从头开始。
 func (q *Queue) Next() (model.Track, bool) {
 	if len(q.tracks) == 0 {
 		return model.Track{}, false
@@ -78,9 +82,24 @@ func (q *Queue) Next() (model.Track, bool) {
 		return q.tracks[0], true
 	}
 	if q.currentIdx+1 >= len(q.tracks) {
-		return model.Track{}, false
+		q.currentIdx = 0
+		return q.tracks[0], true
 	}
 	q.currentIdx++
+	return q.tracks[q.currentIdx], true
+}
+
+// Prev 回退到上一首并返回；空队列返回 false。
+// 无当前曲目时指向末尾；当前为首位时回绕到末尾；否则逐首回退。
+func (q *Queue) Prev() (model.Track, bool) {
+	if len(q.tracks) == 0 {
+		return model.Track{}, false
+	}
+	if q.currentIdx == -1 || q.currentIdx == 0 {
+		q.currentIdx = len(q.tracks) - 1
+		return q.tracks[q.currentIdx], true
+	}
+	q.currentIdx--
 	return q.tracks[q.currentIdx], true
 }
 
