@@ -17,6 +17,9 @@ var tabInactiveStyle = lipgloss.NewStyle().Faint(true)
 // tabHoverStyle 鼠标悬停的非当前页标签样式：下划线提示（当前页高亮优先）。
 var tabHoverStyle = lipgloss.NewStyle().Underline(true)
 
+// dividerStyle 分隔线弱化样式（与 Faint 弱化约定一致）。
+var dividerStyle = lipgloss.NewStyle().Faint(true)
+
 // tabSeg 描述 Tab 栏一个标签的渲染信息（tabBar 渲染与 tabHitAt 命中检测共用）。
 type tabSeg struct {
 	page  page
@@ -56,8 +59,10 @@ func (m Model) tabSegments() []tabSeg {
 	return segs
 }
 
-// tabBar 渲染顶部标签栏：四页标题 + 当前页高亮 + 首页播放状态图标 +
-// 队列数量标记 + 悬停下划线。纯函数（无状态），由 View 拼在页面内容上方。
+// tabBar 渲染顶部标签栏：标签行（四页标题 + 当前页高亮 + 首页播放状态图标 +
+// 队列数量标记 + 悬停下划线）后追加一条横贯全宽的分隔线
+// （宽度 m.width 由 WindowSizeMsg 下发；为 0 时不输出，避免空行）。
+// 纯函数（无状态），由 View 拼在页面内容上方。
 func (m Model) tabBar() string {
 	var sb strings.Builder
 	for i, seg := range m.tabSegments() {
@@ -65,6 +70,9 @@ func (m Model) tabBar() string {
 			sb.WriteString("  ")
 		}
 		sb.WriteString(seg.style.Render(seg.label))
+	}
+	if m.width > 0 {
+		sb.WriteString("\n" + dividerStyle.Render(strings.Repeat("─", m.width)))
 	}
 	return sb.String()
 }

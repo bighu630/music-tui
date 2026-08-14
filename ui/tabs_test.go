@@ -109,14 +109,39 @@ func TestTabBarPlayStateIcon(t *testing.T) {
 }
 
 // 回归：queuePage.setSize 此前从未被调用（列表固定 80x24）；
-// 现在 WindowSizeMsg 应下发尺寸，且高度减 1（Tab 栏占 1 行）。
+// 现在 WindowSizeMsg 应下发尺寸，且高度减 2（Tab 栏 + 分隔线占 2 行）。
 func TestQueuePageReceivesWindowSize(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	if m.queuePage.width != 100 || m.queuePage.height != 39 {
-		t.Errorf("queuePage 尺寸 = %dx%d, want 100x39（高度减 Tab 栏 1 行）",
+	if m.queuePage.width != 100 || m.queuePage.height != 38 {
+		t.Errorf("queuePage 尺寸 = %dx%d, want 100x38（高度减 Tab 栏 + 分隔线 2 行）",
 			m.queuePage.width, m.queuePage.height)
+	}
+}
+
+// 分隔线：未收到 WindowSizeMsg（宽度为 0）时不输出；收到窗口尺寸后
+// 第 2 行为横贯全宽的 ─ 线（第 1 行仍为标签行），且宽度跟随窗口变化。
+func TestTabBarDividerLine(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	if strings.Contains(stripANSI(m.View()), "─") {
+		t.Error("未收到 WindowSizeMsg 前不应渲染分隔线")
+	}
+
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	lines := strings.Split(stripANSI(m.View()), "\n")
+	if len(lines) < 2 || lines[1] != strings.Repeat("─", 80) {
+		t.Errorf("第 2 行应为 80 个 ─，实际 = %q", lines[1])
+	}
+	if !strings.Contains(lines[0], "首页") {
+		t.Errorf("第 1 行应为标签行（含“首页”），实际 = %q", lines[0])
+	}
+
+	m, _ = update(m, tea.WindowSizeMsg{Width: 100, Height: 24})
+	lines = strings.Split(stripANSI(m.View()), "\n")
+	if len(lines) < 2 || lines[1] != strings.Repeat("─", 100) {
+		t.Errorf("宽度变化后第 2 行应为 100 个 ─，实际 = %q", lines[1])
 	}
 }
 

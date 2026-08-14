@@ -120,6 +120,7 @@ type Model struct {
 
 	state     model.PlaybackState
 	current   page
+	width     int // 窗口宽度（分隔线按此宽度渲染，不写死）
 	hoverTab  int // Tab 栏悬停标签下标（= page 枚举值）；-1 = 无悬停
 	lastError string
 	ended     bool // 当前歌曲是否已播放结束/出错（空格语义：重播同曲而非 Resume）
@@ -394,11 +395,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, spinnerTick
 
 	case tea.WindowSizeMsg:
-		// 顶部 Tab 栏占 1 行，页面高度相应减 1
-		m.home = m.home.setSize(msg.Width, msg.Height-1)
-		m.searchPage = m.searchPage.setSize(msg.Width, msg.Height-1)
-		m.historyPage = m.historyPage.setSize(msg.Width, msg.Height-1)
-		m.queuePage = m.queuePage.setSize(msg.Width, msg.Height-1)
+		// 顶部 Tab 栏 + 分隔线占 2 行，页面高度相应减 2
+		m.width = msg.Width
+		m.home = m.home.setSize(msg.Width, msg.Height-2)
+		m.searchPage = m.searchPage.setSize(msg.Width, msg.Height-2)
+		m.historyPage = m.historyPage.setSize(msg.Width, msg.Height-2)
+		m.queuePage = m.queuePage.setSize(msg.Width, msg.Height-2)
 		return m, nil
 
 	case tea.MouseMsg:
@@ -815,7 +817,8 @@ func emitClearHistory() tea.Cmd {
 }
 
 // onMouse 处理鼠标事件：Tab 栏（首行 Y==0，bubbletea X/Y 为 0-based）——
-// 点击标签（左键按下）切换页面，移动更新悬停高亮；其余区域事件不拦截，
+// 点击标签（左键按下）切换页面，移动更新悬停高亮；Y==1 为分隔线行
+// （点击/移动直接委托页面，无特殊处理）；其余区域事件不拦截，
 // 交给当前页面（歌词区 viewport 原生支持滚轮；bubbles v1.0.0 的列表/输入框暂无鼠标处理）。
 func (m Model) onMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	if msg.Y != 0 {
