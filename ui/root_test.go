@@ -279,6 +279,91 @@ func TestTabSwitchesPages(t *testing.T) {
 	}
 }
 
+func TestCtrlArrowsSwitchPages(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+
+	// Ctrl+Right：正向循环 首页→搜索→历史→队列→首页
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
+	if m.current != pageSearch {
+		t.Errorf("Ctrl+Right 后 current = %v, want pageSearch", m.current)
+	}
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
+	if m.current != pageHistory {
+		t.Errorf("Ctrl+Right 后 current = %v, want pageHistory", m.current)
+	}
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
+	if m.current != pageQueue {
+		t.Errorf("Ctrl+Right 后 current = %v, want pageQueue", m.current)
+	}
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
+	if m.current != pageHome {
+		t.Errorf("Ctrl+Right 循环后 current = %v, want pageHome", m.current)
+	}
+
+	// Ctrl+Left：反向一步 首页→队列
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlLeft})
+	if m.current != pageQueue {
+		t.Errorf("Ctrl+Left 后 current = %v, want pageQueue", m.current)
+	}
+}
+
+func TestShiftTabSwitchesPagesReverse(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+
+	// Shift+Tab：反向循环 首页→队列→历史→搜索→首页
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.current != pageQueue {
+		t.Errorf("Shift+Tab 后 current = %v, want pageQueue", m.current)
+	}
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.current != pageHistory {
+		t.Errorf("Shift+Tab 后 current = %v, want pageHistory", m.current)
+	}
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.current != pageSearch {
+		t.Errorf("Shift+Tab 后 current = %v, want pageSearch", m.current)
+	}
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.current != pageHome {
+		t.Errorf("Shift+Tab 循环后 current = %v, want pageHome", m.current)
+	}
+
+	// Tab 与 Shift+Tab 互逆：Tab 一步后 Shift+Tab 回到原页
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyTab}) // home → search
+	if m.current != pageSearch {
+		t.Fatalf("Tab 后 current = %v, want pageSearch", m.current)
+	}
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.current != pageHome {
+		t.Errorf("Tab 后 Shift+Tab 应回到原页: current = %v, want pageHome", m.current)
+	}
+}
+
+// 搜索输入框聚焦时 Ctrl+←/→ 仍应全局切页（textinput 无 ctrl+箭头绑定，无冲突）。
+func TestCtrlArrowsSwitchPagesWhenSearchInputFocused(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m = runProgram(t, m,
+		tea.KeyMsg{Type: tea.KeyTab}, // 切到搜索页，输入框聚焦
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")},
+		tea.KeyMsg{Type: tea.KeyCtrlLeft},
+	)
+	// 搜索页（index 1）反向一步 = 首页；聚焦不阻碍切页
+	if m.current != pageHome {
+		t.Errorf("搜索输入框聚焦时 Ctrl+Left 后 current = %v, want pageHome", m.current)
+	}
+	if got := m.searchPage.input.Value(); got != "晴天" {
+		t.Errorf("切页后输入框内容应保留: input = %q, want %q", got, "晴天")
+	}
+	// 首页正向一步 = 搜索页（切走后焦点输入框内容仍在）
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
+	if m.current != pageSearch {
+		t.Errorf("Ctrl+Right 后 current = %v, want pageSearch", m.current)
+	}
+}
+
 func TestSpaceTogglesPlayback(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)

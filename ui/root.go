@@ -408,8 +408,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "tab":
-			return m.switchPage("tab"), nil
+		case "tab", "ctrl+right":
+			return m.switchPage(msg.String()), nil
+		case "shift+tab", "ctrl+left":
+			return m.switchPage(msg.String()), nil
 		case "1", "2", "3", "4":
 			// 数字键始终切页。注：计划原代码在搜索输入框聚焦时把数字让给输入框，
 			// 但 TestTabSwitchesPages 要求搜索页聚焦时按 3/1 仍能切页，故取消例外。
@@ -847,7 +849,8 @@ func (m Model) onMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	return m, nil // 其余（释放/滚轮等）在 Tab 栏上不处理
 }
 
-// switchPage 处理 Tab（循环）与 1/2/3/4（直达）。
+// switchPage 处理切页按键：Tab/Ctrl+Right 正向循环（首页→搜索→历史→队列→首页）、
+// Shift+Tab/Ctrl+Left 反向循环、1/2/3/4 直达。
 func (m Model) switchPage(key string) Model {
 	switch key {
 	case "1":
@@ -858,7 +861,9 @@ func (m Model) switchPage(key string) Model {
 		m.current = pageHistory
 	case "4":
 		m.current = pageQueue
-	default: // tab
+	case "shift+tab", "ctrl+left":
+		m.current = page((int(m.current) + 3) % 4)
+	default: // tab, ctrl+right
 		m.current = page((int(m.current) + 1) % 4)
 	}
 	return m
