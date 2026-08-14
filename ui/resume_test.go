@@ -15,6 +15,7 @@ import (
 	"music-tui/lyrics"
 	"music-tui/model"
 	"music-tui/player"
+	"music-tui/playlists"
 	"music-tui/queue"
 	"music-tui/session"
 )
@@ -45,9 +46,13 @@ func newResumeTestModel(t *testing.T, st *session.State, onTrack func(*model.Tra
 			t.Fatal(err)
 		}
 	}
+	pls, err := playlists.NewStore(filepath.Join(t.TempDir(), "playlists.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	m := NewModel(fp, &fakeSearchAdapter{},
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, onTrack)
+		cf, hist, sess, pls, onTrack)
 	return m, fp
 }
 

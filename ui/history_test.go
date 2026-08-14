@@ -28,9 +28,9 @@ func TestHistoryReplayDeleteClear(t *testing.T) {
 	}
 	m = m.refreshHistory()
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 数字键直达历史页
 	if m.current != pageHistory {
-		t.Fatal("按 3 后应在历史页")
+		t.Fatal("按 5 后应在历史页")
 	}
 	if len(m.historyPage.entries) != 2 {
 		t.Fatalf("entries = %d, want 2", len(m.historyPage.entries))
@@ -83,7 +83,7 @@ func TestHistoryReplayDeleteClear(t *testing.T) {
 
 func TestHistoryEmptyView(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 数字键直达历史页
 	if got := m.historyPage.view(); !strings.Contains(got, "暂无播放历史") {
 		t.Errorf("空历史 view = %q", got)
 	}

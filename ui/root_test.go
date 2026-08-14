@@ -18,6 +18,7 @@ import (
 	"music-tui/lyrics"
 	"music-tui/model"
 	"music-tui/player"
+	"music-tui/playlists"
 	"music-tui/session"
 )
 
@@ -189,9 +190,13 @@ func newTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, onTrack f
 	if err != nil {
 		t.Fatal(err)
 	}
+	pls, err := playlists.NewStore(filepath.Join(t.TempDir(), "playlists.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	return NewModel(fp, fa,
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, onTrack)
+		cf, hist, sess, pls, onTrack)
 }
 
 // execCmds 同步执行 tea.Cmd 并收集返回的非 nil 消息（测试用）。
@@ -262,16 +267,20 @@ func TestTabSwitchesPages(t *testing.T) {
 	m := newTestModel(t, fp, fa, nil)
 
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyTab})
-	if m.current != pageSearch {
-		t.Errorf("Tab 后 current = %v, want pageSearch", m.current)
+	if m.current != pageQueue {
+		t.Errorf("Tab 后 current = %v, want pageQueue", m.current)
 	}
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	if m.current != pageHistory {
-		t.Errorf("按 3 后 current = %v, want pageHistory", m.current)
+	if m.current != pagePlaylists {
+		t.Errorf("按 3 后 current = %v, want pagePlaylists", m.current)
 	}
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
-	if m.current != pageQueue {
-		t.Errorf("按 4 后 current = %v, want pageQueue", m.current)
+	if m.current != pageSearch {
+		t.Errorf("按 4 后 current = %v, want pageSearch", m.current)
+	}
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
+	if m.current != pageHistory {
+		t.Errorf("按 5 后 current = %v, want pageHistory", m.current)
 	}
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
 	if m.current != pageHome {
@@ -283,7 +292,15 @@ func TestCtrlArrowsSwitchPages(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 
-	// Ctrl+Right：正向循环 首页→搜索→历史→队列→首页
+	// Ctrl+Right：正向循环 首页→队列→播放列表→搜索→历史→首页
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
+	if m.current != pageQueue {
+		t.Errorf("Ctrl+Right 后 current = %v, want pageQueue", m.current)
+	}
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
+	if m.current != pagePlaylists {
+		t.Errorf("Ctrl+Right 后 current = %v, want pagePlaylists", m.current)
+	}
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
 	if m.current != pageSearch {
 		t.Errorf("Ctrl+Right 后 current = %v, want pageSearch", m.current)
@@ -293,18 +310,14 @@ func TestCtrlArrowsSwitchPages(t *testing.T) {
 		t.Errorf("Ctrl+Right 后 current = %v, want pageHistory", m.current)
 	}
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
-	if m.current != pageQueue {
-		t.Errorf("Ctrl+Right 后 current = %v, want pageQueue", m.current)
-	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
 	if m.current != pageHome {
 		t.Errorf("Ctrl+Right 循环后 current = %v, want pageHome", m.current)
 	}
 
-	// Ctrl+Left：反向一步 首页→队列
+	// Ctrl+Left：反向一步 首页→历史
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlLeft})
-	if m.current != pageQueue {
-		t.Errorf("Ctrl+Left 后 current = %v, want pageQueue", m.current)
+	if m.current != pageHistory {
+		t.Errorf("Ctrl+Left 后 current = %v, want pageHistory", m.current)
 	}
 }
 
@@ -312,11 +325,7 @@ func TestShiftTabSwitchesPagesReverse(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 
-	// Shift+Tab：反向循环 首页→队列→历史→搜索→首页
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
-	if m.current != pageQueue {
-		t.Errorf("Shift+Tab 后 current = %v, want pageQueue", m.current)
-	}
+	// Shift+Tab：反向循环 首页→历史→搜索→播放列表→队列→首页
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
 	if m.current != pageHistory {
 		t.Errorf("Shift+Tab 后 current = %v, want pageHistory", m.current)
@@ -326,14 +335,22 @@ func TestShiftTabSwitchesPagesReverse(t *testing.T) {
 		t.Errorf("Shift+Tab 后 current = %v, want pageSearch", m.current)
 	}
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.current != pagePlaylists {
+		t.Errorf("Shift+Tab 后 current = %v, want pagePlaylists", m.current)
+	}
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.current != pageQueue {
+		t.Errorf("Shift+Tab 后 current = %v, want pageQueue", m.current)
+	}
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
 	if m.current != pageHome {
 		t.Errorf("Shift+Tab 循环后 current = %v, want pageHome", m.current)
 	}
 
 	// Tab 与 Shift+Tab 互逆：Tab 一步后 Shift+Tab 回到原页
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyTab}) // home → search
-	if m.current != pageSearch {
-		t.Fatalf("Tab 后 current = %v, want pageSearch", m.current)
+	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyTab}) // home → queue
+	if m.current != pageQueue {
+		t.Fatalf("Tab 后 current = %v, want pageQueue", m.current)
 	}
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
 	if m.current != pageHome {
@@ -348,18 +365,20 @@ func TestCtrlArrowsSwitchPagesWhenSearchInputFocused(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m = runProgram(t, m,
-		tea.KeyMsg{Type: tea.KeyTab}, // 切到搜索页，输入框聚焦
+		tea.KeyMsg{Type: tea.KeyTab}, // → 队列
+		tea.KeyMsg{Type: tea.KeyTab}, // → 播放列表
+		tea.KeyMsg{Type: tea.KeyTab}, // → 搜索页，输入框聚焦
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")},
 		tea.KeyMsg{Type: tea.KeyCtrlLeft},
 	)
-	// 搜索页（index 1）反向一步 = 首页；聚焦不阻碍切页
-	if m.current != pageHome {
-		t.Errorf("搜索输入框聚焦时 Ctrl+Left 后 current = %v, want pageHome", m.current)
+	// 搜索页（index 3）反向一步 = 播放列表；聚焦不阻碍切页
+	if m.current != pagePlaylists {
+		t.Errorf("搜索输入框聚焦时 Ctrl+Left 后 current = %v, want pagePlaylists", m.current)
 	}
 	if got := m.searchPage.input.Value(); got != "晴天" {
 		t.Errorf("切页后输入框内容应保留: input = %q, want %q", got, "晴天")
 	}
-	// 首页正向一步 = 搜索页（切走后焦点输入框内容仍在）
+	// 播放列表正向一步 = 搜索页（切走后焦点输入框内容仍在）
 	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
 	if m.current != pageSearch {
 		t.Errorf("Ctrl+Right 后 current = %v, want pageSearch", m.current)
@@ -386,6 +405,8 @@ func TestSpaceTypesWhenSearchInputFocused(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m = runProgram(t, m,
+		tea.KeyMsg{Type: tea.KeyTab},
+		tea.KeyMsg{Type: tea.KeyTab},
 		tea.KeyMsg{Type: tea.KeyTab}, // 切到搜索页，输入框聚焦
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")},
 		tea.KeyMsg{Type: tea.KeySpace},
@@ -427,9 +448,9 @@ func TestPlayFlow(t *testing.T) {
 	m := newTestModel(t, fp, fa, nil)
 
 	// 搜索页输入关键词并 Enter
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 数字键直达搜索页
 	if m.current != pageSearch {
-		t.Fatal("Tab 后应在搜索页")
+		t.Fatal("按 4 后应在搜索页")
 	}
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
@@ -695,7 +716,15 @@ func TestTabWrapsAround(t *testing.T) {
 	if m.current != pageHome {
 		t.Fatalf("初始 current = %v, want pageHome", m.current)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // home → search
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // home → queue
+	if m.current != pageQueue {
+		t.Fatalf("current = %v, want pageQueue", m.current)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // queue → playlists
+	if m.current != pagePlaylists {
+		t.Fatalf("current = %v, want pagePlaylists", m.current)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // playlists → search
 	if m.current != pageSearch {
 		t.Fatalf("current = %v, want pageSearch", m.current)
 	}
@@ -703,11 +732,7 @@ func TestTabWrapsAround(t *testing.T) {
 	if m.current != pageHistory {
 		t.Fatalf("current = %v, want pageHistory", m.current)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // history → queue
-	if m.current != pageQueue {
-		t.Fatalf("current = %v, want pageQueue", m.current)
-	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // queue → home（循环 wrap）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // history → home（循环 wrap）
 	if m.current != pageHome {
 		t.Errorf("tab 循环后 current = %v, want pageHome", m.current)
 	}

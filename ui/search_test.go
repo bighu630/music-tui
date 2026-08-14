@@ -15,9 +15,9 @@ func TestSearchTypingAndEnter(t *testing.T) {
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1")}}
 	m := newTestModel(t, fp, fa, nil)
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 数字键直达搜索页
 	if m.current != pageSearch {
-		t.Fatal("Tab 后应在搜索页")
+		t.Fatal("按 4 后应在搜索页")
 	}
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")})
 	if got := m.searchPage.input.Value(); got != "晴天" {
@@ -52,7 +52,7 @@ func TestSearchTypingAndEnter(t *testing.T) {
 func TestSearchEmptyQueryIgnored(t *testing.T) {
 	fa := &fakeSearchAdapter{}
 	m := newTestModel(t, newFakePlayer(), fa, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 数字键直达搜索页
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd != nil {
 		t.Error("空查询不应触发搜索")
@@ -65,7 +65,7 @@ func TestSearchEmptyQueryIgnored(t *testing.T) {
 func TestSearchErrorState(t *testing.T) {
 	fa := &fakeSearchAdapter{err: errors.New("yt-dlp 搜索失败")}
 	m := newTestModel(t, newFakePlayer(), fa, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 数字键直达搜索页
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	msgs := execCmds(cmd)
@@ -87,7 +87,7 @@ func TestSearchErrorState(t *testing.T) {
 func TestSearchEmptyResults(t *testing.T) {
 	fa := &fakeSearchAdapter{}
 	m := newTestModel(t, newFakePlayer(), fa, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 数字键直达搜索页
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("zzz")})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	msgs := execCmds(cmd)
@@ -106,7 +106,7 @@ func TestSearchEmptyResults(t *testing.T) {
 func TestSearchEnterPlaysSelected(t *testing.T) {
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1"), testTrack("t2")}}
 	m := newTestModel(t, newFakePlayer(), fa, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 数字键直达搜索页
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")})
 	_ = execCmds(cmd)
 	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyEnter})

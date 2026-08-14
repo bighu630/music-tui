@@ -12,9 +12,10 @@ import (
 )
 
 // searchAndPick 走完 搜索 → 结果回灌 流程，返回就绪（列表聚焦）的 model。
+// 用数字键 4 直达搜索页（Tab 需 ×3，数字键更稳）。
 func searchAndPick(t *testing.T, m Model, fa *fakeSearchAdapter) Model {
 	t.Helper()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // 切到搜索页
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 直达搜索页
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	var res searchResultsMsg
@@ -47,15 +48,13 @@ func appendSelected(t *testing.T, m Model) Model {
 	return m
 }
 
-// TestQueueTabShowsEmptyView 第 4 个 Tab：空队列显示空态提示。
+// TestQueueTabShowsEmptyView 第 2 个 Tab：空队列显示空态提示。
 func TestQueueTabShowsEmptyView(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
-	for i := 0; i < 3; i++ {
-		m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
-	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
 	if m.current != pageQueue {
-		t.Fatalf("Tab×3 后 current = %v, want pageQueue", m.current)
+		t.Fatalf("Tab 后 current = %v, want pageQueue", m.current)
 	}
 	if got := m.queuePage.view(); !strings.Contains(got, "队列为空") {
 		t.Errorf("空队列 view 应提示队列为空, got %q", got)
@@ -72,7 +71,7 @@ func TestSearchAppendBuildsQueue(t *testing.T) {
 	m := newTestModel(t, fp, fa, nil)
 	m = searchAndPick(t, m, fa)
 
-	m = appendSelected(t, m) // 追加 t1
+	m = appendSelected(t, m)                        // 追加 t1
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t2
 	m = appendSelected(t, m)
 	if m.queue.Len() != 2 {
@@ -88,7 +87,7 @@ func TestSearchAppendBuildsQueue(t *testing.T) {
 		t.Errorf("追加不应改变播放状态, state.Track = %+v", m.state.Track)
 	}
 	// 队列页展示两条
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
 	if len(m.queuePage.items) != 2 || m.queuePage.current != -1 {
 		t.Errorf("队列页未同步: items=%d current=%d", len(m.queuePage.items), m.queuePage.current)
 	}
@@ -224,7 +223,7 @@ func TestTrackEndedKeepsCurrentPage(t *testing.T) {
 	_ = execCmds(cmd)
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
 	if m.current != pageQueue {
 		t.Fatalf("current = %v, want pageQueue", m.current)
 	}
@@ -249,7 +248,7 @@ func TestQueuePageJumpPlay(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // t2
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // t3
 	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyEnter})
@@ -289,7 +288,7 @@ func TestQueuePageDeleteAndClear(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
 	// 默认选中第一项（t1 = 当前曲）→ d 删除
 	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
 	var qd queueDeleteMsg
@@ -344,7 +343,7 @@ func TestQueueModeToggle(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
 	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
 	var qm queueModeMsg
 	for _, msg := range execCmds(cmd) {
@@ -394,7 +393,7 @@ func TestHistoryAppend(t *testing.T) {
 	}
 	m = m.refreshHistory()
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	var ta trackAppendMsg
 	for _, msg := range execCmds(cmd) {
@@ -425,7 +424,7 @@ func TestDeleteCurrentThenTrackEndedPlaysSlidTrack(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
 	// 队列页删除当前曲 t1 → 顺延 t2 为当前（mpv 仍在播 t1，不打断）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
 	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
 	var qd queueDeleteMsg
 	for _, msg := range execCmds(cmd) {
@@ -556,7 +555,7 @@ func TestQueueDeleteKeepsSelectionValid(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t3（下标 2）
 	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})

@@ -26,12 +26,12 @@ func TestMain(m *testing.M) {
 // 等价替代：lipgloss v2 的 RemoveANSI 即 x/ansi 的 Strip 包装）。
 func stripANSI(s string) string { return ansi.Strip(s) }
 
-// 四标题齐全（初始无曲目 → 首页标签带 ⏹）。
-func TestTabBarShowsFourTitles(t *testing.T) {
+// 五标题齐全（初始无曲目 → 首页标签带 ⏹）。
+func TestTabBarShowsFiveTitles(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	view := stripANSI(m.View())
-	for _, title := range []string{"⏹ 首页", "搜索", "历史", "队列"} {
+	for _, title := range []string{"⏹ 首页", "队列", "播放列表", "搜索", "历史"} {
 		if !strings.Contains(view, title) {
 			t.Errorf("Tab 栏缺少 %q，view = %q", title, view)
 		}
@@ -47,7 +47,7 @@ func TestTabBarHighlightsCurrentPage(t *testing.T) {
 	if !strings.Contains(view, tabStyle.Render("⏹ 首页")) {
 		t.Errorf("当前页标签应高亮（%q），view = %q", tabStyle.Render("⏹ 首页"), view)
 	}
-	for _, title := range []string{"搜索", "历史", "队列"} {
+	for _, title := range []string{"队列", "播放列表", "搜索", "历史"} {
 		if !strings.Contains(view, tabInactiveStyle.Render(title)) {
 			t.Errorf("非当前页 %q 应为 Faint 样式", title)
 		}
@@ -61,17 +61,17 @@ func TestTabBarHighlightsCurrentPage(t *testing.T) {
 func TestTabBarHighlightsFollowsSwitch(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // → 搜索
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // → 队列
 	view := m.View()
-	if !strings.Contains(view, tabStyle.Render("搜索")) {
-		t.Error("切到搜索页后标签应高亮“搜索”")
+	if !strings.Contains(view, tabStyle.Render("队列")) {
+		t.Error("切到队列页后标签应高亮“队列”")
 	}
 	if strings.Contains(view, tabStyle.Render("⏹ 首页")) {
 		t.Error("首页标签不应再高亮")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // → 队列
-	if !strings.Contains(m.View(), tabStyle.Render("队列")) {
-		t.Error("按 4 后标签应高亮“队列”")
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // → 搜索
+	if !strings.Contains(m.View(), tabStyle.Render("搜索")) {
+		t.Error("按 4 后标签应高亮“搜索”")
 	}
 }
 
@@ -163,9 +163,10 @@ func mouseTabCols() []struct {
 		want page
 	}{
 		{"⏹ 首页", 0, pageHome},
+		{"队列 (3)", 0, pageQueue},
+		{"播放列表", 0, pagePlaylists},
 		{"搜索", 0, pageSearch},
 		{"历史", 0, pageHistory},
-		{"队列 (3)", 0, pageQueue},
 	}
 	col := 0
 	for i := range labels {
@@ -202,13 +203,13 @@ func TestMouseClickSwitchesPage(t *testing.T) {
 	}
 	// 幂等：先切到搜索页，再点当前页“搜索”应保持 pageSearch
 	m, _ = update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[1].col + 1, Y: 0,
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[3].col + 1, Y: 0,
 	})
 	if m.current != pageSearch {
 		t.Fatalf("点击“搜索”后 current = %v, want pageSearch", m.current)
 	}
 	m2, _ := update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[1].col + 1, Y: 0,
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[3].col + 1, Y: 0,
 	})
 	if m2.current != pageSearch {
 		t.Errorf("点击当前页“搜索”应幂等, current = %v, want pageSearch", m2.current)
@@ -216,9 +217,13 @@ func TestMouseClickSwitchesPage(t *testing.T) {
 }
 
 // 点击标签间分隔不应切换页面。
+// 注：mouseTabCols 按“队列 (3)”固定状态计算列位，本测试同样先入队 3 首对齐。
 func TestMouseClickOnSeparatorIgnored(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	for _, id := range []string{"q1", "q2", "q3"} {
+		m, _ = update(m, trackAppendMsg{track: testTrack(id)})
+	}
 	seps := mouseTabCols()
 	for i := 1; i < len(seps); i++ {
 		// 上一标签末尾与下一标签起始之间的两个分隔格
@@ -255,13 +260,16 @@ func TestMouseClickOutsideTabBarIgnored(t *testing.T) {
 func TestMouseHoverHighlightsTab(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
-	seps := mouseTabCols()
-	x := seps[1].col + 1 // 悬停"搜索"标签
-	m2, _ := update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: x, Y: 0})
-	if m2.hoverTab != int(pageSearch) {
-		t.Errorf("hoverTab = %d, want %d", m2.hoverTab, int(pageSearch))
+	for _, id := range []string{"q1", "q2", "q3"} {
+		m, _ = update(m, trackAppendMsg{track: testTrack(id)})
 	}
-	if !strings.Contains(m2.View(), tabHoverStyle.Render("搜索")) {
+	seps := mouseTabCols()
+	x := seps[1].col + 1 // 悬停"队列"标签
+	m2, _ := update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: x, Y: 0})
+	if m2.hoverTab != int(pageQueue) {
+		t.Errorf("hoverTab = %d, want %d", m2.hoverTab, int(pageQueue))
+	}
+	if !strings.Contains(m2.View(), tabHoverStyle.Render("队列")) {
 		t.Error("悬停的标签应显示下划线高亮")
 	}
 	// 鼠标移出 Tab 栏 → 清除 hover
@@ -269,7 +277,7 @@ func TestMouseHoverHighlightsTab(t *testing.T) {
 	if m3.hoverTab != -1 {
 		t.Errorf("移出后 hoverTab = %d, want -1", m3.hoverTab)
 	}
-	if strings.Contains(m3.View(), tabHoverStyle.Render("搜索")) {
+	if strings.Contains(m3.View(), tabHoverStyle.Render("队列")) {
 		t.Error("移出后不应再有下划线高亮")
 	}
 }
