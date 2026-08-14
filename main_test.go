@@ -6,6 +6,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"music-tui/cache"
+	"music-tui/config"
 )
 
 func TestVersion(t *testing.T) {
@@ -151,5 +154,99 @@ func TestLoadHistoryCorruptBackupFail(t *testing.T) {
 
 	if _, err := loadHistory(path); err == nil {
 		t.Fatal("备份失败时应返回错误而非降级")
+	}
+}
+
+func TestLoadConfigMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("配置文件不存在时应生成默认配置: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("cfg 不应为 nil")
+	}
+	if !cfg.Cache.Enabled {
+		t.Error("默认配置应开启缓存")
+	}
+	if cfg.Cache.MaxEntries != config.DefaultMaxEntries {
+		t.Errorf("MaxEntries = %d, want %d", cfg.Cache.MaxEntries, config.DefaultMaxEntries)
+	}
+	if cfg.Cache.Dir == "" {
+		t.Error("默认缓存目录不应为空")
+	}
+}
+
+func TestLoadConfigCorruptBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("损坏配置应降级重建而非报错: %v", err)
+	}
+	if cfg == nil || !cfg.Cache.Enabled {
+		t.Error("重建后应为默认配置（缓存开启）")
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "config.json.corrupt-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("应生成 1 个损坏备份文件, got %d: %v", len(matches), matches)
+	}
+}
+
+// 缓存索引文件损坏：备份 .corrupt-* 后重试重建，返回启用态缓存。
+func TestLoadCacheCorruptIndexBackup(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cache")
+	idx := filepath.Join(dir, "index.json")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(idx, []byte("{broken"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cm := loadCache(cache.Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent/yt-dlp")
+	if cm == nil {
+		t.Fatal("loadCache 不应返回 nil")
+	}
+	if !cm.Enabled() {
+		t.Error("索引备份重建后应为启用态缓存")
+	}
+	matches, err := filepath.Glob(idx + ".corrupt-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("应生成 1 个索引损坏备份, got %d: %v", len(matches), matches)
+	}
+}
+
+// 缓存目录不可创建（Dir 指向普通文件）：绝不阻止启动，降级为禁用态缓存。
+func TestLoadCacheFailsGracefullyDisabled(t *testing.T) {
+	dir := t.TempDir()
+	notDir := filepath.Join(dir, "notadir")
+	if err := os.WriteFile(notDir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cm := loadCache(cache.Options{Enabled: true, MaxEntries: 100, Dir: notDir}, "/nonexistent/yt-dlp")
+	if cm == nil {
+		t.Fatal("loadCache 不应返回 nil")
+	}
+	if cm.Enabled() {
+		t.Error("初始化失败应降级为禁用态缓存")
+	}
+	// 禁用态缓存全 no-op（不 panic）
+	if _, ok := cm.Lookup("t1"); ok {
+		t.Error("禁用态 Lookup 应恒 miss")
+	}
+	if err := cm.Remove("t1"); err != nil {
+		t.Errorf("禁用态 Remove 应 no-op: %v", err)
 	}
 }

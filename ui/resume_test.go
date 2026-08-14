@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"music-tui/cache"
 	"music-tui/cover"
 	"music-tui/history"
 	"music-tui/lyrics"
@@ -50,9 +51,15 @@ func newResumeTestModel(t *testing.T, st *session.State, onTrack func(*model.Tra
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 缓存指向不存在的 yt-dlp：恢复路径不会触发 CacheAsync，即使触发
+	// 后台下载也立即失败退出（无网络无泄漏）。
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, "/nonexistent/yt-dlp")
+	if err != nil {
+		t.Fatal(err)
+	}
 	m := NewModel(fp, &fakeSearchAdapter{},
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, pls, onTrack)
+		cf, hist, sess, pls, cm, onTrack)
 	return m, fp
 }
 
