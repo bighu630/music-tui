@@ -493,6 +493,34 @@ func TestMpvPlayerCommands(t *testing.T) {
 	}
 }
 
+// SetLoop 设置单曲循环：set_property loop-file（mpv 无缝循环）。
+// loop-file 是 per-file 属性，新 loadfile 自动重置为 no。
+func TestMpvPlayerSetLoop(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.SetLoop(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetLoop(false); err != nil {
+		t.Fatal(err)
+	}
+
+	cmds := fake.recordedCommands()
+	got := cmds[3:] // 前 3 条是 observe_property
+	want := [][]interface{}{
+		{"set_property", "loop-file", true},
+		{"set_property", "loop-file", false},
+	}
+	for i := range want {
+		for j := range want[i] {
+			if got[i][j] != want[i][j] {
+				t.Fatalf("cmd[%d] = %v, want %v", i, got[i], want[i])
+			}
+		}
+	}
+}
+
 // PlayPaused 加载指定 URL 但保持暂停（续播恢复用，不发声）。
 // 命令序列：set pause=true → loadfile（mpv 的 pause 属性不随文件重置）。
 // start>0 时用 4 参 loadfile（mpv ≥0.38）随加载原子定位，避免加载窗口内
@@ -554,6 +582,7 @@ func TestMpvPlayerCommandsTimeoutWhenMpvHangs(t *testing.T) {
 		{"Pause", func() error { return p.Pause() }},
 		{"Resume", func() error { return p.Resume() }},
 		{"Seek", func() error { return p.Seek(30) }},
+		{"SetLoop", func() error { return p.SetLoop(true) }},
 	} {
 		start := time.Now()
 		err := tc.call()
@@ -583,6 +612,7 @@ func TestMpvPlayerCommandsFailWhenNotConnected(t *testing.T) {
 		{"Pause", func() error { return p.Pause() }},
 		{"Resume", func() error { return p.Resume() }},
 		{"Seek", func() error { return p.Seek(10) }},
+		{"SetLoop", func() error { return p.SetLoop(true) }},
 	} {
 		if err := tc.call(); err == nil {
 			t.Errorf("%s: 未连接时应报错", tc.name)

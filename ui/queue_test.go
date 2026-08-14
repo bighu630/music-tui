@@ -159,7 +159,8 @@ func TestAppendDoesNotInterruptPlayback(t *testing.T) {
 	}
 }
 
-// TestTrackEndedAutoAdvances TrackEnded 自动连播：依次播放下一首，播完停止。
+// TestTrackEndedAutoAdvances TrackEnded 自动连播：依次播放下一首，末首播完回绕队首；
+// 空队列播完仍停止。
 func TestTrackEndedAutoAdvances(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -202,16 +203,29 @@ func TestTrackEndedAutoAdvances(t *testing.T) {
 		t.Fatalf("第二次连播失败: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
 	}
 
-	// t3 结束 → 无下一首 → 停止（不循环）
+	// t3 结束 → 末尾回绕 → 自动连播队首 t1（列表循环语义）
 	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
-	if fp.playCount() != 3 {
-		t.Errorf("播完不应再触发播放, playCount = %d", fp.playCount())
+	if fp.playCount() != 4 || fp.lastPlayed() != testTrack("t1").URL {
+		t.Fatalf("末首播完应回绕队首: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	if m.queue.CurrentIndex() != 0 {
+		t.Errorf("回绕后 CurrentIndex = %d, want 0", m.queue.CurrentIndex())
+	}
+	if m.state.Track == nil || m.state.Track.ID != "t1" || !m.state.Playing || m.ended {
+		t.Errorf("回绕后 state = %+v ended=%v, want t1 播放中 ended=false", m.state, m.ended)
+	}
+	if got := m.home.view(); !strings.Contains(got, "1/3 · 顺序") {
+		t.Errorf("首页应显示 1/3 · 顺序, got %q", got)
+	}
+
+	// 队列清空后播完：无下一首 → 停止（ended 置位，不再播放）
+	m, _ = update(m, queueClearMsg{})
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if fp.playCount() != 4 {
+		t.Errorf("空队列播完不应再触发播放, playCount = %d", fp.playCount())
 	}
 	if m.state.Playing || !m.ended {
-		t.Errorf("播完后 Playing=%v ended=%v, want false/true", m.state.Playing, m.ended)
-	}
-	if m.queue.CurrentIndex() != 2 {
-		t.Errorf("播完停在末位, CurrentIndex = %d", m.queue.CurrentIndex())
+		t.Errorf("空队列播完后 Playing=%v ended=%v, want false/true", m.state.Playing, m.ended)
 	}
 }
 
@@ -334,7 +348,7 @@ func TestQueuePageDeleteAndClear(t *testing.T) {
 	}
 }
 
-// TestQueueModeToggle 队列页 s 切换顺序/随机，首页同步显示模式。
+// TestQueueModeToggle 队列页 s 三态循环切换模式，首页/队列页文案同步显示。
 func TestQueueModeToggle(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -356,11 +370,7 @@ func TestQueueModeToggle(t *testing.T) {
 		t.Fatalf("Mode = %v, want Shuffle", m.queue.Mode())
 	}
 	if m.queue.CurrentIndex() != 0 {
-		t.Errorf("切随机不应移动当前指针, CurrentIndex = %d", m.queue.CurrentIndex())
-	}
-	// 洗牌后显示顺序 = 播放顺序（集合不变）
-	if !sameTrackSet(m.queue.Tracks(), []model.Track{testTrack("t1"), testTrack("t2"), testTrack("t3")}) {
-		t.Errorf("洗牌后曲目集合变了: %+v", idsOf(m.queue.Tracks()))
+		t.Errorf("切模式不应移动当前指针, CurrentIndex = %d", m.queue.CurrentIndex())
 	}
 	if got := m.home.view(); !strings.Contains(got, "随机") {
 		t.Errorf("首页应显示随机模式, got %q", got)
@@ -369,7 +379,24 @@ func TestQueueModeToggle(t *testing.T) {
 		t.Errorf("队列页应显示随机播放, got %q", m.queuePage.view())
 	}
 
-	// 再按 s 切回顺序
+	// 再按 s：Shuffle → RepeatOne
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	for _, msg := range execCmds(cmd) {
+		if mm, ok := msg.(queueModeMsg); ok {
+			m, _ = update(m, mm)
+		}
+	}
+	if m.queue.Mode() != queue.RepeatOne {
+		t.Errorf("Mode = %v, want RepeatOne", m.queue.Mode())
+	}
+	if got := m.home.view(); !strings.Contains(got, "单曲循环") {
+		t.Errorf("首页应显示单曲循环, got %q", got)
+	}
+	if !strings.Contains(m.queuePage.view(), "单曲循环") {
+		t.Errorf("队列页应显示单曲循环, got %q", m.queuePage.view())
+	}
+
+	// 再按 s：RepeatOne → Sequential
 	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
 	for _, msg := range execCmds(cmd) {
 		if mm, ok := msg.(queueModeMsg); ok {
@@ -381,6 +408,34 @@ func TestQueueModeToggle(t *testing.T) {
 	}
 	if got := m.home.view(); !strings.Contains(got, "顺序") {
 		t.Errorf("首页应显示顺序模式, got %q", got)
+	}
+	if !strings.Contains(m.queuePage.view(), "列表循环") {
+		t.Errorf("队列页应显示列表循环, got %q", m.queuePage.view())
+	}
+}
+
+// TestModeLabels 三态文案：队列页完整名 + 首页短名。
+func TestModeLabels(t *testing.T) {
+	q := queueModel{mode: queue.Sequential}
+	if got := q.modeLabel(); got != "列表循环" {
+		t.Errorf("Sequential modeLabel = %q, want 列表循环", got)
+	}
+	q.mode = queue.Shuffle
+	if got := q.modeLabel(); got != "随机播放" {
+		t.Errorf("Shuffle modeLabel = %q, want 随机播放", got)
+	}
+	q.mode = queue.RepeatOne
+	if got := q.modeLabel(); got != "单曲循环" {
+		t.Errorf("RepeatOne modeLabel = %q, want 单曲循环", got)
+	}
+	if got := modeName(queue.Sequential); got != "顺序" {
+		t.Errorf("Sequential modeName = %q, want 顺序", got)
+	}
+	if got := modeName(queue.Shuffle); got != "随机" {
+		t.Errorf("Shuffle modeName = %q, want 随机", got)
+	}
+	if got := modeName(queue.RepeatOne); got != "单曲循环" {
+		t.Errorf("RepeatOne modeName = %q, want 单曲循环", got)
 	}
 }
 
@@ -519,6 +574,7 @@ func TestAutoAdvancePlayFailure(t *testing.T) {
 }
 
 // TestSpaceReplayReplacesQueue 锁定既定行为：结束后空格重播走替换语义（清空队列）。
+// 列表循环下仅空队列播完才置 ended，故先清空队列再触发播完。
 func TestSpaceReplayReplacesQueue(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -526,18 +582,18 @@ func TestSpaceReplayReplacesQueue(t *testing.T) {
 	_ = execCmds(cmd)
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 
-	// t1 播完 → 连播 t2；t2 播完 → 无下一首 → 停止（ended）
-	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	// 清空队列后播完 → 无下一首 → 停止（ended）
+	m, _ = update(m, queueClearMsg{})
 	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
 	if !m.ended || m.state.Playing {
 		t.Fatalf("播完后 ended=%v Playing=%v, want true/false", m.ended, m.state.Playing)
 	}
 
-	// 追加 t3，空格重播 t2 → 替换语义清空队列
+	// 追加 t3，空格重播 t1 → 替换语义清空队列
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
-	if fp.playCount() != 3 || fp.lastPlayed() != testTrack("t2").URL {
-		t.Fatalf("空格应重播同曲: playCount=%d lastPlayed=%q, want 3 次 t2", fp.playCount(), fp.lastPlayed())
+	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t1").URL {
+		t.Fatalf("空格应重播同曲: playCount=%d lastPlayed=%q, want 2 次 t1", fp.playCount(), fp.lastPlayed())
 	}
 	// 设计已确认：手动播放统一替换语义 → 队列只剩重播曲目
 	if m.queue.Len() != 1 || m.queue.CurrentIndex() != 0 {

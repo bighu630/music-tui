@@ -68,6 +68,9 @@ type Player interface {
 	Resume() error
 	// Seek 跳转到指定秒数（绝对位置）。
 	Seek(seconds float64) error
+	// SetLoop 设置单曲循环（mpv loop-file 无缝循环）。loop-file 是 per-file
+	// 属性：换文件（loadfile）自动重置为不循环，无需显式关闭。
+	SetLoop(loop bool) error
 	// Events 返回播放器事件流，由内部 goroutine 推送。
 	Events() <-chan Event
 }

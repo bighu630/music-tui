@@ -25,7 +25,8 @@ type queueDeleteMsg struct {
 // queueClearMsg 队列页请求清空队列。
 type queueClearMsg struct{}
 
-// queueModeMsg 队列页请求切换顺序/随机。
+// queueModeMsg 队列页请求三态循环切换播放模式（Sequential→Shuffle→RepeatOne）。
+// 与首页模式按钮消息 toggleModeMsg 共用 root.cycleMode。
 type queueModeMsg struct{}
 
 // queueItem 适配 list.Item：当前标记 + 序号 + 标题 + 歌手 · 时长。
@@ -157,18 +158,27 @@ func (q queueModel) view() string {
 		lipgloss.NewStyle().Faint(true).Render(q.modeLabel()+" · Enter 跳转播放 · d 删除 · c 清空 · s 切换模式")
 }
 
-// modeLabel 队列页底部的模式名（完整）。
+// modeLabel 队列页底部的模式名（完整三态文案：列表循环/随机播放/单曲循环）。
 func (q queueModel) modeLabel() string {
-	if q.mode == queue.Shuffle {
+	switch q.mode {
+	case queue.Shuffle:
 		return "随机播放"
+	case queue.RepeatOne:
+		return "单曲循环"
+	default:
+		return "列表循环"
 	}
-	return "顺序播放"
 }
 
-// modeName 返回模式的短名（首页队列信息区展示，如 "3/12 · 随机"）。
+// modeName 返回模式的短名（首页队列信息区与按钮行共用，如 "3/12 · 顺序"；
+// 与 home.go 原 modeShortName 统一，文案保持 顺序/随机/单曲循环）。
 func modeName(m queue.Mode) string {
-	if m == queue.Shuffle {
+	switch m {
+	case queue.Shuffle:
 		return "随机"
+	case queue.RepeatOne:
+		return "单曲循环"
+	default:
+		return "顺序"
 	}
-	return "顺序"
 }

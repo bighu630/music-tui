@@ -19,6 +19,7 @@ import (
 	"music-tui/model"
 	"music-tui/player"
 	"music-tui/playlists"
+	"music-tui/queue"
 	"music-tui/session"
 )
 
@@ -32,7 +33,9 @@ type fakePlayer struct {
 	pauses       int
 	resumes      int
 	seeks        []float64
-	playErr      bool // 为 true 时 Play 返回错误（测试注入）
+	loops        []bool // SetLoop 调用记录
+	playErr      bool   // 为 true 时 Play 返回错误（测试注入）
+	loopErr      bool   // 为 true 时 SetLoop 返回错误（测试注入）
 	events       chan player.Event
 }
 
@@ -79,6 +82,16 @@ func (f *fakePlayer) Seek(seconds float64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.seeks = append(f.seeks, seconds)
+	return nil
+}
+
+func (f *fakePlayer) SetLoop(loop bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.loopErr {
+		return errors.New("loop 设置失败")
+	}
+	f.loops = append(f.loops, loop)
 	return nil
 }
 
@@ -136,6 +149,16 @@ func (f *fakePlayer) lastPlayed() string {
 		return ""
 	}
 	return f.plays[len(f.plays)-1]
+}
+
+// lastLoop 返回最近一次 SetLoop 的参数及是否有调用（无调用返回 false, false）。
+func (f *fakePlayer) lastLoop() (bool, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.loops) == 0 {
+		return false, false
+	}
+	return f.loops[len(f.loops)-1], true
 }
 
 type fakeSearchAdapter struct {
@@ -521,10 +544,14 @@ func TestPlayFlow(t *testing.T) {
 		t.Fatalf("currentLine = %d, want 1", m.home.currentLine)
 	}
 
-	// 播放结束 → Playing 复位
+	// 播放结束 → 队列回绕自动连播同曲（startPlay 替换语义下队列仅 t1 一首，
+	// 列表循环播完回绕重播自身）
 	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
-	if m.state.Playing {
-		t.Fatal("TrackEndedEvent 后 Playing 应为 false")
+	if !m.state.Playing || m.state.Track == nil || m.state.Track.ID != "t1" {
+		t.Fatalf("TrackEndedEvent 后应回绕重播 t1, state = %+v", m.state)
+	}
+	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t1").URL {
+		t.Fatalf("回绕连播失败: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
 	}
 
 	// 重播同一首 → 历史去重仍 1 条
@@ -651,10 +678,14 @@ func TestSpaceAfterTrackEndedReplaysSameTrack(t *testing.T) {
 		t.Fatalf("playCount = %d, want 1", fp.playCount())
 	}
 
-	// 播放结束：Playing 复位、ended 置位
+	// 队列清空后播完：无下一首 → 停止（ended 置位；列表循环下仅空队列停止）
+	m, _ = update(m, queueClearMsg{})
 	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
 	if m.state.Playing || !m.ended {
 		t.Fatalf("TrackEnded 后 Playing=%v ended=%v, want false/true", m.state.Playing, m.ended)
+	}
+	if fp.playCount() != 1 {
+		t.Fatalf("空队列播完不应再触发播放, playCount=%d", fp.playCount())
 	}
 
 	// 结束态空格 → 重播同曲（Track 仍在，走 startPlay 而非 Resume）
@@ -667,6 +698,182 @@ func TestSpaceAfterTrackEndedReplaysSameTrack(t *testing.T) {
 	}
 	if !m.state.Playing || m.ended {
 		t.Errorf("重播后 state=%+v ended=%v, want Playing=true ended=false", m.state, m.ended)
+	}
+}
+
+// 首页上一首/下一首消息：queue.Prev/Next + beginPlay；手动操作重置重试预算
+// 并解除删除解耦标记；空队列忽略（不 panic、无命令）。
+func TestPrevNextTrackMessages(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
+
+	// nextTrackMsg：t1 → t2
+	m, _ = update(m, nextTrackMsg{})
+	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t2").URL {
+		t.Fatalf("下一首: playCount=%d lastPlayed=%q, want 2 次 t2", fp.playCount(), fp.lastPlayed())
+	}
+	if m.queue.CurrentIndex() != 1 {
+		t.Errorf("下一首后 CurrentIndex = %d, want 1", m.queue.CurrentIndex())
+	}
+	if !m.state.Playing || m.ended {
+		t.Errorf("下一首后 state=%+v ended=%v, want Playing=true ended=false", m.state, m.ended)
+	}
+
+	// nextTrackMsg 末位回绕：t3 → t1
+	m, _ = update(m, nextTrackMsg{})
+	m, _ = update(m, nextTrackMsg{})
+	if fp.playCount() != 4 || fp.lastPlayed() != testTrack("t1").URL {
+		t.Fatalf("下一首回绕: playCount=%d lastPlayed=%q, want 4 次 t1", fp.playCount(), fp.lastPlayed())
+	}
+	if m.queue.CurrentIndex() != 0 {
+		t.Errorf("回绕后 CurrentIndex = %d, want 0", m.queue.CurrentIndex())
+	}
+
+	// prevTrackMsg：队首回绕到末尾 t3
+	m, _ = update(m, prevTrackMsg{})
+	if fp.playCount() != 5 || fp.lastPlayed() != testTrack("t3").URL {
+		t.Fatalf("上一首回绕: playCount=%d lastPlayed=%q, want 5 次 t3", fp.playCount(), fp.lastPlayed())
+	}
+	if m.queue.CurrentIndex() != 2 {
+		t.Errorf("上一首后 CurrentIndex = %d, want 2", m.queue.CurrentIndex())
+	}
+
+	// prevTrackMsg 正常回退：t3 → t2
+	m, _ = update(m, prevTrackMsg{})
+	if fp.playCount() != 6 || fp.lastPlayed() != testTrack("t2").URL || m.queue.CurrentIndex() != 1 {
+		t.Errorf("上一首回退: playCount=%d lastPlayed=%q CurrentIndex=%d, want 6 次 t2/1", fp.playCount(), fp.lastPlayed(), m.queue.CurrentIndex())
+	}
+
+	// 手动上一首/下一首重置重试预算并解除解耦标记
+	m.retryCount = 1
+	m.queueSkip = true
+	m, _ = update(m, nextTrackMsg{})
+	if m.retryCount != 0 || m.queueSkip {
+		t.Errorf("手动切歌应重置 retryCount=%d queueSkip=%v", m.retryCount, m.queueSkip)
+	}
+	if fp.lastPlayed() != testTrack("t3").URL {
+		t.Errorf("重置检查的下一首应到 t3: %q", fp.lastPlayed())
+	}
+
+	// 空队列：prev/next 均忽略
+	m2 := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m2, cmd = update(m2, prevTrackMsg{})
+	if cmd != nil {
+		t.Errorf("空队列 prev 应无命令: %v", cmd)
+	}
+	m2, cmd = update(m2, nextTrackMsg{})
+	if cmd != nil {
+		t.Errorf("空队列 next 应无命令: %v", cmd)
+	}
+}
+
+// 模式按钮消息 toggleModeMsg 三态循环：Sequential→Shuffle→RepeatOne→Sequential；
+// 切入 RepeatOne 时 SetLoop(true)，切出时 SetLoop(false)。
+func TestToggleModeCycles(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	// Sequential → Shuffle：SetLoop(false)
+	m, _ = update(m, toggleModeMsg{})
+	if m.queue.Mode() != queue.Shuffle {
+		t.Fatalf("Mode = %v, want Shuffle", m.queue.Mode())
+	}
+	if lp, ok := fp.lastLoop(); !ok || lp {
+		t.Errorf("Shuffle 下 SetLoop = %v/%v, want false", lp, ok)
+	}
+
+	// Shuffle → RepeatOne：SetLoop(true)
+	m, _ = update(m, toggleModeMsg{})
+	if m.queue.Mode() != queue.RepeatOne {
+		t.Fatalf("Mode = %v, want RepeatOne", m.queue.Mode())
+	}
+	if lp, ok := fp.lastLoop(); !ok || !lp {
+		t.Errorf("RepeatOne 下 SetLoop = %v/%v, want true", lp, ok)
+	}
+
+	// RepeatOne → Sequential：SetLoop(false)
+	m, _ = update(m, toggleModeMsg{})
+	if m.queue.Mode() != queue.Sequential {
+		t.Fatalf("Mode = %v, want Sequential", m.queue.Mode())
+	}
+	if lp, ok := fp.lastLoop(); !ok || lp {
+		t.Errorf("切出 RepeatOne 后 SetLoop = %v/%v, want false", lp, ok)
+	}
+
+	// 再按一次：Sequential → Shuffle（循环回到第二位）
+	m, _ = update(m, toggleModeMsg{})
+	if m.queue.Mode() != queue.Shuffle {
+		t.Errorf("Mode = %v, want Shuffle（四连按回到 Shuffle）", m.queue.Mode())
+	}
+	// 模式切换不打断当前播放
+	if !m.state.Playing || m.state.Track == nil || m.state.Track.ID != "t1" {
+		t.Errorf("模式切换不应打断播放: %+v", m.state)
+	}
+	if fp.playCount() != 1 {
+		t.Errorf("模式切换不应触发播放: playCount = %d", fp.playCount())
+	}
+}
+
+// beginPlay 按模式设置 SetLoop：RepeatOne → true，Sequential/Shuffle → false；
+// RepeatOne 下手动下一首新曲仍按模式循环。
+func TestBeginPlaySetsLoopPerMode(t *testing.T) {
+	fp := newFakePlayer()
+
+	// Sequential：SetLoop(false)
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	if lp, ok := fp.lastLoop(); !ok || lp {
+		t.Errorf("Sequential beginPlay 后 SetLoop = %v/%v, want false", lp, ok)
+	}
+
+	// RepeatOne：SetLoop(true)（Replace 保留模式）
+	m.queue.SetMode(queue.RepeatOne)
+	m, cmd = m.startPlay(testTrack("t2"))
+	_ = execCmds(cmd)
+	if lp, ok := fp.lastLoop(); !ok || !lp {
+		t.Errorf("RepeatOne beginPlay 后 SetLoop = %v/%v, want true", lp, ok)
+	}
+
+	// RepeatOne 下手动下一首：新曲仍按模式 SetLoop(true)
+	m, _ = update(m, nextTrackMsg{})
+	if lp, ok := fp.lastLoop(); !ok || !lp {
+		t.Errorf("RepeatOne 切歌后 SetLoop = %v/%v, want true", lp, ok)
+	}
+
+	// Shuffle：SetLoop(false)
+	m.queue.SetMode(queue.Shuffle)
+	m, cmd = m.startPlay(testTrack("t3"))
+	_ = execCmds(cmd)
+	if lp, ok := fp.lastLoop(); !ok || lp {
+		t.Errorf("Shuffle beginPlay 后 SetLoop = %v/%v, want false", lp, ok)
+	}
+}
+
+// SetLoop 失败仅记 lastError，不阻断播放（异步 cmd 照常、状态照常）。
+func TestSetLoopFailureDoesNotBlockPlayback(t *testing.T) {
+	fp := newFakePlayer()
+	fp.loopErr = true
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m.queue.SetMode(queue.RepeatOne)
+	m, cmd := m.startPlay(testTrack("t1"))
+	if cmd == nil {
+		t.Fatal("SetLoop 失败不应阻断播放：应仍有异步 cmd（歌词/封面/历史）")
+	}
+	if fp.playCount() != 1 || fp.lastPlayed() != testTrack("t1").URL {
+		t.Fatalf("SetLoop 失败不应影响播放: playCount=%d", fp.playCount())
+	}
+	if !strings.Contains(m.lastError, "循环") {
+		t.Errorf("lastError = %q, want 含循环失败信息", m.lastError)
+	}
+	if !m.state.Playing || m.state.Track == nil {
+		t.Errorf("SetLoop 失败后应保持播放态: %+v", m.state)
 	}
 }
 
@@ -915,8 +1122,9 @@ func TestStaleRetryDroppedOnNewPlay(t *testing.T) {
 
 // 回归（P1）：重试等待期间删除当前曲（queueSkip=true、指针顺延）→ 重试触发时
 // 必须清除 queueSkip（重试与队列当前状态重新对齐），否则残留标记会让
-// TrackEnded 重复播放顺延曲目：队列 [t1,t2]，t1 失败重试挂起 → 删 t1
-// → 重试播放 t2 → t2 播完 TrackEnded 走 queueSkip 分支 Current()=t2 → t2 重播一次。
+// TrackEnded 重复播放顺延曲目：队列 [t1,t2,t3]，t1 失败重试挂起 → 删 t1
+// → 重试播放 t2 → t2 播完 TrackEnded 若走 queueSkip 分支会重播 t2（Current），
+// 正确行为是正常推进 t3。
 func TestRetryPlayClearsQueueSkip(t *testing.T) {
 	old := retryBackoff
 	retryBackoff = 10 * time.Millisecond
@@ -926,7 +1134,8 @@ func TestRetryPlayClearsQueueSkip(t *testing.T) {
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
-	m, _ = update(m, trackAppendMsg{track: testTrack("t2")}) // 队列 [t1, t2]
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")}) // 队列 [t1, t2, t3]
 
 	// t1 取流失败：调度自动重试（代际匹配）
 	m, cmd = update(m, playerEventMsg{ev: player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}})
@@ -952,10 +1161,62 @@ func TestRetryPlayClearsQueueSkip(t *testing.T) {
 		t.Fatalf("重试应播放顺延曲目 t2: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
 	}
 
-	// t2 播完：不得因 queueSkip 残留而重复播放 t2
+	// t2 播完：queueSkip 已清除 → 正常推进 t3；若残留会走解耦分支重播 t2
 	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
-	if fp.playCount() != 2 {
-		t.Errorf("t2 播完不应重复播放: playCount = %d, want 2", fp.playCount())
+	if fp.playCount() != 3 || fp.lastPlayed() != testTrack("t3").URL {
+		t.Errorf("t2 播完应推进 t3: playCount=%d lastPlayed=%q, want 3 次 t3", fp.playCount(), fp.lastPlayed())
+	}
+	if m.queue.CurrentIndex() != 1 {
+		t.Errorf("推进后 CurrentIndex = %d, want 1", m.queue.CurrentIndex())
+	}
+}
+
+// 回归（审查 Blocker 1）：队列多曲全部取流失败 → 无限交替重播死循环。
+// 队列 [t1,t2] 两首都失败：t1 重试耗尽 → 跳 t2（记录 t1 本轮失败）→ t2 耗尽
+// → Next() 回绕返回 t1（ID 不同，同 ID 防护不拦）→ 若继续交替，playCount
+// 无限增长、ended 永不置位。修复：本轮失败 ID 集合——跳过前检查目标曲目
+// 已在失败集合中则不跳，走停止路径（ended=true + 横幅 + Playing=false）。
+func TestLoadFailAllTracksFailStopsLoop(t *testing.T) {
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	defer func() { retryBackoff = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m.queue.Add(testTrack("t2")) // 队列 [t1, t2]
+
+	loadErr := player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}
+	// t1 两次重试均失败
+	for i := 0; i < 2; i++ {
+		m, cmd = update(m, playerEventMsg{ev: loadErr})
+		m = execRetryBatch(m, cmd, fp)
+	}
+	// 第 3 次失败：t1 耗尽 → 跳过到 t2（本轮失败集合记入 t1）
+	m, _ = update(m, playerEventMsg{ev: loadErr})
+	if fp.lastPlayed() != testTrack("t2").URL {
+		t.Fatalf("t1 耗尽应跳到 t2: %q", fp.lastPlayed())
+	}
+	// t2 两次重试均失败
+	for i := 0; i < 2; i++ {
+		m, cmd = update(m, playerEventMsg{ev: loadErr})
+		m = execRetryBatch(m, cmd, fp)
+	}
+	// 第 3 次失败：t2 耗尽，Next() 回绕返回 t1——t1 已在失败集合，必须停止
+	//（而非跳回 t1 继续交替重播），playCount 有界。
+	m, _ = update(m, playerEventMsg{ev: loadErr})
+	if fp.playCount() != 6 {
+		t.Errorf("全部取流失败后 playCount = %d, want 6（有界，不再增长）", fp.playCount())
+	}
+	if !m.ended {
+		t.Error("全部取流失败后 ended 应为 true")
+	}
+	if m.state.Playing {
+		t.Error("全部取流失败后 Playing 应为 false")
+	}
+	if !strings.Contains(m.lastError, "已重试 2 次") {
+		t.Errorf("lastError = %q, want 含“已重试 2 次”", m.lastError)
 	}
 }
 

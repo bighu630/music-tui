@@ -94,9 +94,25 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 审查：reviewer 两轮批准（文档措辞如实修正：bubbles v1.0.0 列表无鼠标处理，仅歌词 viewport 滚轮；补幂等/hover 清除断言）✅
 - [ ] 验收：全量 build/vet/test -race 全绿；真机确认——标签栏视觉（高亮样式/图标/队列数量）+ 鼠标点击切换 + 悬停效果
 
+<<<<<<< HEAD
 ## 播放列表追加需求（用户已确认设计）
 
 - [x] 设计确认：Tab 重排 5 页（首页/队列/播放列表/搜索/历史，数字键 1-5 直达、Tab/Ctrl+→ 正向循环、Shift+Tab/Ctrl+← 反向循环）+ 播放列表页两级视图（概览↔详情）+ 全局 p 键选择器（搜索/历史/播放列表详情页添加到列表）+ JSON 持久化（~/.config/music-tui/playlists.json，损坏 .corrupt-N 备份重建）
 - [x] 实现：playlists 包（多列表 CRUD/原子持久化/损坏返回错误）+ queue.ReplaceAll 整列表替换（指针 clamp）+ ui/playlists.go 两级视图页与 plPicker 选择器 + root/main 集成（5 Tab 重排、全局 p、notice 绿色横幅）✅（commit dc2c152 + fb9bd57，已合并 master）
 - [x] 测试：playlists 15 单测 + ui 19 集成测试 + queue ReplaceAll 3 测试，全量 build/vet/test -race 全绿 ✅（commit 58b428c）
 - [ ] 验收：真机验收——创建/重命名/删除列表、搜索页 p 添加、播放列表加载播放连播/随机
+=======
+---
+
+## 审查修复批次（feat/home-layout-redesign 分支，c3cf828 之后）
+
+- [x] Blocker 1：多曲全部取流失败 → 无限交替重播死循环（failedTracks 集合 + TestLoadFailAllTracksFailStopsLoop）
+- [x] Major 2：首页 m 键三态切换模式（TestHomeModeKeyCycles，无曲目也可切）
+- [x] Major 3：窄窗口布局崩坏（coverView 按行裁剪 + lyricH clamp + 标题 ansi.Truncate；TestHomeViewNarrowWindow）
+- [x] Minor 4：续播恢复补 SetLoop（TestResumeSuccessSetsLoopPerMode）
+- [x] Nit 5：进度条行宽差 1（barW = width-timeW-1 + 可见宽断言）
+- [x] Nit 6：lineProgressBar 色阶预渲染（sync.Once 惰性，字节一致；TestProgressPreRenderedBytes）
+- [x] Nit 8：queuePos 注释更正（0 渲染 "0/N · 模式" 非隐藏）
+- [ ] 已知限制（reviewer 接受跳过）：按钮命中区假设图标单宽，双宽字体终端下模式按钮命中可能偏 1 格（N7 有意未修，可用 m/s 键兜底）
+>>>>>>> feat/home-layout-redesign
+>>>>>>> feat/home-layout-redesign
