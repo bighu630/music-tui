@@ -601,10 +601,21 @@ func (m Model) View() string {
 		}
 	}
 	if m.lastError != "" || m.notice != "" {
-		// 横幅替换 body 末尾行而非追加：全屏撑满约束下追加会使 root.View
+		// 横幅替换中间区末行（倒数第 3 行）而非追加：追加会使 root.View
 		// 超出终端高度，终端滚动把顶部 Tab 栏滚出屏幕并残留旧帧
-		// （回归：播放失败/恢复失败横幅曾导致 Tab 栏消失 + 画面残影）。
+		// （回归：播放失败/恢复失败横幅曾导致 Tab 栏消失 + 画面残影）；
+		// 替换末尾行（进度条/按钮行）则错误期间底部控件不可见
+		// （回归：seek 失败横幅曾覆盖按钮行）。
+		// body 行数不足时退化为替换末尾行（仍保证不超屏）。
 		lines := strings.Split(body, "\n")
+		errIdx := len(lines) - 3 // 中间区末行
+		if errIdx < 0 {
+			errIdx = len(lines) - 1
+		}
+		noticeIdx := errIdx - 1
+		if noticeIdx < 0 {
+			noticeIdx = 0
+		}
 		if m.lastError != "" {
 			banner := lipgloss.NewStyle().
 				Foreground(lipgloss.Color("9")).
@@ -615,7 +626,7 @@ func (m Model) View() string {
 				if m.width > 0 {
 					banner = ansi.Truncate(banner, m.width, "…")
 				}
-				lines[len(lines)-1] = banner
+				lines[errIdx] = banner
 			} else {
 				body = banner
 			}
@@ -624,15 +635,11 @@ func (m Model) View() string {
 			banner := lipgloss.NewStyle().
 				Foreground(lipgloss.Color("10")).
 				Render("✔ " + m.notice)
-			idx := len(lines) - 1
-			if m.lastError != "" {
-				idx-- // error 占末尾行时，notice 显示在其上方
-			}
-			if idx >= 0 && len(lines) > 0 {
+			if len(lines) > 0 {
 				if m.width > 0 {
 					banner = ansi.Truncate(banner, m.width, "…")
 				}
-				lines[idx] = banner
+				lines[noticeIdx] = banner
 			}
 		}
 		if len(lines) > 0 {

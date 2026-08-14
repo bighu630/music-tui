@@ -1405,17 +1405,40 @@ func TestRootViewBannerStaysWithinHeight(t *testing.T) {
 		t.Error("View 应包含成功横幅")
 	}
 
-	// 两者同时存在：行数仍不超屏，且 error 在末尾、notice 在其上方
+	// 两者同时存在：行数仍不超屏；横幅替换中间区末行（倒数第 3/4 行），
+	// 进度条行（倒数第 2）与按钮行（倒数第 1）保持可见可点。
 	m.lastError = "播放失败"
 	out = m.View()
 	if got := len(strings.Split(out, "\n")); got != 24 {
 		t.Errorf("双横幅时 View 行数 = %d, want 24", got)
 	}
 	lines := strings.Split(out, "\n")
-	if !strings.Contains(lines[23], "⚠") {
-		t.Errorf("错误横幅应在末尾行, got %q", lines[23])
+	if !strings.Contains(lines[21], "⚠") {
+		t.Errorf("错误横幅应在中间区末行（倒数第 3 行）, got %q", lines[21])
 	}
-	if !strings.Contains(lines[22], "✔") {
-		t.Errorf("成功横幅应在错误横幅上方, got %q", lines[22])
+	if !strings.Contains(lines[20], "✔") {
+		t.Errorf("成功横幅应在错误横幅上方, got %q", lines[20])
+	}
+	// 空态无按钮行：最后一行保持空（横幅未覆盖到底部控件区）
+	if strings.TrimSpace(lines[23]) != "" {
+		t.Errorf("空态最后一行应为空（横幅不覆盖底部）, got %q", lines[23])
+	}
+	// 播放态：横幅不覆盖按钮行（有曲目场景）
+	fp := newFakePlayer()
+	m2 := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m2, cmd := m2.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m2, _ = update(m2, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m2.lastError = "播放失败"
+	out2 := m2.View()
+	if got := len(strings.Split(out2, "\n")); got != 24 {
+		t.Errorf("播放态双横幅 View 行数 = %d, want 24", got)
+	}
+	l2 := strings.Split(out2, "\n")
+	if !strings.Contains(l2[21], "⚠") {
+		t.Errorf("播放态错误横幅应在倒数第 3 行, got %q", l2[21])
+	}
+	if !strings.Contains(l2[23], "|<") {
+		t.Errorf("播放态按钮行不应被横幅覆盖, got %q", l2[23])
 	}
 }

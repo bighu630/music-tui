@@ -62,17 +62,61 @@ func emitToggleMode() tea.Cmd {
 	return func() tea.Msg { return toggleModeMsg{} }
 }
 
-// ---- 底部按钮行常量 ----
+// ---- 底部按钮行布局 ----
 
-// 按钮行（页面内 Y == height-1）各按钮的 X 区间（点击命中区间；
-// 图标渲染位置 = 区间起点）：⏮[0,3) ⏯[4,7) ⏭[8,11) 模式[13,16)。
+// 按钮行三栏布局（渲染与鼠标命中共用）：左 = 歌曲信息（截断），
+// 中 = 控制按钮 |< >|（列内居中），右 = 播放模式 + 队列位置（右对齐）。
+//
+// 中栏用确定宽度字符（ASCII + 中文）而非 ⏮⏯⏭🔁 等 Ambiguous 宽度字符：
+// 后者 ansi 按 1 宽、CJK 终端按 2 宽渲染，布局与命中必然偏移
+// （曾用 ⏮⏯⏭，命中区间与视觉位置在 CJK 终端错位）。中栏串固定 10 列：
+//
+//	"|<  " + play(2) + "  >|"，play = "||"（暂停）或 "> "（播放）。
+type controlBarLayout struct {
+	centerStart int // 中栏起点列（|< 图标列）
+	rightStart  int // 右栏起点列（模式文本列）
+}
+
 const (
-	btnPrevStart   = 0
-	btnToggleStart = 4
-	btnNextStart   = 8
-	btnModeStart   = 13
-	btnHitWidth    = 3 // 每个按钮的点击宽度
+	centerBarW   = 10 // 中栏固定渲染宽（全部确定宽度字符）
+	btnPrevRel   = 0  // |< 相对中栏起点
+	btnToggleRel = 4  // || / >  （2 宽）
+	btnNextRel   = 8  // >|
+	btnHitWidth  = 3  // 命中区 = 图标 2 宽 + 1 容差
 )
+
+// controlBarLayout 计算按钮行三栏列区间（渲染与命中同源，防漂移）。
+func (m homeModel) controlBarLayout(width int) controlBarLayout {
+	centerW := centerBarW
+	rightW := ansi.StringWidth(m.modeRightText())
+	// 右栏右对齐（右缘留 2 列）：起点 = width - rightW - 2
+	rightStart := width - rightW - 2
+	if rightStart < 0 {
+		rightStart = 0
+	}
+	// 左栏可用宽 = 右栏起点 - 中栏 - 左右间距各 2 列
+	leftW := rightStart - centerW - 4
+	if leftW < 10 {
+		leftW = 10
+	}
+	// 中栏在 [leftW+2, rightStart-2) 内居中（左右各留 2 列间距）
+	midStart := leftW + 2
+	midEnd := rightStart - 2
+	centerStart := midStart + (midEnd-midStart-centerW)/2
+	if centerStart < midStart {
+		centerStart = midStart
+	}
+	return controlBarLayout{centerStart: centerStart, rightStart: rightStart}
+}
+
+// modeRightText 右栏文本：模式名（中文，宽度确定）+ 队列位置。
+func (m homeModel) modeRightText() string {
+	s := modeName(m.queueMode)
+	if m.queueTotal > 0 {
+		s += "  " + fmt.Sprintf("%d/%d", m.queuePos, m.queueTotal)
+	}
+	return s
+}
 
 // hitBtn 判断点击列 x 是否落在起点 start、宽 btnHitWidth 的按钮区间内。
 func hitBtn(x, start int) bool {
@@ -172,8 +216,9 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 			return m, emitToggleMode()
 		}
 	case tea.MouseMsg:
-		// 屏幕坐标 → 页面坐标（Tab 栏占 1 行）
-		pageY := msg.Y - 1
+		// 屏幕坐标 → 页面坐标：Tab 栏 2 行（标签 + 分隔线），页面从屏幕行 2 起。
+		// （回归：曾按 1 行 Tab 换算（-1），进度条/按钮点击整体偏移 1 行不命中。）
+		pageY := msg.Y - 2
 		pressLeft := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft
 		switch {
 		case pageY == m.height-2 && pressLeft:
@@ -187,18 +232,19 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 			}
 			return m, nil
 		case pageY == m.height-1 && pressLeft:
-			// 按钮行：按 X 区间触发对应动作
+			// 按钮行：左信息区不响应；中栏三键 + 右栏模式按钮。
 			if m.state.Track == nil {
 				return m, nil
 			}
+			lay := m.controlBarLayout(m.width)
 			switch {
-			case hitBtn(msg.X, btnPrevStart):
+			case hitBtn(msg.X, lay.centerStart+btnPrevRel):
 				return m, emitPrevTrack()
-			case hitBtn(msg.X, btnToggleStart):
+			case hitBtn(msg.X, lay.centerStart+btnToggleRel):
 				return m, emitTogglePlay()
-			case hitBtn(msg.X, btnNextStart):
+			case hitBtn(msg.X, lay.centerStart+btnNextRel):
 				return m, emitNextTrack()
-			case hitBtn(msg.X, btnModeStart):
+			case msg.X >= lay.rightStart && msg.X < lay.rightStart+ansi.StringWidth(m.modeRightText())+2:
 				return m, emitToggleMode()
 			}
 			return m, nil
@@ -500,17 +546,32 @@ func (m homeModel) progressRowView() string {
 // 按显示宽度截断且不破坏 ANSI 序列/宽字符）；无队列信息时省略 "3/12 · 模式" 段。
 func (m homeModel) controlBarView() string {
 	t := m.state.Track
-	controls := "⏮   ⏯   ⏭    " + modeIcon(m.queueMode) + "  | "
-	right := ""
-	if m.queueTotal > 0 {
-		right = fmt.Sprintf(" | %d/%d · %s", m.queuePos, m.queueTotal, modeName(m.queueMode))
+	if t == nil {
+		return ""
 	}
-	avail := m.width - ansi.StringWidth(controls) - ansi.StringWidth(right)
-	if avail < 1 {
-		avail = 1
+	width := m.width
+	play := "> " // 播放（播放中显示暂停图标）
+	if m.state.Playing {
+		play = "||"
 	}
-	title := ansi.Truncate(t.Title+" - "+t.Artist, avail, "…")
-	return controls + title + right
+	center := "|<  " + play + "  >|"
+	right := m.modeRightText()
+	rightW := ansi.StringWidth(right)
+	lay := m.controlBarLayout(width)
+	leftW := lay.rightStart - centerBarW - 4 // 与布局同源
+	if leftW < 10 {
+		leftW = 10
+	}
+	left := ansi.Truncate(t.Title+" - "+t.Artist, leftW, "…")
+	padLeft := lay.centerStart - leftW - 2 // 中栏起点前的补位
+	if padLeft < 0 {
+		padLeft = 0
+	}
+	padRight := width - lay.rightStart - rightW
+	if padRight < 0 {
+		padRight = 0
+	}
+	return left + strings.Repeat(" ", 2+padLeft) + center + strings.Repeat(" ", 2+padRight) + right
 }
 
 // modeIcon 三态播放模式图标。

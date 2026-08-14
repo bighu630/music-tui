@@ -154,8 +154,8 @@ func TestAppendDoesNotInterruptPlayback(t *testing.T) {
 	if m.queue.Len() != 2 || m.queue.CurrentIndex() != 0 {
 		t.Errorf("队列 = %d 条 current=%d, want 2 条 current=0", m.queue.Len(), m.queue.CurrentIndex())
 	}
-	if got := m.home.view(); !strings.Contains(got, "1/2 · 顺序") {
-		t.Errorf("首页应显示 1/2 · 顺序, got %q", got)
+	if got := m.home.view(); !strings.Contains(got, "顺序  1/2") {
+		t.Errorf("首页应显示 顺序  1/2, got %q", got)
 	}
 }
 
@@ -189,8 +189,8 @@ func TestTrackEndedAutoAdvances(t *testing.T) {
 	if m.queue.CurrentIndex() != 1 {
 		t.Errorf("连播后 CurrentIndex = %d, want 1", m.queue.CurrentIndex())
 	}
-	if got := m.home.view(); !strings.Contains(got, "2/3 · 顺序") {
-		t.Errorf("首页应显示 2/3 · 顺序, got %q", got)
+	if got := m.home.view(); !strings.Contains(got, "顺序  2/3") {
+		t.Errorf("首页应显示 顺序  2/3, got %q", got)
 	}
 	// 自动连播写入历史
 	if entries := m.history.Entries(); len(entries) != 2 {
@@ -214,8 +214,8 @@ func TestTrackEndedAutoAdvances(t *testing.T) {
 	if m.state.Track == nil || m.state.Track.ID != "t1" || !m.state.Playing || m.ended {
 		t.Errorf("回绕后 state = %+v ended=%v, want t1 播放中 ended=false", m.state, m.ended)
 	}
-	if got := m.home.view(); !strings.Contains(got, "1/3 · 顺序") {
-		t.Errorf("首页应显示 1/3 · 顺序, got %q", got)
+	if got := m.home.view(); !strings.Contains(got, "顺序  1/3") {
+		t.Errorf("首页应显示 顺序  1/3, got %q", got)
 	}
 
 	// 队列清空后播完：无下一首 → 停止（ended 置位，不再播放）
@@ -533,8 +533,8 @@ func TestDeleteLastCurrentThenTrackEndedPlaysFromHead(t *testing.T) {
 	if m.queue.CurrentIndex() != -1 {
 		t.Fatalf("删除末位当前后 CurrentIndex = %d, want -1", m.queue.CurrentIndex())
 	}
-	if got := m.home.view(); !strings.Contains(got, "0/2 · 顺序") {
-		t.Errorf("首页应显示 0/2 · 顺序, got %q", got)
+	if got := m.home.view(); !strings.Contains(got, "顺序  0/2") {
+		t.Errorf("首页应显示 顺序  0/2, got %q", got)
 	}
 
 	// t3 播完 → 从头播 t1

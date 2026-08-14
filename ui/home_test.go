@@ -234,7 +234,7 @@ func TestHomeViewNarrowWindow(t *testing.T) {
 		if !strings.Contains(lines[len(lines)-2], "●") {
 			t.Errorf("setSize(%d,%d) 倒数第 2 行应为进度条行: %q", size.w, size.h, lines[len(lines)-2])
 		}
-		if !strings.Contains(lines[len(lines)-1], "⏮") {
+		if !strings.Contains(lines[len(lines)-1], "|<") {
 			t.Errorf("setSize(%d,%d) 最后一行应为按钮行: %q", size.w, size.h, lines[len(lines)-1])
 		}
 	}
@@ -324,7 +324,7 @@ func TestHomeBottomControlRows(t *testing.T) {
 		t.Errorf("进度条行可见宽 = %d, want %d（页面宽）", w, m.home.width)
 	}
 	btnLine := lines[len(lines)-1]
-	for _, icon := range []string{"⏮", "⏯", "⏭", "🔁"} {
+	for _, icon := range []string{"|<", "||", ">|", "顺序"} {
 		if !strings.Contains(btnLine, icon) {
 			t.Errorf("按钮行应含 %s: %q", icon, btnLine)
 		}
@@ -336,11 +336,11 @@ func TestHomeBottomControlRows(t *testing.T) {
 		t.Errorf("无队列信息时按钮行不应含 · 模式段: %q", btnLine)
 	}
 
-	// 有队列信息时展示 "位置/总数 · 模式名"
+	// 有队列信息时右栏展示 "模式名  位置/总数"
 	m.home = m.home.setQueueInfo(3, 12, queue.Sequential)
 	btnLine = strings.Split(m.home.view(), "\n")[len(lines)-1]
-	if !strings.Contains(btnLine, "3/12 · 顺序") {
-		t.Errorf("按钮行应含队列信息 3/12 · 顺序: %q", btnLine)
+	if !strings.Contains(btnLine, "顺序  3/12") {
+		t.Errorf("按钮行应含队列信息 顺序  3/12: %q", btnLine)
 	}
 }
 
@@ -446,7 +446,7 @@ func TestHomeMouseSeekClick(t *testing.T) {
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
 		X:      barW / 2,
-		Y:      m.home.height - 1, // 屏幕 Y = height-1 → 页面 Y = height-2（进度条行）
+		Y:      m.home.height, // 屏幕 Y = height（Tab 2 行）→ 页面 Y = height-2（进度条行）
 	})
 	_ = execCmds(cmd)
 	if len(fp.seeks) != 1 {
@@ -465,7 +465,7 @@ func TestHomeMouseSeekClick(t *testing.T) {
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
 		X:      barW, // 越界
-		Y:      m.home.height - 1,
+		Y:      m.home.height,
 	})
 	if cmd != nil {
 		t.Error("进度条 X 越界不应产生命令")
@@ -478,15 +478,15 @@ func TestHomeMouseSeekClick(t *testing.T) {
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
 		X:      0,
-		Y:      m.home.height - 1,
+		Y:      m.home.height,
 	})
 	if cmd != nil {
 		t.Error("无曲目时点击进度条不应产生命令")
 	}
 }
 
-// TestHomeMouseButtonClick 点击按钮行（页面 Y == height-1）按 X 区间触发
-// 对应动作：⏮[0,3) ⏯[4,7) ⏭[8,11) 模式[13,16)；空白处与中间区忽略。
+// TestHomeMouseButtonClick 点击按钮行（页面 Y == height-1）按三栏布局触发：
+// 中栏 ⏮/⏯/⏭（相对 centerStart +0/+4/+8）、右栏模式区；左信息区与空白忽略。
 func TestHomeMouseButtonClick(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -494,50 +494,60 @@ func TestHomeMouseButtonClick(t *testing.T) {
 	_ = execCmds(cmd)
 	m.home = m.home.setSize(120, 40)
 
+	lay := m.home.controlBarLayout(m.home.width)
 	press := func(x int) tea.Cmd {
 		_, c := update(m, tea.MouseMsg{
 			Action: tea.MouseActionPress,
 			Button: tea.MouseButtonLeft,
 			X:      x,
-			Y:      m.home.height, // 屏幕 Y = height → 页面 Y = height-1（按钮行）
+			Y:      m.home.height + 1, // 屏幕 Y = height+1（Tab 2 行）→ 页面 Y = height-1（按钮行）
 		})
 		return c
 	}
 
-	msgs := execCmds(press(0)) // ⏮ [0,3)
+	msgs := execCmds(press(lay.centerStart + btnPrevRel)) // ⏮
 	if len(msgs) != 1 {
-		t.Fatalf("X=0 应命中 ⏮ 按钮, msgs=%v", msgs)
+		t.Fatalf("⏮ 应命中, msgs=%v", msgs)
 	}
 	if _, ok := msgs[0].(prevTrackMsg); !ok {
-		t.Errorf("X=0 消息类型 = %T, want prevTrackMsg", msgs[0])
+		t.Errorf("⏮ 消息类型 = %T, want prevTrackMsg", msgs[0])
 	}
 
-	msgs = execCmds(press(5)) // ⏯ [4,7)
+	msgs = execCmds(press(lay.centerStart + btnToggleRel + 1)) // ⏯（区间内）
 	if len(msgs) != 1 {
-		t.Fatalf("X=5 应命中 ⏯ 按钮, msgs=%v", msgs)
+		t.Fatalf("⏯ 应命中, msgs=%v", msgs)
 	}
 	if _, ok := msgs[0].(togglePlayMsg); !ok {
-		t.Errorf("X=5 消息类型 = %T, want togglePlayMsg", msgs[0])
+		t.Errorf("⏯ 消息类型 = %T, want togglePlayMsg", msgs[0])
 	}
 
-	msgs = execCmds(press(9)) // ⏭ [8,11)
+	msgs = execCmds(press(lay.centerStart + btnNextRel + 2)) // ⏭（区间内）
 	if len(msgs) != 1 {
-		t.Fatalf("X=9 应命中 ⏭ 按钮, msgs=%v", msgs)
+		t.Fatalf("⏭ 应命中, msgs=%v", msgs)
 	}
 	if _, ok := msgs[0].(nextTrackMsg); !ok {
-		t.Errorf("X=9 消息类型 = %T, want nextTrackMsg", msgs[0])
+		t.Errorf("⏭ 消息类型 = %T, want nextTrackMsg", msgs[0])
 	}
 
-	msgs = execCmds(press(14)) // 模式 [13,16)
+	// 右栏模式区（图标/模式名/队列位置均响应切换）
+	msgs = execCmds(press(lay.rightStart))
 	if len(msgs) != 1 {
-		t.Fatalf("X=14 应命中模式按钮, msgs=%v", msgs)
+		t.Fatalf("模式区应命中, msgs=%v", msgs)
 	}
 	if _, ok := msgs[0].(toggleModeMsg); !ok {
-		t.Errorf("X=14 消息类型 = %T, want toggleModeMsg", msgs[0])
+		t.Errorf("模式区消息类型 = %T, want toggleModeMsg", msgs[0])
+	}
+	msgs = execCmds(press(lay.rightStart + 5))
+	if len(msgs) != 1 {
+		t.Fatalf("模式区中间应命中, msgs=%v", msgs)
+	}
+	if _, ok := msgs[0].(toggleModeMsg); !ok {
+		t.Errorf("模式区中间消息类型 = %T, want toggleModeMsg", msgs[0])
 	}
 
-	// 间距/空白处（3、7、12）与远端（100）不命中任何按钮
-	for _, x := range []int{3, 7, 12, 100} {
+	// 左信息区、按钮间空白、中栏命中容差之外不命中
+	// （⏮[c,c+3) ⏯[c+4,c+7) ⏭[c+8,c+11)，容差 1 列；+3/+7 = 图标间空白，+11 = 中栏右缘外）
+	for _, x := range []int{0, lay.centerStart + 3, lay.centerStart + 7, lay.centerStart + 11} {
 		if c := press(x); c != nil {
 			t.Errorf("X=%d 不应命中任何按钮", x)
 		}
