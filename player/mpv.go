@@ -50,6 +50,12 @@ type MpvPlayer struct {
 	reconnectErr  error         // 最近一次重连结果（等待者共享）
 	lastFail      time.Time     // 最近一次重连失败时刻（冷却期判断）
 
+	// lastLoadID 最近一次成功 loadfile 的 playlist_entry_id（stateMu 保护）。
+	// end-file error 事件按此归属过滤：事件 id 与它不一致 = 陈旧事件（旧曲取流
+	// 失败晚到），丢弃防 UI 误删健康缓存（回归：恢复播放误报"YouTube 未返回
+	// 可播放音轨"）。0 = 未知（旧版 mpv 无此字段/断开后），过滤禁用保守放行。
+	lastLoadID int64
+
 	events   chan Event
 	mu       sync.Mutex
 	duration float64
@@ -251,6 +257,14 @@ func (p *MpvPlayer) pump(conn *mpvipc.Connection) {
 			case "eof":
 				p.emit(TrackEndedEvent{})
 			case "error":
+				// 陈旧事件过滤：end-file error 不携带曲目身份，mpv ≥0.33 的
+				// playlist_entry_id 字段补上身份——事件 id 与最近一次成功
+				// loadfile 的 id 不一致 = 旧曲取流失败晚到（用户已切到缓存曲目），
+				// UI 按"当前曲目"归属会误删健康缓存，故丢弃；旧版 mpv 无该字段
+				// 或 id 未知（lastLoadID=0）时过滤禁用，保守放行。
+				if p.isStaleEndFileError(ev) {
+					continue
+				}
 				// 提取 mpv IPC file_error 字段的诊断文本（如 "no audio or video data played"）；
 				// mpvipc 的 Event.ExtraData 已保留该字段，旧版 mpv 可能缺失（空串兜底）。
 				fileErr := ""
@@ -274,6 +288,7 @@ func (p *MpvPlayer) pump(conn *mpvipc.Connection) {
 func (p *MpvPlayer) onDisconnect(conn *mpvipc.Connection) {
 	// 诊断：非阻塞读取 mpv 退出码，区分"进程已退出"与"连接断开"
 	p.stateMu.Lock()
+	p.lastLoadID = 0 // 新连接无身份信息：过滤禁用（保守放行），首个 loadfile 后重新启用
 	waitCh := p.waitCh
 	current := p.conn
 	p.stateMu.Unlock()
@@ -469,12 +484,15 @@ func (p *MpvPlayer) Play(url string) error {
 	if conn == nil {
 		return errors.New("mpv 未连接") // 断开清理恰好在检查后发生：极窄窗口，下次命令会重连
 	}
+	var data interface{}
 	if err := callWithTimeout(func() error {
-		_, err := conn.Call("loadfile", url)
+		var err error
+		data, err = conn.Call("loadfile", url)
 		return err
 	}); err != nil {
 		return fmt.Errorf("loadfile: %w", err)
 	}
+	p.recordLoadID(data)
 	return nil
 }
 
@@ -499,23 +517,62 @@ func (p *MpvPlayer) PlayPaused(url string, start float64) error {
 	}); err != nil {
 		return fmt.Errorf("set pause: %w", err)
 	}
+	var data interface{}
 	if err := callWithTimeout(func() error {
 		// start 极端值兜底：NaN/负值落入 start<=0 走 2 参从头加载（安全）；
 		// +Inf 落入 4 参分支会生成 "start=+Inf"，mpv 接受并钳制到 EOF（无害）；实际来自 time-pos 不会出现。
+		var loadErr error
 		if start > 0 {
 			// 4 参语法（mpv ≥0.38）：loadfile <url> replace <index> <options>，
 			// start= 选项随加载原子定位；旧 3 参 options 语法在 0.38+ 已改为
 			// playlist index（传 options 会 invalid parameter），本环境 mpv 0.41.0。
 			posStr := strconv.FormatFloat(start, 'f', -1, 64) // 避免 %g 科学计数法（1e+09 不被 mpv 选项解析器接受）
-			_, err := conn.Call("loadfile", url, "replace", -1, "start="+posStr)
-			return err
+			data, loadErr = conn.Call("loadfile", url, "replace", -1, "start="+posStr)
+			return loadErr
 		}
-		_, err := conn.Call("loadfile", url) // 2 参：兼容 mpv <0.38，从头加载
-		return err
+		data, loadErr = conn.Call("loadfile", url) // 2 参：兼容 mpv <0.38，从头加载
+		return loadErr
 	}); err != nil {
 		return fmt.Errorf("loadfile: %w", err)
 	}
+	p.recordLoadID(data)
 	return nil
+}
+
+// recordLoadID 记录最近一次成功 loadfile 的 playlist_entry_id（mpv ≥0.33 的
+// loadfile 命令响应携带该字段，供 end-file error 归属过滤）。data 非
+// map[string]interface{} 或缺少该字段（旧版 mpv）→ 记录 0：过滤禁用，保守放行。
+func (p *MpvPlayer) recordLoadID(data interface{}) {
+	id := int64(0)
+	if m, ok := data.(map[string]interface{}); ok {
+		if f, ok := m["playlist_entry_id"].(float64); ok {
+			id = int64(f)
+		}
+	}
+	p.stateMu.Lock()
+	p.lastLoadID = id
+	p.stateMu.Unlock()
+}
+
+// isStaleEndFileError 判断 end-file error 事件是否属于更早的 loadfile（陈旧
+// 事件）：事件携带 playlist_entry_id 且 lastLoadID 已知且两者不一致时返回 true。
+// 事件无该字段（旧版 mpv）或 id 未知时返回 false（保守放行）。读取 lastLoadID
+// 须持 stateMu（与 recordLoadID/onDisconnect 写入互斥）。
+func (p *MpvPlayer) isStaleEndFileError(ev *mpvipc.Event) bool {
+	if ev.ExtraData == nil {
+		return false
+	}
+	evID, ok := ev.ExtraData["playlist_entry_id"].(float64)
+	if !ok {
+		return false
+	}
+	p.stateMu.Lock()
+	last := p.lastLoadID
+	p.stateMu.Unlock()
+	if last == 0 {
+		return false
+	}
+	return int64(evID) != last
 }
 
 // Pause 暂停播放。

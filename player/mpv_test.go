@@ -26,6 +26,7 @@ type fakeMpvServer struct {
 	pushCh       chan string     // 待推送的事件行
 	duration     float64         // get_property("duration") 的返回值（可配置）
 	volume       float64         // get_property("volume") 的返回值（可配置）
+	loadID       int64           // loadfile 响应计数：playlist_entry_id（递增，持 f.mu）
 	respondToGet bool            // false 时对 get_property 不响应（模拟 mpv 挂死）
 	silent       bool            // true 时对所有命令不响应（模拟 mpv 挂死；需用 setSilent 设置避免竞态）
 }
@@ -98,6 +99,14 @@ func (f *fakeMpvServer) readLoop(conn net.Conn) {
 			} else {
 				status = "property unavailable"
 			}
+		}
+		if len(req.Command) > 0 && req.Command[0] == "loadfile" {
+			// 模拟 mpv ≥0.33：loadfile 命令响应携带 playlist_entry_id（递增计数），
+			// 供 end-file error 陈旧过滤测试按 id 归属事件。
+			f.mu.Lock()
+			f.loadID++
+			data = map[string]interface{}{"playlist_entry_id": float64(f.loadID)}
+			f.mu.Unlock()
 		}
 		if err := writeFakeMpvResponse(conn, req.ID, status, data); err != nil {
 			return
@@ -425,6 +434,79 @@ func TestMpvPlayerLoadFailedErrorCarriesFileError(t *testing.T) {
 	}
 	if !strings.Contains(ev.Err.Error(), "mpv 播放出错（end-file reason=error）") {
 		t.Errorf("错误消息应保留原前缀: %v", ev.Err)
+	}
+}
+
+// 陈旧 end-file error 过滤（回归：恢复播放误删健康缓存）：end-file error 事件
+// 携带 playlist_entry_id 且与最近一次成功 loadfile 的 id 不一致时，事件属于
+// 更早的 loadfile（旧曲取流失败晚到）——必须丢弃，否则 UI 按“当前曲目”归属
+// 会把健康缓存误删。两次 Play（id 1、2）后推旧 id 1 的错误事件：不得产生
+// ErrorEvent，且事件通道照常存活（后续事件正常送达）。
+func TestMpvPlayerDropsStaleEndFileError(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	// 两次成功 loadfile：playlist_entry_id 1、2；最近身份 = 2
+	if err := p.Play("https://example.com/a.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Play("https://example.com/b.mp3"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 旧曲（id=1）的取流失败事件晚到：应被过滤丢弃
+	fake.pushEvent(`{"event":"end-file","reason":"error","playlist_entry_id":1,"file_error":"no audio or video data played"}`)
+	// 通道存活探测：后续事件应照常送达（陈旧错误已被丢弃，首个事件非 ErrorEvent）
+	fake.pushEvent(`{"event":"property-change","id":1,"name":"time-pos","data":5.0}`)
+	ev := waitEvent(t, p, 2*time.Second)
+	if _, ok := ev.(ProgressEvent); !ok {
+		t.Fatalf("陈旧 end-file error 应被过滤，首个事件 = %#v, want ProgressEvent", ev)
+	}
+	// 短窗口内不得再出现 ErrorEvent
+	select {
+	case ev := <-p.Events():
+		t.Fatalf("陈旧 end-file error 不应产生 ErrorEvent, got %#v", ev)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// end-file error 携带的 playlist_entry_id 与最近一次 loadfile 一致 → 属于当前
+// 曲目：照常产生 LoadFailedError（过滤不得吞掉真实失败）。
+func TestMpvPlayerEndFileErrorWithCurrentLoadID(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.Play("https://example.com/a.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	fake.pushEvent(`{"event":"end-file","reason":"error","playlist_entry_id":1,"file_error":"no audio or video data played"}`)
+	ev := waitErrorEvent(t, p, 2*time.Second)
+	var le *LoadFailedError
+	if !errors.As(ev.Err, &le) {
+		t.Fatalf("want *LoadFailedError, got %T (%v)", ev.Err, ev.Err)
+	}
+	if le.FileError != "no audio or video data played" {
+		t.Errorf("FileError = %q, want %q", le.FileError, "no audio or video data played")
+	}
+}
+
+// 旧版 mpv（end-file 事件无 playlist_entry_id）或 lastLoadID 未知：过滤禁用，
+// 事件保守放行（回归守护：不得因过滤逻辑吞掉真实失败）。
+func TestMpvPlayerEndFileErrorWithoutPlaylistEntryIDStillEmits(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.Play("https://example.com/a.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	fake.pushEvent(`{"event":"end-file","reason":"error","file_error":"no audio or video data played"}`)
+	ev := waitErrorEvent(t, p, 2*time.Second)
+	var le *LoadFailedError
+	if !errors.As(ev.Err, &le) {
+		t.Fatalf("want *LoadFailedError, got %T (%v)", ev.Err, ev.Err)
+	}
+	if le.FileError != "no audio or video data played" {
+		t.Errorf("FileError = %q, want %q", le.FileError, "no audio or video data played")
 	}
 }
 
