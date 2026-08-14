@@ -154,13 +154,13 @@ func TestLoadCorruptReturnsError(t *testing.T) {
 	}
 }
 
-func TestLoadPreservesOrderAndValues(t *testing.T) {
+func TestLoadSortsByLastPlayedAscending(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "index.json")
-	// 预写一份乱序 JSON（旧→新），load 后应保持文件顺序
+	// 手写乱序索引（新→旧），load 后应按 LastPlayed 升序重排（entries[0] 最旧，与 upsert 同规则）
 	content := `[
-		{"id":"b","file":"b.mp3","last_played":"2024-01-01T00:00:00Z"},
-		{"id":"a","file":"a.mp3","last_played":"2024-01-02T00:00:00Z"}
+		{"id":"a","file":"a.mp3","last_played":"2024-01-02T00:00:00Z"},
+		{"id":"b","file":"b.mp3","last_played":"2024-01-01T00:00:00Z"}
 	]`
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -173,7 +173,7 @@ func TestLoadPreservesOrderAndValues(t *testing.T) {
 		t.Fatalf("len = %d, want 2", ix.len())
 	}
 	if ix.entries[0].ID != "b" || ix.entries[1].ID != "a" {
-		t.Errorf("order = [%s, %s], want [b, a]", ix.entries[0].ID, ix.entries[1].ID)
+		t.Errorf("order = [%s, %s], want [b, a]（按 LastPlayed 升序）", ix.entries[0].ID, ix.entries[1].ID)
 	}
 	e, _ := ix.get("b")
 	if e.File != "b.mp3" {

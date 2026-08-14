@@ -93,6 +93,10 @@ func load(path string) (*index, error) {
 	if err := json.Unmarshal(data, &ix.entries); err != nil {
 		return nil, fmt.Errorf("解析缓存索引: %w", err)
 	}
+	// 手写/乱序索引按 LastPlayed 升序重排（与 upsert 同规则），保证 oldest() 淘汰选对条目
+	sort.SliceStable(ix.entries, func(i, j int) bool {
+		return ix.entries[i].LastPlayed.Before(ix.entries[j].LastPlayed)
+	})
 	return ix, nil
 }
 

@@ -151,6 +151,78 @@ func TestNewEvictsOverLimit(t *testing.T) {
 	}
 }
 
+func TestNewDropsTraversalFileEntries(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cache")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 目录外受害者文件：被篡改的索引条目不得删除它
+	outside := filepath.Join(filepath.Dir(dir), "escape.txt")
+	if err := os.WriteFile(outside, []byte("victim"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeIndexFile(t, dir, `[
+		{"id":"evil","file":"../escape.txt","last_played":"2024-01-01T00:00:00Z"},
+		{"id":"abs","file":"/abs/path","last_played":"2024-01-02T00:00:00Z"},
+		{"id":"dot","file":".","last_played":"2024-01-03T00:00:00Z"},
+		{"id":"good","file":"good","last_played":"2024-01-04T00:00:00Z"}
+	]`)
+	writeCacheFile(t, dir, "good")
+	cm, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if cm.idx.len() != 1 {
+		t.Fatalf("idx len = %d, want 1（仅合法条目）", cm.idx.len())
+	}
+	if _, ok := cm.idx.get("good"); !ok {
+		t.Error("valid entry good missing")
+	}
+	for _, id := range []string{"evil", "abs", "dot"} {
+		if _, ok := cm.idx.get(id); ok {
+			t.Errorf("非法条目 %s 仍在索引中，应被丢弃", id)
+		}
+	}
+	// 目录外文件未被删除
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("目录外文件被删除: %v", err)
+	}
+	// 清理结果已持久化：重读索引无非法条目
+	ix, err := load(filepath.Join(dir, "index.json"))
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if _, ok := ix.get("evil"); ok {
+		t.Error("穿越条目仍被持久化")
+	}
+	if _, ok := ix.get("abs"); ok {
+		t.Error("绝对路径条目仍被持久化")
+	}
+}
+
+func TestNewCleansPartFiles(t *testing.T) {
+	dir := t.TempDir()
+	for _, f := range []string{"a.part", "b.part", "sub.part"} {
+		writeCacheFile(t, dir, f)
+	}
+	writeCacheFile(t, dir, "song.m4a") // 正常文件不受影响
+	cm, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if cm.idx.len() != 0 {
+		t.Errorf("idx len = %d, want 0", cm.idx.len())
+	}
+	for _, f := range []string{"a.part", "b.part", "sub.part"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); !os.IsNotExist(err) {
+			t.Errorf("残留 %s 未被清理: %v", f, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "song.m4a")); err != nil {
+		t.Errorf("正常缓存文件被误删: %v", err)
+	}
+}
+
 func TestLookupMissThenHitThenFileGone(t *testing.T) {
 	dir := t.TempDir()
 	cm := newTestManager(t, Options{Enabled: true, MaxEntries: 100, Dir: dir})

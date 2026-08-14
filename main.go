@@ -181,9 +181,9 @@ func loadCache(opts cache.Options, ytdlpPath string) *cache.Manager {
 	if err == nil {
 		return cm
 	}
-	// 索引文件损坏（cache 包内部文件名 index.json）→ 备份后重试
+	// 索引文件损坏（cache 包 IndexFile）→ 备份后重试
 	if opts.Dir != "" {
-		idxPath := filepath.Join(opts.Dir, "index.json")
+		idxPath := filepath.Join(opts.Dir, cache.IndexFile)
 		if _, serr := os.Stat(idxPath); serr == nil {
 			backup := fmt.Sprintf("%s.corrupt-%d", idxPath, time.Now().UnixNano())
 			if berr := os.Rename(idxPath, backup); berr == nil {

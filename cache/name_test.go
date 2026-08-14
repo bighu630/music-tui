@@ -1,6 +1,9 @@
 package cache
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSafeNameKeepsYouTubeID(t *testing.T) {
 	cases := []string{
@@ -41,5 +44,30 @@ func TestSafeNameUnicodeAllUnderscores(t *testing.T) {
 func TestSafeNameEmptyReturnsUnknown(t *testing.T) {
 	if got := SafeName(""); got != "unknown" {
 		t.Errorf("SafeName(\"\") = %q, want %q", got, "unknown")
+	}
+}
+
+func TestSafeNameDotAndDotDotUnknown(t *testing.T) {
+	for _, id := range []string{".", ".."} {
+		if got := SafeName(id); got != "unknown" {
+			t.Errorf("SafeName(%q) = %q, want %q", id, got, "unknown")
+		}
+	}
+}
+
+func TestSafeNameLongTruncatesTo64(t *testing.T) {
+	got := SafeName(strings.Repeat("a", 200))
+	if len(got) != 64 {
+		t.Errorf("len = %d, want 64", len(got))
+	}
+	if got != strings.Repeat("a", 64) {
+		t.Errorf("SafeName(long) = %q, want 64 个 a", got)
+	}
+}
+
+func TestSafeNameLongDotSeqUnknown(t *testing.T) {
+	// 超长纯点串截断后仍是纯点串（Windows 会因尾部点被剔除而失效），按非法处理
+	if got := SafeName(".." + strings.Repeat(".", 100)); got != "unknown" {
+		t.Errorf("SafeName(..+100点) = %q, want %q", got, "unknown")
 	}
 }

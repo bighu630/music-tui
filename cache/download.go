@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -11,6 +12,20 @@ import (
 	"time"
 )
 
+// userAgent 是下载请求的 User-Agent（裸 Go 客户端默认无 UA，YouTube 直链易 403）。
+const userAgent = "music-tui/0.1.0"
+
+// maxStderrTail 是错误分支拼入错误消息的 stderr 诊断文本最大长度（与 search 包同款）。
+const maxStderrTail = 512
+
+// tail 返回 s 末尾最多 max 字节；用于截取错误诊断文本。
+func tail(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[len(s)-max:]
+}
+
 // extractFunc 从页面 URL 提取音频直链与扩展名（测试可注入 stub）。
 type extractFunc func(ctx context.Context, url string) (streamURL, ext string, err error)
 
@@ -19,9 +34,15 @@ func realExtract(ctx context.Context, ytdlpPath, url string) (streamURL, ext str
 	cmd := exec.CommandContext(ctx, ytdlpPath,
 		"--no-playlist", "--no-warnings", "-f", "bestaudio",
 		"--print", "%(url)s %(ext)s", url)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", "", fmt.Errorf("yt-dlp 提取直链: %w", err)
+		msg := tail(stderr.String(), maxStderrTail)
+		if msg == "" {
+			msg = "<无输出>"
+		}
+		return "", "", fmt.Errorf("yt-dlp 提取直链: %w（stderr: %s）", err, msg)
 	}
 	line := string(out)
 	if i := strings.IndexByte(line, '\n'); i >= 0 {
@@ -73,6 +94,7 @@ func attemptDownload(ctx context.Context, client *http.Client, url, dest string)
 	if err != nil {
 		return 0, fmt.Errorf("构造下载请求: %w", err)
 	}
+	req.Header.Set("User-Agent", userAgent)
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("发起下载: %w", err)

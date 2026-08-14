@@ -23,8 +23,8 @@ var (
 // defaultMaxEntries 与 config.DefaultMaxEntries 保持一致（本地常量避免循环 import）。
 const defaultMaxEntries = 100
 
-// indexFile 是索引文件名（缓存目录内）。
-const indexFile = "index.json"
+// IndexFile 是索引文件名（缓存目录内）；main 备份损坏索引时引用同一常量。
+const IndexFile = "index.json"
 
 // Manager 音频缓存门面；所有方法并发安全。
 type Manager struct {
@@ -64,16 +64,27 @@ func New(opts Options, ytdlpPath string) (*Manager, error) {
 	if err := os.MkdirAll(opts.Dir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建缓存目录: %w", err)
 	}
+	// 清理上次异常退出（kill -9/断电）残留的 .part 临时文件，避免永久滞留
+	if parts, err := filepath.Glob(filepath.Join(opts.Dir, "*.part")); err == nil {
+		for _, p := range parts {
+			os.Remove(p) // 失败忽略：下次启动再试
+		}
+	}
 	ix, err := load(m.indexPath())
 	if err != nil {
 		return nil, err
 	}
 	m.idx = *ix
 
-	// 启动清理
+	// 启动清理：先校验文件名合法性（防被篡改的 index.json 路径穿越删目录外文件），
+	// 再对合法条目做缺失文件清理与超限淘汰。
 	changed := false
 	kept := make([]Entry, 0, len(m.idx.entries))
 	for _, e := range m.idx.entries {
+		if !validCacheFile(e.File) {
+			changed = true // 非法文件名（含路径分隔符/绝对路径/“.”/“..”）→ 删条目
+			continue
+		}
 		if _, err := os.Stat(filepath.Join(m.dir, e.File)); err != nil {
 			changed = true // 条目文件缺失 → 删条目
 			continue
@@ -104,7 +115,14 @@ func Disabled() *Manager {
 func (m *Manager) Enabled() bool { return m.enabled }
 
 // indexPath 返回索引文件完整路径（调用方须确保 dir 非空）。
-func (m *Manager) indexPath() string { return filepath.Join(m.dir, indexFile) }
+func (m *Manager) indexPath() string { return filepath.Join(m.dir, IndexFile) }
+
+// validCacheFile 校验索引条目文件名只能是指向缓存目录内文件的纯文件名
+// （非空、非 "."/".."、无路径分隔符），防止被篡改的 index.json 通过
+// 路径穿越删除缓存目录外文件或把目录外路径交给播放器。
+func validCacheFile(file string) bool {
+	return file != "" && file != "." && file != ".." && filepath.Base(file) == file
+}
 
 // Lookup 命中判定：开关开 + 索引有条目 + 文件存在。
 // 命中 → 刷新 LastPlayed=now 并持久化；条目在但文件缺失 → 移除条目，返回 miss。

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,6 +131,23 @@ func TestDownloadFileEmptyBody(t *testing.T) {
 	}
 }
 
+func TestAttemptDownloadSetsUserAgent(t *testing.T) {
+	var gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "song.m4a")
+	if _, err := attemptDownload(context.Background(), &http.Client{}, srv.URL, dest); err != nil {
+		t.Fatalf("attemptDownload: %v", err)
+	}
+	if gotUA != userAgent {
+		t.Errorf("User-Agent = %q, want %q", gotUA, userAgent)
+	}
+}
+
 func writeFakeYtDlp(t *testing.T, body string) string {
 	t.Helper()
 	script := filepath.Join(t.TempDir(), "yt-dlp")
@@ -178,6 +196,17 @@ func TestRealExtractNonZeroExit(t *testing.T) {
 	script := writeFakeYtDlp(t, `echo "oops" >&2; exit 1`)
 	if _, _, err := realExtract(context.Background(), script, "https://youtube.com/watch?v=abc"); err == nil {
 		t.Fatal("realExtract exit 1 = nil error, want error")
+	}
+}
+
+func TestRealExtractErrorIncludesStderr(t *testing.T) {
+	script := writeFakeYtDlp(t, `echo "some diagnostic" >&2; exit 1`)
+	_, _, err := realExtract(context.Background(), script, "https://youtube.com/watch?v=abc")
+	if err == nil {
+		t.Fatal("realExtract exit 1 = nil error, want error")
+	}
+	if !strings.Contains(err.Error(), "some diagnostic") {
+		t.Errorf("error %q 缺少 stderr 诊断信息", err)
 	}
 }
 
