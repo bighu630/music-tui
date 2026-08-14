@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"music-tui/model"
+	"music-tui/player"
 )
 
 // ---- 播放列表页：空态与两级视图 ----
@@ -312,8 +313,15 @@ func TestNamingInputConsumesGlobalKeys(t *testing.T) {
 	if got := m.plPage.input.Value(); got != "p " {
 		t.Errorf("input = %q, want %q", got, "p ")
 	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}) // q 应输入而非退出程序
+	if got := m.plPage.input.Value(); got != "p q" {
+		t.Errorf("input = %q, want %q", got, "p q")
+	}
+	if m.plPicker != nil {
+		t.Fatal("q 不应打开选择器")
+	}
 	if !m.plPage.typing() {
-		t.Error("输入后应仍在命名输入模式")
+		t.Error("q 输入后应仍在命名输入模式")
 	}
 }
 
@@ -366,6 +374,38 @@ func TestPickTrackFromSearchAddsToPlaylist(t *testing.T) {
 	// View 渲染绿色成功横幅
 	if !strings.Contains(m.View(), lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("✔ 已添加到「收藏」")) {
 		t.Error("View 应渲染绿色成功横幅")
+	}
+}
+
+// TestPickerOpenStillProcessesPlayerEvents 选择器打开时 playerEventMsg 照常处理：
+// picker 只是输入模态（拦截按键/鼠标），不拦截播放事件——TrackEnded 仍自动连播。
+func TestPickerOpenStillProcessesPlayerEvents(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1"), testTrack("t2")}}
+	m := newTestModel(t, fp, fa, nil)
+	// 队列 2 首曲：播放第一首 + 追加第二首
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	if fp.playCount() != 1 || fp.lastPlayed() != testTrack("t1").URL {
+		t.Fatalf("前置播放失败: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	// 搜索页流程选中歌曲按 p 打开选择器
+	m = searchAndPick(t, m, fa)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	if m.plPicker == nil {
+		t.Fatal("按 p 应打开选择器")
+	}
+	// 选择器打开时 t1 播完 → 仍应连播 t2（picker 不拦截播放事件）
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t2").URL {
+		t.Errorf("picker 打开时连播失败: playCount=%d lastPlayed=%q, want 2 次 t2", fp.playCount(), fp.lastPlayed())
+	}
+	if m.plPicker == nil {
+		t.Fatal("playerEventMsg 处理后选择器应保持打开")
+	}
+	if m.queue.CurrentIndex() != 1 {
+		t.Errorf("连播后 CurrentIndex = %d, want 1", m.queue.CurrentIndex())
 	}
 }
 

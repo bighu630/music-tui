@@ -283,12 +283,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case plLoadMsg:
 		// 播放列表详情 Enter：整列表替换进队列，从选中曲开始播放
 		// （替换语义同 startPlay：清空队列 → 新队列 → 播放）。
-		tracks := m.pl.Tracks(msg.name)
-		if tracks == nil {
+		// 列表存在性须用 Lists() 遍历判断：Tracks 对“空列表”同样返回 nil，
+		// 不能据此报“不存在”（空列表加载 = 清空队列，UI 不可达，防御即可）。
+		exists := false
+		for _, l := range m.pl.Lists() {
+			if l.Name == msg.name {
+				exists = true
+				break
+			}
+		}
+		if !exists {
 			m.lastError = "播放列表「" + msg.name + "」不存在"
 			return m, nil
 		}
-		m.queue.ReplaceAll(tracks, msg.index)
+		m.queue.ReplaceAll(m.pl.Tracks(msg.name), msg.index)
 		m.retryCount = 0    // 手动播放：全新重试预算
 		m.queueSkip = false // 替换即重新对齐，解除删除解耦标记
 		m.current = pageHome
@@ -930,6 +938,11 @@ func emitClearHistory() tea.Cmd {
 // （点击/移动直接委托页面，无特殊处理）；其余区域事件不拦截，
 // 交给当前页面（歌词区 viewport 原生支持滚轮；bubbles v1.0.0 的列表/输入框暂无鼠标处理）。
 func (m Model) onMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
+	// 选择器打开时忽略一切鼠标事件（与“选择器打开时所有输入交给选择器”的语义一致）：
+	// 点击 Tab 栏/页面区域不得穿透改 m.current 或落到页面。
+	if m.plPicker != nil {
+		return m, nil
+	}
 	if msg.Y != 0 {
 		// 鼠标不在 Tab 栏：清除悬停高亮，事件交给页面
 		if m.hoverTab >= 0 {
