@@ -95,6 +95,52 @@ func TestReplaceClearsAndSetsCurrent(t *testing.T) {
 	}
 }
 
+func TestReplaceAllFillsFromStartIdx(t *testing.T) {
+	q := New()
+	q.Add(testTrack("old"))
+	q.Add(testTrack("old2"))
+	q.ReplaceAll([]model.Track{testTrack("a"), testTrack("b"), testTrack("c")}, 1)
+	if q.Len() != 3 {
+		t.Errorf("Len = %d, want 3", q.Len())
+	}
+	if q.CurrentIndex() != 1 {
+		t.Errorf("CurrentIndex = %d, want 1", q.CurrentIndex())
+	}
+	if cur, ok := q.Current(); !ok || cur.ID != "b" {
+		t.Errorf("Current = %+v, want b", cur)
+	}
+	// 修改返回值不影响内部（复制语义）
+	q.Tracks()[0] = testTrack("mutated")
+	if cur, _ := q.Current(); cur.ID != "b" {
+		t.Errorf("ReplaceAll 未复制 tracks: Current = %s", cur.ID)
+	}
+}
+
+func TestReplaceAllClampsStartIdx(t *testing.T) {
+	q := New()
+	tracks := []model.Track{testTrack("a"), testTrack("b")}
+	q.ReplaceAll(tracks, -5)
+	if q.CurrentIndex() != 0 {
+		t.Errorf("负 startIdx 应 clamp 到 0, got %d", q.CurrentIndex())
+	}
+	q.ReplaceAll(tracks, 99)
+	if q.CurrentIndex() != 1 {
+		t.Errorf("超大 startIdx 应 clamp 到末位, got %d", q.CurrentIndex())
+	}
+}
+
+func TestReplaceAllEmptyClears(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.ReplaceAll(nil, 0)
+	if q.Len() != 0 || q.CurrentIndex() != -1 {
+		t.Errorf("空列表应清空队列: Len=%d CurrentIndex=%d", q.Len(), q.CurrentIndex())
+	}
+	if _, ok := q.Current(); ok {
+		t.Error("空队列不应有当前曲目")
+	}
+}
+
 func TestTracksReturnsCopy(t *testing.T) {
 	q := New()
 	q.Replace(testTrack("a"))
@@ -131,8 +177,8 @@ func TestNextWithNoCurrentStartsAtHead(t *testing.T) {
 	q.Replace(testTrack("a"))
 	q.Add(testTrack("b"))
 	q.Add(testTrack("c"))
-	q.Next() // b
-	q.Next() // c 当前（2，末位）
+	q.Next()    // b
+	q.Next()    // c 当前（2，末位）
 	q.Remove(2) // 删除末位当前曲目 → 无当前曲目
 	if q.CurrentIndex() != -1 {
 		t.Fatalf("CurrentIndex = %d, want -1", q.CurrentIndex())

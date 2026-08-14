@@ -44,6 +44,24 @@ func (q *Queue) Replace(t model.Track) {
 	q.currentIdx = 0
 }
 
+// ReplaceAll 替换语义：清空队列后用整个播放列表填充，当前指针指向
+// startIdx（播放列表页 Enter：从选中曲目开始连播整个列表）。
+// startIdx 越界时 clamp 到合法范围；空列表清空队列（无当前曲目）。
+func (q *Queue) ReplaceAll(tracks []model.Track, startIdx int) {
+	q.tracks = append([]model.Track(nil), tracks...)
+	q.currentIdx = -1
+	if len(q.tracks) == 0 {
+		return
+	}
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	if startIdx >= len(q.tracks) {
+		startIdx = len(q.tracks) - 1
+	}
+	q.currentIdx = startIdx
+}
+
 // Remove 删除指定下标的曲目。删除当前曲目时顺延下一首成为当前；
 // 当前曲目为末位（无顺延）时变为无当前曲目（-1）。非法下标忽略。
 func (q *Queue) Remove(i int) {
