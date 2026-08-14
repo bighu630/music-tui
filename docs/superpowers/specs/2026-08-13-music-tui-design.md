@@ -486,3 +486,58 @@ main 加载 session.Store（损坏→备份重建）→ NewModel：
 | player | fake mpv socket 断言命令序列：set pause=true → loadfile；超时/未连接表驱动扩展 |
 | ui | 恢复：队列/模式/进度/暂停态断言、PlayPaused+Seek 调用、ended 两分支、失败重置、MPRIS onTrack 通知；保存：退出写盘、ProgressEvent 节流、无播放清除 |
 | main | loadSession 缺失/损坏备份重建（与 loadHistory 同款） |
+
+## 17. 音频缓存（追加需求，用户确认方案）
+
+### 17.1 概述
+- 缓存最近播放过的歌曲音频文件，默认上限 100 首，**LRU 淘汰**（按最后播放时间；超限淘汰最久未播放的并删除缓存文件）
+- 播放时**后台异步缓存、不阻塞播放**：首次播放走网络流，同时后台下载副本到缓存目录；再次播放同一首（按 Track.ID）优先播放本地文件（秒开、省流量、断网可播）
+- 配置：`~/.config/music-tui/config.json`（JSON 格式，用户确认；与 history.json/session.json 同目录同模式），**本阶段仅缓存一个配置项**；首次运行生成默认配置；缺失/损坏用默认值（损坏走 `.corrupt-<ts>` 备份重建，沿用 loadHistory 模式）
+- 缓存目录：`~/.cache/music-tui`（os.UserCacheDir），索引 `index.json` 位于缓存目录内（删除整个目录即清空缓存）
+
+### 17.2 配置文件（config 包）
+```json
+{
+  "cache": {
+    "enabled": true,       // 缓存总开关，默认开
+    "max_entries": 100,    // 缓存歌曲数上限，默认 100；<1 时回落默认
+    "dir": "/home/user/.cache/music-tui"  // 缓存目录，空/缺省时用默认
+  }
+}
+```
+- `config.Load(path)`：缺失 → 生成默认配置文件并返回默认值；空文件 → 默认值；损坏 JSON → 报错（main 备份 `.corrupt-<ts>` 后重建）；部分字段缺失 → 逐项回落默认
+- 模块：`config/config.go`（Config/Cache 结构 + Load/Save/Default），原子写盘（tmp + rename）
+- 依赖方向：`config` 依赖 `cache`（嵌入 `cache.Options`，缓存配置的唯一真源在 cache 包）
+
+### 17.3 cache 包（LRU 管理 + 异步下载）
+```
+cache/
+├── options.go    # Options{Enabled, MaxEntries, Dir}——配置结构真源（json tag 即配置文件格式）
+├── index.go      # LRU 索引：Entry{ID, File, LastPlayed}，JSON 持久化（原子写盘）
+├── name.go       # SafeName(id)：文件名安全化
+├── download.go   # 下载器：yt-dlp 取直链 + http 下载 + 失败重试 1 次
+└── cache.go      # Manager：并发安全门面 + in-flight 去重 + 启动清理
+```
+- **索引条目**：`Track.ID → {文件名, 最后播放时间}`；文件名 = `SafeName(ID)`（保留 `[A-Za-z0-9._-]`，其余转 `_`，空结果用 `unknown`）+ 可选扩展名（yt-dlp `--print "%(url)s %(ext)s"` 一次取直链与格式）
+- **LRU 语义**：按 LastPlayed 升序排列，最旧在前；`Register`（下载完成/新文件入册）追加到最新，超限淘汰最旧并删除文件；`Lookup` 命中即刷新 LastPlayed（一次播放 = 一次刷新）；`Remove` 删文件+条目
+- **下载流程**（CacheAsync，goroutine，不阻塞播放）：去重（同 ID 在途跳过）→ 总超时 5 分钟 → `yt-dlp -f bestaudio --no-playlist --no-warnings --print "%(url)s %(ext)s" <URL>` 取直链（60s 超时）→ http GET 直链，失败重试 1 次（2s 退避）→ 写 `.part` 临时文件 → rename 为正式文件 → Register → 超限淘汰。任何失败仅日志，不影响播放
+- **并发安全**：Manager.mu 保护索引与 in-flight 集合；下载在锁外执行；-race 全绿
+- **启动清理**（New 时）：条目文件缺失 → 删条目；超限 → 淘汰最旧（删文件）；有变化则持久化。孤儿文件（无条目）不清理
+- **降级**：缓存目录不可用/索引损坏且备份重建失败 → `cache.Disabled()` 禁用态（Lookup 永 miss、CacheAsync no-op），警告日志，绝不影响播放
+
+### 17.4 播放链路集成（ui/root + main）
+- **beginPlay 单点接入**（手动/重试/连播统一入口）：
+  - `cache.Lookup(track.ID)` 命中（索引有条目且文件存在）→ `player.Play(本地路径)`，标记 `playingFromCache=true`
+  - 未命中 → `player.Play(track.URL)`，`playingFromCache=false`，随即 `cache.CacheAsync(track)` 后台下载（不阻塞、不进事件循环）
+- **损坏缓存自动回退**：`LoadFailedError` 重试分支中若 `playingFromCache` → 先 `cache.Remove(id)` 删除损坏文件，重试自然走网络 URL；续播恢复失败（resumeResultMsg err / resuming 中 LoadFailed）同样处理
+- **续播恢复**：`resumeCmd` 同样先查缓存，命中则 `PlayPaused(本地路径, pos)`（断网可恢复）；`resumeResultMsg` 携带 `fromCache` 标记回填 `playingFromCache`
+- **后台下载生命周期**：播放结束/换曲**不取消**在途下载（LRU 按播放时间管理，下载完照常入册，超限自然淘汰）；goroutine 有总超时兜底 + in-flight 去重，不泄漏
+- **main.go**：`loadConfig`（损坏备份重建，同 loadHistory 模式）→ `loadCache`（New 失败：索引损坏先备份重建，仍失败则 Disabled 降级）→ 传入 `ui.NewModel`
+
+### 17.5 测试策略
+| 模块 | 策略 |
+|---|---|
+| config | 缺失生成默认、部分字段回落、<1 上限回落、损坏报错、空文件默认、原子写盘 |
+| cache | SafeName 边界；LRU 淘汰/命中刷新/Remove/Prune（缺文件清条目、超限淘汰）；索引 roundtrip/损坏报错；下载器 httptest（200/404/500 重试后成功/超时）、取直链注入 stub；Manager 并发 -race、in-flight 去重、Disabled 态 |
+| ui | 命中播本地路径、未命中播 URL + 后台下载启动不阻塞、LoadFailed 损坏回退删条目重试走 URL、恢复命中 PlayPaused 本地路径 |
+| main | loadConfig 缺失/损坏备份重建（同 loadHistory 模式） |
