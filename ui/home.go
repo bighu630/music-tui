@@ -472,7 +472,7 @@ func (m homeModel) controlBarView() string {
 	controls := "⏮   ⏯   ⏭    " + modeIcon(m.queueMode) + "  | "
 	right := ""
 	if m.queueTotal > 0 {
-		right = fmt.Sprintf(" | %d/%d · %s", m.queuePos, m.queueTotal, modeShortName(m.queueMode))
+		right = fmt.Sprintf(" | %d/%d · %s", m.queuePos, m.queueTotal, modeName(m.queueMode))
 	}
 	avail := m.width - ansi.StringWidth(controls) - ansi.StringWidth(right)
 	if avail < 1 {
@@ -491,19 +491,6 @@ func modeIcon(m queue.Mode) string {
 		return "🔂"
 	default:
 		return "🔁"
-	}
-}
-
-// modeShortName 三态播放模式短名（首页按钮行展示；
-// 后续与 queue.go 的 modeName 统一）。
-func modeShortName(m queue.Mode) string {
-	switch m {
-	case queue.Shuffle:
-		return "随机"
-	case queue.RepeatOne:
-		return "单曲循环"
-	default:
-		return "顺序"
 	}
 }
 
