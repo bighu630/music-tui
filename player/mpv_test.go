@@ -510,6 +510,25 @@ func TestMpvPlayerEndFileErrorWithoutPlaylistEntryIDStillEmits(t *testing.T) {
 	}
 }
 
+// lastLoadID 未知（0：从未成功 loadfile，或重连后身份重置）时，即便事件携带
+// playlist_entry_id 也不得过滤——归属无法确认，保守放行（回归守护：未知归属
+// 误过滤会吞掉真实失败，例如恢复路径的事件先于任何 loadfile 响应到达）。
+func TestMpvPlayerEndFileErrorWithUnknownLoadIDStillEmits(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	// 不调用 Play/PlayPaused：从未成功 loadfile，lastLoadID 保持 0（未知）。
+	fake.pushEvent(`{"event":"end-file","reason":"error","playlist_entry_id":1,"file_error":"no audio or video data played"}`)
+	ev := waitErrorEvent(t, p, 2*time.Second)
+	var le *LoadFailedError
+	if !errors.As(ev.Err, &le) {
+		t.Fatalf("want *LoadFailedError, got %T (%v)", ev.Err, ev.Err)
+	}
+	if le.FileError != "no audio or video data played" {
+		t.Errorf("FileError = %q, want %q", le.FileError, "no audio or video data played")
+	}
+}
+
 // 旧版 mpv 可能缺失 file_error 字段：此时 FileError 为空串，
 // 错误消息与原有版本完全一致（向后兼容）。
 func TestMpvPlayerLoadFailedErrorEmptyFileError(t *testing.T) {

@@ -94,7 +94,8 @@ type historyResultMsg struct {
 }
 
 // resumeResultMsg 续播恢复结果（PlayPaused（含定位）成败）。
-// fromCache 标记本次恢复是否命中本地缓存（命中 → 失败时移除损坏缓存）。
+// fromCache 标记本次恢复是否命中本地缓存（命中 → 异步 LoadFailedError
+// （onPlayerEvent）路径据此移除损坏缓存；IPC 层失败与文件无关，不删）。
 type resumeResultMsg struct {
 	err       error
 	fromCache bool
@@ -958,8 +959,9 @@ func (m Model) saveSession() {
 
 // resumeCmd 续播恢复：PlayPaused 静默加载当前曲目并定位（不发声；定位随
 // loadfile 的 start= 选项原子完成，避免加载窗口内 seek 被 mpv 拒绝的竞态，
-// 见 mpv.go PlayPaused）。命中缓存 → 播本地文件（fromCache 标记回填，
-// 失败时据此移除损坏条目）；未命中 → 网络 URL。
+// 见 mpv.go PlayPaused）。命中缓存 → 播本地文件（fromCache 标记回填至
+// playingFromCache，异步 LoadFailedError 时据此移除损坏条目）；未命中 →
+// 网络 URL。IPC 层失败（PlayPaused 命令被拒）与缓存文件无关，不删条目。
 func resumeCmd(m Model) tea.Cmd {
 	track := m.resume.track
 	pos := m.resume.pos
