@@ -875,3 +875,37 @@ func TestHomeLyricsCenterFallback(t *testing.T) {
 	}
 	t.Error("view 中未找到歌词行")
 }
+
+// TestHomeResizeRelayout 回归：窗口尺寸变化后布局必须整体重新定位
+// （行数 = 新页面高、进度条满新宽、歌词行重定位）——曾依赖旧尺寸渲染。
+func TestHomeResizeRelayout(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 15, Duration: 200}})
+
+	for _, sz := range [][2]int{{120, 40}, {80, 24}, {120, 40}, {60, 10}} {
+		m, _ = update(m, tea.WindowSizeMsg{Width: sz[0], Height: sz[1]})
+		out := m.home.view()
+		lines := strings.Split(out, "\n")
+		if len(lines) != sz[1]-2 {
+			t.Errorf("%dx%d: 行数 = %d, want %d", sz[0], sz[1], len(lines), sz[1]-2)
+		}
+		if w := ansi.StringWidth(lines[len(lines)-2]); w != sz[0] {
+			t.Errorf("%dx%d: 进度条行宽 = %d, want %d", sz[0], sz[1], w, sz[0])
+		}
+		found := false
+		for _, ln := range lines {
+			if strings.Contains(stripAnsiForTest(ln), "第一行") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%dx%d: 歌词行未找到（布局未重定位）", sz[0], sz[1])
+		}
+	}
+}
