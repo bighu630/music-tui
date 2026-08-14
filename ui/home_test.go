@@ -670,8 +670,8 @@ func stripAnsiForTest(s string) string {
 	return sb.String()
 }
 
-// TestHomeLyricsHorizontallyCentered 回归：歌词文本在歌词列内水平居中
-// （左封面右歌词的"居中"语义），而非左对齐。
+// TestHomeLyricsHorizontallyCentered 回归：歌词文本以屏幕中心为基准
+// 水平居中（列单位），而非歌词列内居中（会偏右 ~15 列）或左对齐。
 func TestHomeLyricsHorizontallyCentered(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -692,13 +692,40 @@ func TestHomeLyricsHorizontallyCentered(t *testing.T) {
 		if !strings.Contains(vis, "第一行") {
 			continue
 		}
-		col := strings.Index(vis, "第一行")
-		// 歌词列宽 86、歌词 4 字 = 8 列：居中前导 ≈ (86-8)/2 = 39，
-		// 加上封面列 30 + gap 2 → 歌词起始列 ≥ 60（左对齐时仅 ~32）。
-		if col < 60 {
-			t.Errorf("歌词起始列 = %d, want ≥ 60（水平居中），行内容 %q", col, vis)
+		idx := strings.Index(vis, "第一行")
+		col := ansi.StringWidth(vis[:idx]) // 歌词起始列（列单位）
+		// "第一行" = 6 列 → 歌词中心 = col+3 ≈ 屏幕中心 60（±3 容差）；
+		// 列内居中会落在 ~76（偏右 16 列）。
+		if center := col + 3; center < 57 || center > 63 {
+			t.Errorf("歌词中心列 = %d, want ≈ 60（屏幕中心），起始列 %d", center, col)
 		}
 		return
 	}
 	t.Error("view 中未找到歌词行")
+}
+
+// TestHomeNoLyricsCenteredOnScreen 回归："暂无歌词"提示同样以屏幕中心居中
+// （此前列内居中偏右，且外层 Place 会把短行推回列中心）。
+func TestHomeNoLyricsCenteredOnScreen(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", err: lyrics.ErrNotFound})
+	m.home = m.home.setSize(120, 39)
+
+	for _, ln := range strings.Split(m.home.view(), "\n") {
+		vis := stripAnsiForTest(ln)
+		if !strings.Contains(vis, "暂无歌词") {
+			continue
+		}
+		idx := strings.Index(vis, "暂无歌词")
+		col := ansi.StringWidth(vis[:idx])
+		// "暂无歌词" = 8 列 → 中心 = col+4 ≈ 60（±3）
+		if center := col + 4; center < 57 || center > 63 {
+			t.Errorf("暂无歌词中心列 = %d, want ≈ 60（屏幕中心），起始列 %d", center, col)
+		}
+		return
+	}
+	t.Error("view 中未找到暂无歌词")
 }
