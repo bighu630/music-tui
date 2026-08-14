@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"music-tui/cover"
 	"music-tui/history"
@@ -609,6 +610,11 @@ func (m Model) View() string {
 				Foreground(lipgloss.Color("9")).
 				Render("⚠ " + m.lastError)
 			if len(lines) > 0 {
+				// 超宽横幅会在终端折行 → 行数超屏 → Tab 栏被滚出
+				// （与追加横幅同类回归）；按页面宽度截断。
+				if m.width > 0 {
+					banner = ansi.Truncate(banner, m.width, "…")
+				}
 				lines[len(lines)-1] = banner
 			} else {
 				body = banner
@@ -623,6 +629,9 @@ func (m Model) View() string {
 				idx-- // error 占末尾行时，notice 显示在其上方
 			}
 			if idx >= 0 && len(lines) > 0 {
+				if m.width > 0 {
+					banner = ansi.Truncate(banner, m.width, "…")
+				}
 				lines[idx] = banner
 			}
 		}
