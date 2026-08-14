@@ -143,8 +143,17 @@ func TestReplaceAllEmptyClears(t *testing.T) {
 
 // TestReplaceAllShuffleShufflesTail 回归：随机模式下整列表替换后，当前曲之后的
 // 尾部同样洗牌（复用 SetMode 的 tail-shuffle 语义）——模式保留、currentIdx 正确、
-// 选中曲及之前的曲目保持原序、之后仅曲目集合不变（顺序随机，用集合断言）。
+// 选中曲及之前的曲目保持原序、尾部被确定性置换（注入 shuffleFn 断言精确顺序）。
 func TestReplaceAllShuffleShufflesTail(t *testing.T) {
+	orig := shuffleFn
+	// 确定性置换：逆序——若 ReplaceAll 不洗牌，顺序保持 [c..g] 测试即失败
+	shuffleFn = func(n int, swap func(i, j int)) {
+		for i := 0; i < n/2; i++ {
+			swap(i, n-1-i)
+		}
+	}
+	defer func() { shuffleFn = orig }()
+
 	q := New()
 	q.Add(testTrack("a"))
 	q.Add(testTrack("b"))
@@ -153,7 +162,7 @@ func TestReplaceAllShuffleShufflesTail(t *testing.T) {
 		testTrack("a"), testTrack("b"), testTrack("c"),
 		testTrack("d"), testTrack("e"), testTrack("f"), testTrack("g"),
 	}
-	q.ReplaceAll(tracks, 1) // b 当前：尾部 [c..g] 应被洗牌
+	q.ReplaceAll(tracks, 1) // b 当前：尾部 [c..g] 应被置换为 [g f e d c]
 	if q.Mode() != Shuffle {
 		t.Errorf("ReplaceAll 不应改变模式: Mode = %v, want Shuffle", q.Mode())
 	}
@@ -164,10 +173,18 @@ func TestReplaceAllShuffleShufflesTail(t *testing.T) {
 	if !eq(got[:2], []string{"a", "b"}) {
 		t.Errorf("选中曲及之前曲目应保持原序: %v", got)
 	}
-	tail := append([]string(nil), got[2:]...)
-	sort.Strings(tail)
-	if !eq(tail, []string{"c", "d", "e", "f", "g"}) {
-		t.Errorf("当前曲之后应保持曲目集合: %v, want [c d e f g]", got[2:])
+	if !eq(got[2:], []string{"g", "f", "e", "d", "c"}) {
+		t.Errorf("当前曲之后应被确定性置换（逆序）: %v, want [g f e d c]", got[2:])
+	}
+}
+
+// TestShuffleFnNotAffectedByDefaultMode 顺序模式下 ReplaceAll 不洗牌（防御断言）。
+func TestReplaceAllSequentialKeepsOrder(t *testing.T) {
+	q := New()
+	tracks := []model.Track{testTrack("a"), testTrack("b"), testTrack("c")}
+	q.ReplaceAll(tracks, 0)
+	if got := ids(q.Tracks()); !eq(got, []string{"a", "b", "c"}) {
+		t.Errorf("顺序模式不应洗牌: %v", got)
 	}
 }
 

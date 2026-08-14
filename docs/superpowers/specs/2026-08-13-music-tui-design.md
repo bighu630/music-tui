@@ -529,6 +529,7 @@ func (s *Store) Tracks(name string) []model.Track     // 副本；列表不存�
 ### 16.3 播放驱动（ui/root 编排）
 
 - 播放列表详情 Enter → `plLoadMsg{name, index}` → `queue.ReplaceAll(tracks, index)`：**替换语义**——清空队列 → 整个列表入队 → 当前指针 clamp 到选中曲 → 切回首页 → 播放（与 startPlay 一致：重置重试预算、同步队列视图、歌词/封面/历史异步加载）
+- 随机模式：ReplaceAll 保留当前模式；若为随机则**洗牌选中曲之后的尾部**（复用 SetMode 的 tail-shuffle 语义）——加载播放列表后随机直接可用，选中曲及之前的曲目保持原序不打断
 - 详情 `a` → 复用追加语义（`emitTrackAppend`）：选中曲追加到队尾，不打断当前播放
 - 数据流：root 持有 `*playlists.Store` 并执行全部 store 操作（页面不直接持有服务）；操作完成后 `setLists` 把最新数据推入页面——概览选中项按列表名尽量保持、列表收缩时 clamp 到邻近项；详情模式下当前列表被删除/重命名则自动退回概览
 - 反馈横幅：失败走 `lastError`（红色 ⚠），成功提示走 `notice`（绿色 ✔，仅选择器场景使用）

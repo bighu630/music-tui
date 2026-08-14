@@ -536,6 +536,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastError = "当前没有可添加的歌曲（请先在搜索/历史/播放列表页选中歌曲）"
 				return m, nil
 			}
+			m.hoverTab = -1 // 打开选择器时清除悬停高亮（打开期间鼠标事件被忽略，防残留）
 			m.plPicker = newPlPicker(m.pl, track)
 			return m, nil
 		}

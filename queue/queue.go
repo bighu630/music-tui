@@ -27,6 +27,10 @@ type Queue struct {
 	mode       Mode
 }
 
+// shuffleFn 洗牌实现（包级变量：测试可注入确定性置换断言精确顺序，
+// 模式同 root.go 的 retryBackoff）。
+var shuffleFn = rand.Shuffle
+
 // New 创建空队列（无当前曲目，顺序模式）。
 func New() *Queue {
 	return &Queue{currentIdx: -1}
@@ -66,7 +70,7 @@ func (q *Queue) ReplaceAll(tracks []model.Track, startIdx int) {
 	// 保持原序（不打断刚选中的曲目），只洗牌其后的尾部。
 	if q.mode == Shuffle {
 		tail := q.tracks[q.currentIdx+1:]
-		rand.Shuffle(len(tail), func(i, j int) {
+		shuffleFn(len(tail), func(i, j int) {
 			tail[i], tail[j] = tail[j], tail[i]
 		})
 	}
@@ -129,7 +133,7 @@ func (q *Queue) SetMode(m Mode) {
 		return
 	}
 	tail := q.tracks[q.currentIdx+1:]
-	rand.Shuffle(len(tail), func(i, j int) {
+	shuffleFn(len(tail), func(i, j int) {
 		tail[i], tail[j] = tail[j], tail[i]
 	})
 }
