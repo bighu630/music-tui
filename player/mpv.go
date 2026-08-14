@@ -570,6 +570,26 @@ func (p *MpvPlayer) Seek(seconds float64) error {
 	return nil
 }
 
+// SetLoop 设置单曲循环（mpv loop-file 无缝循环）。loop-file 是 per-file
+// 属性：新 loadfile 自动重置为不循环，无需显式关闭；UI 层切歌/切模式时
+// 仍显式 SetLoop(false) 保证一致性。循环播放不产生 end-file 事件，
+// TrackEnded 自然不触发，进度回绕由 time-pos 属性推送驱动。
+func (p *MpvPlayer) SetLoop(loop bool) error {
+	if err := p.ensureConnected(); err != nil {
+		return err
+	}
+	conn := p.currentConn()
+	if conn == nil {
+		return errors.New("mpv 未连接")
+	}
+	if err := callWithTimeout(func() error {
+		return conn.Set("loop-file", loop)
+	}); err != nil {
+		return fmt.Errorf("set loop-file: %w", err)
+	}
+	return nil
+}
+
 // SetVolume 设置 mpv 音量（0-100，越界钳制）。
 // 与 Play/Pause/Resume/Seek 一致：断开时自动重连（见 ensureConnected）。
 func (p *MpvPlayer) SetVolume(percent float64) error {

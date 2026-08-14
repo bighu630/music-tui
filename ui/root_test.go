@@ -31,7 +31,8 @@ type fakePlayer struct {
 	pauses       int
 	resumes      int
 	seeks        []float64
-	playErr      bool // 为 true 时 Play 返回错误（测试注入）
+	loops        []bool // SetLoop 调用记录
+	playErr      bool   // 为 true 时 Play 返回错误（测试注入）
 	events       chan player.Event
 }
 
@@ -78,6 +79,13 @@ func (f *fakePlayer) Seek(seconds float64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.seeks = append(f.seeks, seconds)
+	return nil
+}
+
+func (f *fakePlayer) SetLoop(loop bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loops = append(f.loops, loop)
 	return nil
 }
 
@@ -135,6 +143,16 @@ func (f *fakePlayer) lastPlayed() string {
 		return ""
 	}
 	return f.plays[len(f.plays)-1]
+}
+
+// lastLoop 返回最近一次 SetLoop 的参数及是否有调用（无调用返回 false, false）。
+func (f *fakePlayer) lastLoop() (bool, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.loops) == 0 {
+		return false, false
+	}
+	return f.loops[len(f.loops)-1], true
 }
 
 type fakeSearchAdapter struct {
