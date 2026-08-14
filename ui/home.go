@@ -101,7 +101,8 @@ type homeModel struct {
 
 	state model.PlaybackState
 
-	queuePos   int // 当前曲目在队列中的 1 基位置；0 = 无当前曲目
+	queuePos int // 当前曲目在队列中的 1 基位置；0 = 无当前曲目（不隐藏：
+	// queueTotal>0 时仍渲染 "0/N · 模式"，见 controlBarView）
 	queueTotal int // 队列总长；0 = 无队列信息（隐藏展示）
 	queueMode  queue.Mode
 
@@ -171,6 +172,10 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 				return m, nil
 			}
 			return m, emitNextTrack()
+		case "m":
+			// 模式三态循环（与队列页 s 键语义一致）：模式是全局队列属性，
+			// 不依赖当前播放，无曲目时同样可切换。
+			return m, emitToggleMode()
 		}
 	case tea.MouseMsg:
 		// 屏幕坐标 → 页面坐标（Tab 栏占 1 行）
@@ -351,11 +356,16 @@ func (m homeModel) setSize(width, height int) homeModel {
 		}
 	}
 	// 歌词 viewport 尺寸 = 中间区歌词列尺寸：宽 = width-coverW-4（gap 2 + 边距 2），
-	// 高 = height-2（底部两行之外的中间区高度）
+	// 高 = 中间区高；高度下限 3 也 clamp 到中间区高——窄窗口下歌词列不允许
+	// 比中间区还高（回归：TestHomeViewNarrowWindow）。
 	m.lyricView.Width = m.lyricsColumnWidth()
+	midH := m.middleHeight()
 	lyricH := height - 2
 	if lyricH < 3 {
 		lyricH = 3
+	}
+	if lyricH > midH {
+		lyricH = midH
 	}
 	m.lyricView.Height = lyricH
 	return m
@@ -449,9 +459,11 @@ func (m homeModel) lyricsColumnView() string {
 }
 
 // progressBarWidth 进度条可见宽（与渲染一致；点击命中区间 [0, barW)）。
+// 行布局 = 进度条(barW) + 1 空格 + 时间串(timeW)，可见宽必须恰为页面宽
+// （此前 barW = width-timeW-2，整行比页面窄 1 列——回归：进度条行可见宽断言）。
 func (m homeModel) progressBarWidth() int {
 	timeStr := formatDuration(m.state.Position) + " / " + formatDuration(m.state.Duration)
-	w := m.width - ansi.StringWidth(timeStr) - 2
+	w := m.width - ansi.StringWidth(timeStr) - 1
 	if w < 1 {
 		w = 1
 	}
@@ -466,7 +478,9 @@ func (m homeModel) progressRowView() string {
 
 // controlBarView 底部行 2（页面内 Y == height-1）：控制按钮 + 曲目信息 + 队列位置。
 // 按钮图标渲染在 X 区间起点：⏮(0) ⏯(4) ⏭(8) 模式图标(13)，与点击区间一致。
-// 标题超宽截断（lipgloss Width）；无队列信息时省略 "3/12 · 模式" 段。
+// 标题超宽时按可见宽截断（lipgloss 的 Width/MaxWidth 是折行不是截断，窄窗口
+// 会把按钮行撑成多行推出布局——回归：TestHomeViewNarrowWindow；ansi.Truncate
+// 按显示宽度截断且不破坏 ANSI 序列/宽字符）；无队列信息时省略 "3/12 · 模式" 段。
 func (m homeModel) controlBarView() string {
 	t := m.state.Track
 	controls := "⏮   ⏯   ⏭    " + modeIcon(m.queueMode) + "  | "
@@ -478,7 +492,7 @@ func (m homeModel) controlBarView() string {
 	if avail < 1 {
 		avail = 1
 	}
-	title := lipgloss.NewStyle().Width(avail).Render(t.Title + " - " + t.Artist)
+	title := ansi.Truncate(t.Title+" - "+t.Artist, avail, "…")
 	return controls + title + right
 }
 
@@ -499,17 +513,31 @@ func modeIcon(m queue.Mode) string {
 // 成功回填 coverRenderCache，失败置 coverFailed；coverView 绝不触发 Render，
 // 避免每帧重复 16MiB 解码+缩放（值接收者写入不持久，渲染写回必须在
 // setCover/setSize 这类结果被赋回模型的路径上完成）。
+// 窄窗口（中间区高 < 封面行数）：lipgloss.Place 不截断超高内容，会把进度条/
+// 按钮行推出可视区（回归：TestHomeViewNarrowWindow），故按行裁剪到中间区高。
+// 对整块渲染串按行切分是安全的：halfblocks 渲染每行自含 ANSI 序列，无跨行
+// 转义；占位框裁剪会失去底边框，窄窗口下可接受。窗口尺寸未初始化
+// （height==0，尚未收到 WindowSizeMsg）时不裁剪，保留完整封面。
 func (m homeModel) coverView() string {
+	var s string
 	if m.coverWidget != nil && !m.coverFailed && m.coverRenderCache != "" {
-		return m.coverRenderCache
+		s = m.coverRenderCache
+	} else {
+		s = lipgloss.NewStyle().
+			Width(coverW).
+			Height(coverH).
+			Align(lipgloss.Center, lipgloss.Center).
+			Border(lipgloss.RoundedBorder()).
+			Faint(true).
+			Render("🎵\nNo Cover")
 	}
-	return lipgloss.NewStyle().
-		Width(coverW).
-		Height(coverH).
-		Align(lipgloss.Center, lipgloss.Center).
-		Border(lipgloss.RoundedBorder()).
-		Faint(true).
-		Render("🎵\nNo Cover")
+	if m.height > 0 {
+		if midH := m.middleHeight(); midH < strings.Count(s, "\n")+1 {
+			lines := strings.Split(s, "\n")
+			s = strings.Join(lines[:midH], "\n")
+		}
+	}
+	return s
 }
 
 // percent 计算进度百分比并 clamp 到 [0,1]。

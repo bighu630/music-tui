@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"music-tui/lyrics"
 	"music-tui/model"
@@ -306,6 +307,50 @@ func TestHomeViewFillsScreen(t *testing.T) {
 	}
 }
 
+// TestHomeViewNarrowWindow 窄窗口布局（审查 Major 3）：封面占位框 19 行
+// （coverH17+边框2）/真实封面 17 行在 lipgloss.Place 中不截断，中间区溢出
+// 会把进度条/按钮行推出可视区（回归：setSize(60,10) 曾渲染 21 行）。
+// 修复后：view() 行数必须 == height，进度条/按钮行保持在倒数两行，无 panic。
+func TestHomeViewNarrowWindow(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", err: lyrics.ErrNotFound}) // 占位封面（19 行）
+
+	for _, size := range []struct{ w, h int }{
+		{60, 10}, // 窄：中间区 8 行 < 封面 19 行
+		{40, 5},  // 极窄：中间区 3 行
+	} {
+		m.home = m.home.setSize(size.w, size.h)
+		lines := strings.Split(m.home.view(), "\n")
+		if len(lines) != size.h {
+			t.Errorf("setSize(%d,%d) 占位封面 view 行数 = %d, want %d", size.w, size.h, len(lines), size.h)
+		}
+		if !strings.Contains(lines[len(lines)-2], "●") {
+			t.Errorf("setSize(%d,%d) 倒数第 2 行应为进度条行: %q", size.w, size.h, lines[len(lines)-2])
+		}
+		if !strings.Contains(lines[len(lines)-1], "⏮") {
+			t.Errorf("setSize(%d,%d) 最后一行应为按钮行: %q", size.w, size.h, lines[len(lines)-1])
+		}
+	}
+
+	// 真实封面缓存（17 行 halfblocks 整块渲染串）同样按行截断
+	pngPath := filepath.Join(t.TempDir(), "cover.png")
+	writeTestPNG(t, pngPath)
+	m, _ = update(m, coverResultMsg{trackID: "t1", path: pngPath})
+	for _, size := range []struct{ w, h int }{{60, 10}, {40, 5}} {
+		m.home = m.home.setSize(size.w, size.h) // setSize 会重渲封面并回填缓存
+		if m.home.coverRenderCache == "" {
+			t.Fatalf("setSize(%d,%d) 后封面缓存应为非空", size.w, size.h)
+		}
+		lines := strings.Split(m.home.view(), "\n")
+		if len(lines) != size.h {
+			t.Errorf("setSize(%d,%d) 真实封面 view 行数 = %d, want %d", size.w, size.h, len(lines), size.h)
+		}
+	}
+}
+
 // TestHomeMiddleAreaSideBySide 中间区：封面占位框（No Cover）与歌词提示
 // （暂无歌词）水平并排——出现在同一行。
 func TestHomeMiddleAreaSideBySide(t *testing.T) {
@@ -370,6 +415,10 @@ func TestHomeBottomControlRows(t *testing.T) {
 	if !strings.Contains(barLine, "/") {
 		t.Errorf("进度条行应含时间分隔 /: %q", barLine)
 	}
+	// 进度条行可见宽 == 页面宽（Nit 5：barW 与渲染间隔统一后无 1 列差）
+	if w := ansi.StringWidth(barLine); w != m.home.width {
+		t.Errorf("进度条行可见宽 = %d, want %d（页面宽）", w, m.home.width)
+	}
 	btnLine := lines[len(lines)-1]
 	for _, icon := range []string{"⏮", "⏯", "⏭", "🔁"} {
 		if !strings.Contains(btnLine, icon) {
@@ -388,6 +437,48 @@ func TestHomeBottomControlRows(t *testing.T) {
 	btnLine = strings.Split(m.home.view(), "\n")[len(lines)-1]
 	if !strings.Contains(btnLine, "3/12 · 顺序") {
 		t.Errorf("按钮行应含队列信息 3/12 · 顺序: %q", btnLine)
+	}
+}
+
+// TestHomeModeKeyCycles 首页 m 键三态循环切换模式（Sequential→Shuffle→
+// RepeatOne→Sequential）。与队列页 s 键语义一致：模式是全局队列属性，
+// 无曲目时也应能切换（root.cycleMode 不依赖当前播放）。
+func TestHomeModeKeyCycles(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	// 三态循环
+	for i, want := range []queue.Mode{queue.Shuffle, queue.RepeatOne, queue.Sequential} {
+		m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+		found := false
+		for _, msg := range execCmds(cmd) {
+			if mm, ok := msg.(toggleModeMsg); ok {
+				found = true
+				m, _ = update(m, mm)
+			}
+		}
+		if !found {
+			t.Fatalf("第 %d 次按 m 应产生 toggleModeMsg", i)
+		}
+		if m.queue.Mode() != want {
+			t.Fatalf("第 %d 次按 m 后 Mode = %v, want %v", i, m.queue.Mode(), want)
+		}
+	}
+
+	// 无曲目：m 键也应触发（与队列页 s 键一致）
+	m.state = model.PlaybackState{}
+	m.home = m.home.syncState(m.state)
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	found := false
+	for _, msg := range execCmds(cmd) {
+		if _, ok := msg.(toggleModeMsg); ok {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("无曲目时按 m 应产生 toggleModeMsg")
 	}
 }
 

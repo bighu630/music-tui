@@ -182,6 +182,40 @@ func TestResumeEndedSingleTrackRestartsCurrent(t *testing.T) {
 	}
 }
 
+// TestResumeSuccessSetsLoopPerMode 续播恢复成功后按当前模式补 SetLoop
+// （审查 Minor 4）：beginPlay 路径有显式 SetLoop，但恢复路径（PlayPaused
+// 静默加载）此前漏设——单曲循环模式下恢复会丢失 mpv loop-file 语义。
+// fakePlayer.lastLoop 可断言恢复成功后 SetLoop 的值与模式一致。
+func TestResumeSuccessSetsLoopPerMode(t *testing.T) {
+	cases := []struct {
+		name string
+		mode queue.Mode
+		want bool
+	}{
+		{"sequential", queue.Sequential, false},
+		{"shuffle", queue.Shuffle, false},
+		{"repeatone", queue.RepeatOne, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, fp := newResumeTestModel(t, sessionState(10, false), nil)
+			m.queue.SetMode(tc.mode)
+			msgs := execCmds(resumeCmd(m))
+			if len(msgs) == 0 {
+				t.Fatal("resumeCmd 未返回 resumeResultMsg")
+			}
+			m, _ = update(m, msgs[0])
+			loop, ok := fp.lastLoop()
+			if !ok {
+				t.Fatal("恢复成功后应调用 SetLoop")
+			}
+			if loop != tc.want {
+				t.Errorf("恢复成功后 lastLoop = %v, want %v（模式 %v）", loop, tc.want, tc.mode)
+			}
+		})
+	}
+}
+
 // TestResumeFailureResets 恢复加载失败 → 状态重置 + 队列清空 + 错误横幅。
 func TestResumeFailureResets(t *testing.T) {
 	m, fp := newResumeTestModel(t, sessionState(66.6, false), nil)

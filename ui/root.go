@@ -131,6 +131,11 @@ type Model struct {
 	// 播放失败自动重试状态
 	retryCount int // 当前曲目已自动重试次数（新曲加载成功/结束/手动播放时重置）
 	playGen    int // 播放代际计数器：每次 beginPlay 自增；过期重试消息（用户已换曲）丢弃
+	// failedTracks 本轮取流失败（重试耗尽被跳过）的曲目 ID 集合：
+	// 队列回绕时防止“失败→跳过→回绕→再失败”无限交替重播死循环
+	// （回归：TestLoadFailAllTracksFailStopsLoop）。TrackStartedEvent 清空——
+	// 任何曲目加载成功即视为新一轮，集合作废。
+	failedTracks map[string]bool
 
 	resume *resumeInfo // 续播恢复信息（NewModel 填充，Init 消费；nil = 无会话）
 	// resuming 续播恢复进行中标记：恢复加载（PlayPaused 静默加载）撞取流失败时
@@ -153,19 +158,20 @@ type Model struct {
 // mpv 的静默加载由 Init 返回的 resumeCmd 完成。
 func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store, sess *session.Store, onTrack func(*model.Track)) Model {
 	m := Model{
-		player:      p,
-		lyrics:      l,
-		cover:       c,
-		history:     h,
-		queue:       queue.New(),
-		session:     sess,
-		onTrack:     onTrack,
-		current:     pageHome,
-		hoverTab:    -1,
-		home:        newHomeModel(p),
-		searchPage:  newSearchModel(s),
-		historyPage: newHistoryModel(),
-		queuePage:   newQueueModel(),
+		player:       p,
+		lyrics:       l,
+		cover:        c,
+		history:      h,
+		queue:        queue.New(),
+		session:      sess,
+		onTrack:      onTrack,
+		current:      pageHome,
+		hoverTab:     -1,
+		failedTracks: map[string]bool{},
+		home:         newHomeModel(p),
+		searchPage:   newSearchModel(s),
+		historyPage:  newHistoryModel(),
+		queuePage:    newQueueModel(),
 	}
 	// 续播恢复：会话存在且队列有当前曲目才恢复；否则丢弃会话从空态开始
 	if st := sess.State(); st != nil {
@@ -349,6 +355,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state.Track == nil {
 			return m, nil
 		}
+		// 恢复成功：按当前模式补 SetLoop（beginPlay 有显式 SetLoop，恢复路径
+		// 此前漏设——单曲循环模式下恢复会丢失 mpv loop-file 语义；回归：
+		// TestResumeSuccessSetsLoopPerMode）。失败仅记 lastError 不阻断恢复。
+		if err := m.player.SetLoop(m.queue.Mode() == queue.RepeatOne); err != nil {
+			m.lastError = "设置循环失败: " + err.Error()
+		}
 		return m, tea.Batch(
 			fetchLyricsCmd(m.lyrics, *m.state.Track),
 			fetchCoverCmd(m.cover, *m.state.Track),
@@ -497,8 +509,9 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.state.Playing = ev.Playing
 		m.home = m.home.syncState(m.state)
 	case player.TrackStartedEvent:
-		m.retryCount = 0   // 新曲加载成功，重试预算重置
-		m.resuming = false // 恢复加载成功：进入正常播放态，恢复上下文作废
+		m.retryCount = 0                   // 新曲加载成功，重试预算重置
+		m.failedTracks = map[string]bool{} // 任何曲目加载成功 = 新一轮：本轮失败集合作废
+		m.resuming = false                 // 恢复加载成功：进入正常播放态，恢复上下文作废
 		m.ended = false
 		// 仅在拿到真实时长时覆盖：Duration=0 表示 observe 与 Get 兜底
 		// 均失败（直播/特殊流），此时保留搜索元数据提供的时长，避免被抹零。
@@ -572,8 +585,10 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 			} else if tr, ok := m.queue.Next(); ok {
 				skip = &tr
 			}
-			if skip != nil && (m.state.Track == nil || skip.ID != m.state.Track.ID) {
+			if skip != nil && (m.state.Track == nil || skip.ID != m.state.Track.ID) && !m.failedTracks[skip.ID] {
 				// 跳过失败曲目继续连播（横幅保留告知用户哪首失败）。
+				// 目标曲目已在本轮失败集合中（队列回绕撞回已失败曲目）：不跳，
+				// 走下方停止路径，避免无限交替重播（回归：TestLoadFailAllTracksFailStopsLoop）。
 				m2, cmd := m.skipFailedTrack(*skip, hint)
 				return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
 			}
@@ -638,6 +653,11 @@ func loadFailureHint(fileErr string) string {
 func (m Model) skipFailedTrack(tr model.Track, hint string) (Model, tea.Cmd) {
 	failed := m.state.Track
 	m.retryCount = 0
+	// 本轮已证明取流失败的曲目记入失败集合：队列回绕再次撞上它时停止而非重播
+	//（集合在 TrackStartedEvent 清空：后续某曲成功加载即新一轮）。
+	if failed != nil {
+		m.failedTracks[failed.ID] = true
+	}
 	m2, cmd := m.beginPlay(tr)
 	failedTitle := "当前歌曲"
 	if failed != nil {

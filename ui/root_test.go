@@ -1059,6 +1059,55 @@ func TestRetryPlayClearsQueueSkip(t *testing.T) {
 	}
 }
 
+// 回归（审查 Blocker 1）：队列多曲全部取流失败 → 无限交替重播死循环。
+// 队列 [t1,t2] 两首都失败：t1 重试耗尽 → 跳 t2（记录 t1 本轮失败）→ t2 耗尽
+// → Next() 回绕返回 t1（ID 不同，同 ID 防护不拦）→ 若继续交替，playCount
+// 无限增长、ended 永不置位。修复：本轮失败 ID 集合——跳过前检查目标曲目
+// 已在失败集合中则不跳，走停止路径（ended=true + 横幅 + Playing=false）。
+func TestLoadFailAllTracksFailStopsLoop(t *testing.T) {
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	defer func() { retryBackoff = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m.queue.Add(testTrack("t2")) // 队列 [t1, t2]
+
+	loadErr := player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}
+	// t1 两次重试均失败
+	for i := 0; i < 2; i++ {
+		m, cmd = update(m, playerEventMsg{ev: loadErr})
+		m = execRetryBatch(m, cmd, fp)
+	}
+	// 第 3 次失败：t1 耗尽 → 跳过到 t2（本轮失败集合记入 t1）
+	m, _ = update(m, playerEventMsg{ev: loadErr})
+	if fp.lastPlayed() != testTrack("t2").URL {
+		t.Fatalf("t1 耗尽应跳到 t2: %q", fp.lastPlayed())
+	}
+	// t2 两次重试均失败
+	for i := 0; i < 2; i++ {
+		m, cmd = update(m, playerEventMsg{ev: loadErr})
+		m = execRetryBatch(m, cmd, fp)
+	}
+	// 第 3 次失败：t2 耗尽，Next() 回绕返回 t1——t1 已在失败集合，必须停止
+	//（而非跳回 t1 继续交替重播），playCount 有界。
+	m, _ = update(m, playerEventMsg{ev: loadErr})
+	if fp.playCount() != 6 {
+		t.Errorf("全部取流失败后 playCount = %d, want 6（有界，不再增长）", fp.playCount())
+	}
+	if !m.ended {
+		t.Error("全部取流失败后 ended 应为 true")
+	}
+	if m.state.Playing {
+		t.Error("全部取流失败后 Playing 应为 false")
+	}
+	if !strings.Contains(m.lastError, "已重试 2 次") {
+		t.Errorf("lastError = %q, want 含“已重试 2 次”", m.lastError)
+	}
+}
+
 // 回归（P1 分支镜像）：重试耗尽跳过时若存在删除解耦标记（queueSkip=true、
 // 指针已顺延），应播放顺延曲目（Current 兜底）而非 Next()——不跳过头
 // （镜像 TrackEnded 的解耦逻辑）。场景：t1 两次重试均失败后删除 t1

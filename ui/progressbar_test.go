@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -63,6 +64,36 @@ func TestLineProgress(t *testing.T) {
 				t.Errorf("lineProgressBar(%d, %v) 未播灰字符数 = %d, want %d", c.width, c.pct, n, c.wantGray)
 			}
 		})
+	}
+}
+
+// TestProgressPreRenderedBytes 预渲染常量必须与逐字符 NewStyle().Render 的
+// 输出字节一致（Nit 6 预渲染是纯性能优化，不得改变渲染输出）。
+func TestProgressPreRenderedBytes(t *testing.T) {
+	for i, c := range progressPalette {
+		if got := progressFilledChars()[i]; got != lipgloss.NewStyle().Foreground(c).Render("━") {
+			t.Errorf("progressFilledChars[%d] 与逐字符渲染不一致: %q", i, got)
+		}
+		if got := progressSliderChars()[i]; got != lipgloss.NewStyle().Foreground(c).Render("●") {
+			t.Errorf("progressSliderChars[%d] 与逐字符渲染不一致: %q", i, got)
+		}
+	}
+	// gradientIndex/sliderIndex 与 color 包装函数的一致性（防索引越界/错位）
+	for total := 1; total <= 30; total++ {
+		for i := 0; i < total; i++ {
+			if got := gradientIndex(i, total); got < 0 || got >= len(progressPalette) {
+				t.Fatalf("gradientIndex(%d, %d) = %d 越界", i, total, got)
+			}
+			if gradientColor(i, total) != progressPalette[gradientIndex(i, total)] {
+				t.Errorf("gradientColor(%d, %d) 与 index 不一致", i, total)
+			}
+		}
+		if s := sliderIndex(total); s < 0 || s >= len(progressPalette) {
+			t.Fatalf("sliderIndex(%d) = %d 越界", total, s)
+		}
+	}
+	if sliderColor(0) != progressPalette[0] {
+		t.Error("sliderColor(0) 应用色阶首色")
 	}
 }
 
