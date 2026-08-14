@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/png"
 	"math"
@@ -634,7 +635,7 @@ func TestHomeLyricsFillWhenMany(t *testing.T) {
 
 	var sb strings.Builder
 	for i := 0; i < 60; i++ {
-		sb.WriteString("[00:10.00]歌词行 ")
+		sb.WriteString(fmt.Sprintf("[%02d:%02d.00]歌词行 ", (10+i*5)/60, (10+i*5)%60))
 		sb.WriteString(string(rune('A' + i%26)))
 		sb.WriteString("\n")
 	}
@@ -646,8 +647,8 @@ func TestHomeLyricsFillWhenMany(t *testing.T) {
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 25, Duration: 200}})
 	m.home = m.home.setSize(120, 39)
 
-	if m.home.lyricView.Height != 37 {
-		t.Errorf("歌词超多时 lyricView.Height = %d, want 37（占满中间区）", m.home.lyricView.Height)
+	if m.home.lyricView.Height != 21 {
+		t.Errorf("歌词超多时 lyricView.Height = %d, want 21（视口上限）", m.home.lyricView.Height)
 	}
 }
 
@@ -728,4 +729,116 @@ func TestHomeNoLyricsCenteredOnScreen(t *testing.T) {
 		return
 	}
 	t.Error("view 中未找到暂无歌词")
+}
+
+// TestHomeLyricsViewport21 回归：歌词视口最多 21 行（当前行上下各 10 行），
+// 大窗口（中间区高 > 21）不占满整列；行数不足时收缩到行数。
+func TestHomeLyricsViewport21(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	// 60 行歌词（超多，时间戳递增）
+	var sb strings.Builder
+	for i := 0; i < 60; i++ {
+		sb.WriteString(fmt.Sprintf("[%02d:%02d.00]歌词行 ", (10+i*5)/60, (10+i*5)%60))
+		sb.WriteString(string(rune('A' + i%26)))
+		sb.WriteString("\n")
+	}
+	ly, _ := lyrics.ParseLRC([]byte(sb.String()))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m.home = m.home.setSize(120, 60) // midH = 58 > 21
+	if got := m.home.lyricView.Height; got != 21 {
+		t.Errorf("歌词超多时视口高 = %d, want 21（上限）", got)
+	}
+	// 当前行推进 → 滚动到正中（上下各 10 行）
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 155, Duration: 2000}})
+	if got := m.home.lyricView.YOffset; got != 19 { // LineAt(155)=29 → 29-10
+		t.Errorf("YOffset = %d, want 19", got)
+	}
+}
+
+// TestHomeLyricsCurrentLineCentered 回归：歌词 > 21 行时当前行滚动到视口正中
+// （上 10 下 10）；行数不足时 clamp（首行 offset 0）。
+func TestHomeLyricsCurrentLineCentered(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	var sb strings.Builder
+	for i := 0; i < 60; i++ {
+		sb.WriteString(fmt.Sprintf("[%02d:%02d.00]歌词行", (10+i*5)/60, (10+i*5)%60))
+		sb.WriteString(string(rune('A' + i%26)))
+		sb.WriteString("\n")
+	}
+	ly, _ := lyrics.ParseLRC([]byte(sb.String()))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m.home = m.home.setSize(120, 60)
+
+	// 第 30 行（0-based 29，155s）：offset = 29 - 10 = 19 → 当前行在视口第 10 行（正中）
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 155, Duration: 2000}})
+	if got := m.home.lyricView.YOffset; got != 19 {
+		t.Errorf("第 30 行 YOffset = %d, want 19（视口正中）", got)
+	}
+	// 第 50 行（idx 49）：offset = 49-10 = 39 = maxYOffset（59-21+1？60-21=39）→ 底部
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 495, Duration: 2000}})
+	if got := m.home.lyricView.YOffset; got != 39 {
+		t.Errorf("第 50 行 YOffset = %d, want 39（maxYOffset）", got)
+	}
+	// 首行（第一行 10s 后）：offset = 0-10 → clamp 到 0
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
+	if got := m.home.lyricView.YOffset; got != 0 {
+		t.Errorf("首行 YOffset = %d, want 0", got)
+	}
+	// 回到第 30 行（wheel 测试基线一致性）
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 155, Duration: 2000}})
+}
+
+// TestHomeLyricsWheelScroll 回归：滚轮在歌词列区域滚动视口（手动查看）；
+// 歌词列区域外/非歌词态忽略。
+func TestHomeLyricsWheelScroll(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	var sb strings.Builder
+	for i := 0; i < 60; i++ {
+		sb.WriteString(fmt.Sprintf("[%02d:%02d.00]歌词行", (10+i*5)/60, (10+i*5)%60))
+		sb.WriteString(string(rune('A' + i%26)))
+		sb.WriteString("\n")
+	}
+	ly, _ := lyrics.ParseLRC([]byte(sb.String()))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m.home = m.home.setSize(120, 60)
+	// 先滚动到中间（第 30 行居中，YOffset 19）
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 155, Duration: 2000}})
+	base := m.home.lyricView.YOffset
+
+	// 歌词列区域滚轮向下：offset 增加（上限 clamp）
+	m, _ = update(m, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, X: 60, Y: 20})
+	if got := m.home.lyricView.YOffset; got <= base {
+		t.Errorf("滚轮向下 YOffset = %d, want > %d", got, base)
+	}
+	// 滚轮向上：offset 减少
+	mid := m.home.lyricView.YOffset
+	m, _ = update(m, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, X: 60, Y: 20})
+	if got := m.home.lyricView.YOffset; got >= mid {
+		t.Errorf("滚轮向上 YOffset = %d, want < %d", got, mid)
+	}
+	// 封面区域（X < coverW+2）忽略
+	before := m.home.lyricView.YOffset
+	m, _ = update(m, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, X: 5, Y: 20})
+	if got := m.home.lyricView.YOffset; got != before {
+		t.Errorf("封面区域滚轮不应滚动, got %d", got)
+	}
+	// 无歌词态（loading）忽略
+	m2, _ := update(m, lyricsResultMsg{trackID: "t1", err: lyrics.ErrNotFound})
+	before = m2.home.lyricView.YOffset
+	m2, _ = update(m2, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, X: 60, Y: 20})
+	if got := m2.home.lyricView.YOffset; got != before {
+		t.Errorf("无歌词态滚轮不应滚动, got %d", got)
+	}
 }

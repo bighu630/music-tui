@@ -219,6 +219,20 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 		// 屏幕坐标 → 页面坐标：Tab 栏 2 行（标签 + 分隔线），页面从屏幕行 2 起。
 		// （回归：曾按 1 行 Tab 换算（-1），进度条/按钮点击整体偏移 1 行不命中。）
 		pageY := msg.Y - 2
+		// 滚轮：歌词视口手动滚动（仅歌词列区域：X ≥ 封面列+gap，Y 在中间区）。
+		// 播放推进时 scrollLyricsTo 会重新把当前行居中（自动跟随优先）。
+		if tea.MouseEvent(msg).IsWheel() {
+			if m.lyricsState == lyricsSynced || m.lyricsState == lyricsPlain {
+				if pageY >= 0 && pageY < m.height-2 && msg.X >= coverW+2 {
+					if msg.Button == tea.MouseButtonWheelUp {
+						m.lyricView.SetYOffset(m.lyricView.YOffset - 3)
+					} else if msg.Button == tea.MouseButtonWheelDown {
+						m.lyricView.SetYOffset(m.lyricView.YOffset + 3)
+					}
+				}
+			}
+			return m, nil
+		}
 		pressLeft := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft
 		switch {
 		case pageY == m.height-2 && pressLeft:
@@ -407,12 +421,20 @@ func (m homeModel) lyricLineCount() int {
 // lyricsHeight 歌词视口高度：歌词行数已知且少于中间区高时收缩到行数
 // （歌词列内容垂直居中，而非顶部对齐）；行数未知/超多时占满中间区
 // （viewport 滚动 + scrollLyricsTo 当前行居中）。
+// lyricMaxLines 歌词视口最大行数：当前行恒居中（上 10 下 10）。
+// 窄窗口（中间区高 < 21）时视口收缩到中间区高。
+const lyricMaxLines = 21
+
 func (m homeModel) lyricsHeight() int {
 	midH := m.middleHeight()
-	if n := m.lyricLineCount(); n > 0 && n < midH {
+	maxH := midH
+	if maxH > lyricMaxLines {
+		maxH = lyricMaxLines
+	}
+	if n := m.lyricLineCount(); n > 0 && n < maxH {
 		return n
 	}
-	return midH
+	return maxH
 }
 
 // rebuildLyrics 用当前高亮行重渲染歌词内容。
@@ -438,6 +460,8 @@ func (m *homeModel) scrollLyricsTo(idx int) {
 	if m.lyricView.Height <= 0 {
 		return
 	}
+	// 当前行恒在视口正中（21 行视口 → 上下各 10 行）；行数不足时
+	// 收缩视口 + clamp 到 0（歌词块整体居中，当前行尽量居中）。
 	offset := idx - m.lyricView.Height/2
 	if offset < 0 {
 		offset = 0
