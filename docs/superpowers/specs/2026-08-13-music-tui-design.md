@@ -541,3 +541,7 @@ cache/
 | cache | SafeName 边界；LRU 淘汰/命中刷新/Remove/Prune（缺文件清条目、超限淘汰）；索引 roundtrip/损坏报错；下载器 httptest（200/404/500 重试后成功/超时）、取直链注入 stub；Manager 并发 -race、in-flight 去重、Disabled 态 |
 | ui | 命中播本地路径、未命中播 URL + 后台下载启动不阻塞、LoadFailed 损坏回退删条目重试走 URL、恢复命中 PlayPaused 本地路径 |
 | main | loadConfig 缺失/损坏备份重建（同 loadHistory 模式） |
+
+### 17.6 已知限制
+- **LoadFailed 陈旧事件可能误删新曲目的有效缓存**：end-file error 不携带曲目信息，若旧曲失败事件在 tea 队列中晚于新曲 beginPlay 被处理，会按 `m.state.Track` 删除新曲的缓存条目（窗口毫秒级、后果自愈——重下即可，重试播放逻辑不受影响）。修复需 player 层为 loadfile 维护单调序号；最小 UI 层方案已记录：Model 加 `cacheHitGen`，beginPlay 命中分支记录 `cacheHitGen = playGen`，LoadFailed 移除块追加 `cacheHitGen == playGen` 条件（利用既有 playGen，无需改 player 包）
+- **多实例共享缓存目录**：与 index.json/session.json 同款单实例假设，多实例并发写索引有竞态
