@@ -116,3 +116,12 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [ ] 已知限制（reviewer 接受跳过）：按钮命中区假设图标单宽，双宽字体终端下模式按钮命中可能偏 1 格（N7 有意未修，可用 m/s 键兜底）
 >>>>>>> feat/home-layout-redesign
 >>>>>>> feat/home-layout-redesign
+
+## YouTube Music 播放列表同步（追加需求，用户已确认方案）
+
+- [x] 方案调研与设计（browseId 修正 FEmusic_liked_playlists 等实测结论）
+- [x] 实现：ytm 包（cookie 导出解密/browse 客户端/同步编排）commit 5464c73
+- [x] 实现：search.FetchPlaylist（-J flat + cookies 参数）commit 0539eb8
+- [x] 实现：UI 集成（登录设置/同步全部/URL 导入/刷新）commit 77a1d27
+- [x] 全量验证 build/vet/test -race 全绿
+- [ ] 验收：用户实际登录（选浏览器或 cookies.txt）→ 同步全部歌单 → 播放歌单内歌曲 → 刷新去重 → 无 cookie 时 URL 导入公开歌单（需用户配合）
