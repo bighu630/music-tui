@@ -341,7 +341,9 @@ func TestShiftTabSwitchesPagesReverse(t *testing.T) {
 	}
 }
 
-// 搜索输入框聚焦时 Ctrl+←/→ 仍应全局切页（textinput 无 ctrl+箭头绑定，无冲突）。
+// 搜索输入框聚焦时 Ctrl+←/→ 仍应全局切页（root 在 delegate 前消费按键，
+// textinput 的 ctrl+←/→ 词跳转绑定收不到；代价是输入框内失去 ctrl+←/→
+// 词跳转，alt+←/→ 仍可用）。
 func TestCtrlArrowsSwitchPagesWhenSearchInputFocused(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
