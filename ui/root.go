@@ -13,11 +13,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"music-tui/cache"
 	"music-tui/cover"
 	"music-tui/history"
 	"music-tui/lyrics"
 	"music-tui/model"
 	"music-tui/player"
+	"music-tui/playlists"
 	"music-tui/queue"
 	"music-tui/search"
 	"music-tui/session"
@@ -90,8 +92,10 @@ type historyResultMsg struct {
 }
 
 // resumeResultMsg 续播恢复结果（PlayPaused（含定位）成败）。
+// fromCache 标记本次恢复是否命中本地缓存（命中 → 失败时移除损坏缓存）。
 type resumeResultMsg struct {
-	err error
+	err       error
+	fromCache bool
 }
 
 // resumeInfo 待恢复的会话信息（NewModel 从 session 填充，Init 消费）。
@@ -117,6 +121,10 @@ type Model struct {
 	history *history.Store
 	queue   *queue.Queue
 	session *session.Store
+	pls     *playlists.Store
+
+	cache            *cache.Manager // 音频缓存（命中优先本地文件；未命中后台下载）
+	playingFromCache bool           // 当前曲目是否播放自缓存文件（LoadFailed 时据此移除损坏条目）
 
 	state     model.PlaybackState
 	current   page
@@ -148,11 +156,11 @@ type Model struct {
 	onTrack func(*model.Track) // 外部消费者（MPRIS）感知当前曲目；nil 安全
 }
 
-// NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h/sess 为具体服务，
+// NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h/sess/pls/cm 为具体服务，
 // onTrack 在播放状态变化时同步回调当前曲目（nil 表示无曲目；可为 nil）。
 // 若 sess 存在已保存会话（队列 + 进度），同步恢复队列与播放状态（暂停态），
 // mpv 的静默加载由 Init 返回的 resumeCmd 完成。
-func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store, sess *session.Store, onTrack func(*model.Track)) Model {
+func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store, sess *session.Store, pls *playlists.Store, cm *cache.Manager, onTrack func(*model.Track)) Model {
 	m := Model{
 		player:      p,
 		lyrics:      l,
@@ -160,6 +168,8 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 		history:     h,
 		queue:       queue.New(),
 		session:     sess,
+		pls:         pls,
+		cache:       cm,
 		onTrack:     onTrack,
 		current:     pageHome,
 		hoverTab:    -1,
@@ -308,10 +318,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
 
 	case resumeResultMsg:
+		// 命中/未命中标记回填（成功与失败分支都先同步，失败时据此移除损坏缓存）。
+		m.playingFromCache = msg.fromCache
 		if msg.err != nil {
 			// 恢复失败：状态重置（当前曲播放不了），但队列保留展示——用户仍
 			// 可查看/跳转播放其他曲目；磁盘会话保留，下次启动重试（mpv 瞬时
 			// 故障可恢复），用户播放新曲或退出时自然覆盖/清除。
+			// 命中缓存仍失败 → 缓存文件损坏：移除条目，下次恢复/播放走网络。
+			if msg.fromCache && m.resume != nil {
+				m.cache.Remove(m.resume.track.ID)
+			}
 			m.resuming = false // 恢复上下文作废
 			m.lastError = "恢复播放失败: " + msg.err.Error()
 			m.state = model.PlaybackState{}
@@ -513,6 +529,12 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		// 其他错误（连接断开/重连失败）保持原有行为，不自动重试。
 		var le *player.LoadFailedError
 		if errors.As(ev.Err, &le) {
+			// 播放自缓存文件时取流失败 → 缓存条目损坏（下载不完整/已过期）：
+			// 移除条目 + 复位标记，后续重试/跳过自然回退网络 URL 重新取流。
+			if m.playingFromCache && m.state.Track != nil {
+				m.cache.Remove(m.state.Track.ID)
+				m.playingFromCache = false
+			}
 			// 续播恢复（PlayPaused 静默加载）期间撞取流失败：不自动重试——
 			// 恢复上下文已作废（重试会走 beginPlay→Play()：发声、从 0:00、
 			// 非暂停，静默丢弃恢复语义），保留“恢复播放失败”语义：状态重置 + 横幅
@@ -657,6 +679,8 @@ func (m Model) playQueueTrack() (Model, tea.Cmd) {
 // root_test 的 TestPlayFlow 在 update 返回后立即断言 playCount，故必须同步）、
 // 刷新队列展示；成功时并行触发 歌词/封面/历史 三个异步 cmd，
 // Play 失败时跳过全部异步 cmd，状态重置为空回到"未在播放"空态 + 错误横幅。
+// 音频缓存：命中 → 播本地文件（playingFromCache 置位，后续 LoadFailed 时
+// 据此移除损坏条目）；未命中 → 播网络 URL + 后台异步下载（不阻塞播放）。
 // 注意：不重置 retryCount——自动重试也走本路径，重置会让重试预算
 // 永不耗尽（回归：TestLoadFailRetriesExhaustedSkipsInQueue/StopsSingle）；
 // 预算在 TrackStarted/TrackEnded/手动播放入口重置。
@@ -668,7 +692,15 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 	m.state = model.PlaybackState{Track: &track, Playing: true, Duration: track.Duration}
 	m.lastError = ""
 	m.home = m.home.resetForTrack(&track)
-	if err := m.player.Play(track.URL); err != nil {
+	target := track.URL
+	if path, ok := m.cache.Lookup(track.ID); ok {
+		target = path
+		m.playingFromCache = true
+	} else {
+		m.playingFromCache = false
+		m.cache.CacheAsync(track) // 后台下载，不阻塞播放
+	}
+	if err := m.player.Play(target); err != nil {
 		m.lastError = "播放失败: " + err.Error()
 		m.state = model.PlaybackState{}
 		m.home = m.home.syncState(m.state)
@@ -714,15 +746,22 @@ func (m Model) saveSession() {
 
 // resumeCmd 续播恢复：PlayPaused 静默加载当前曲目并定位（不发声；定位随
 // loadfile 的 start= 选项原子完成，避免加载窗口内 seek 被 mpv 拒绝的竞态，
-// 见 mpv.go PlayPaused）。
+// 见 mpv.go PlayPaused）。命中缓存 → 播本地文件（fromCache 标记回填，
+// 失败时据此移除损坏条目）；未命中 → 网络 URL。
 func resumeCmd(m Model) tea.Cmd {
 	track := m.resume.track
 	pos := m.resume.pos
 	return func() tea.Msg {
-		if err := m.player.PlayPaused(track.URL, pos); err != nil {
-			return resumeResultMsg{err: err}
+		target := track.URL
+		fromCache := false
+		if path, ok := m.cache.Lookup(track.ID); ok {
+			target = path
+			fromCache = true
 		}
-		return resumeResultMsg{}
+		if err := m.player.PlayPaused(target, pos); err != nil {
+			return resumeResultMsg{err: err, fromCache: fromCache}
+		}
+		return resumeResultMsg{fromCache: fromCache}
 	}
 }
 

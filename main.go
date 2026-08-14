@@ -13,11 +13,14 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"music-tui/cache"
+	"music-tui/config"
 	"music-tui/cover"
 	"music-tui/history"
 	"music-tui/lyrics"
 	"music-tui/mpris"
 	"music-tui/player"
+	"music-tui/playlists"
 	"music-tui/search"
 	"music-tui/session"
 	"music-tui/ui"
@@ -60,6 +63,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("加载会话失败: %w", err)
 	}
+	pls, err := loadPlaylists(filepath.Join(cfgRoot, "music-tui", "playlists.json"))
+	if err != nil {
+		return fmt.Errorf("加载播放列表失败: %w", err)
+	}
 	cacheRoot, err := os.UserCacheDir()
 	if err != nil {
 		return fmt.Errorf("获取用户缓存目录失败: %w", err)
@@ -68,6 +75,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("初始化封面缓存失败: %w", err)
 	}
+	cfg, err := loadConfig(filepath.Join(cfgRoot, "music-tui", "config.json"))
+	if err != nil {
+		return fmt.Errorf("加载配置失败: %w", err)
+	}
+	cm := loadCache(cfg.Cache, ytdlpPath)
 
 	// 3. 启动 mpv（defer 保证退出时清理进程与 socket）
 	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("music-tui-%d.sock", os.Getpid()))
@@ -94,6 +106,8 @@ func run() error {
 		covers,
 		hist,
 		sess,
+		pls,
+		cm,
 		mprisSrv.SetTrack,
 	)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
@@ -120,6 +134,68 @@ func loadHistory(path string) (*history.Store, error) {
 		return nil, retryErr
 	}
 	return store, nil
+}
+
+// loadPlaylists 加载播放列表文件；文件损坏（崩溃/断电截断）时备份后重建，
+// 避免缓存文件阻止应用启动（与 loadHistory 同款降级）。
+func loadPlaylists(path string) (*playlists.Store, error) {
+	store, err := playlists.NewStore(path)
+	if err == nil {
+		return store, nil
+	}
+	backup := fmt.Sprintf("%s.corrupt-%d", path, time.Now().UnixNano())
+	if berr := os.Rename(path, backup); berr != nil {
+		return nil, err // 备份失败（如权限问题），按原样返回错误
+	}
+	fmt.Fprintf(os.Stderr, "music-tui: 警告：播放列表文件损坏，已备份至 %s 并重建\n", backup)
+	store, retryErr := playlists.NewStore(path)
+	if retryErr != nil {
+		return nil, retryErr
+	}
+	return store, nil
+}
+
+// loadConfig 加载配置文件；文件损坏（崩溃/断电截断）时备份后重建，
+// 避免配置文件阻止应用启动（与 loadHistory 同款降级）。
+func loadConfig(path string) (*config.Config, error) {
+	cfg, err := config.Load(path)
+	if err == nil {
+		return cfg, nil
+	}
+	backup := fmt.Sprintf("%s.corrupt-%d", path, time.Now().UnixNano())
+	if berr := os.Rename(path, backup); berr != nil {
+		return nil, err // 备份失败（如权限问题），按原样返回错误
+	}
+	fmt.Fprintf(os.Stderr, "music-tui: 警告：配置文件损坏，已备份至 %s 并重建\n", backup)
+	cfg, retryErr := config.Load(path)
+	if retryErr != nil {
+		return nil, retryErr
+	}
+	return cfg, nil
+}
+
+// loadCache 初始化音频缓存：索引文件损坏（崩溃/断电截断）时备份后重试一次；
+// 仍失败仅警告并降级为禁用态缓存——缓存绝不影响播放主功能（不阻止启动）。
+func loadCache(opts cache.Options, ytdlpPath string) *cache.Manager {
+	cm, err := cache.New(opts, ytdlpPath)
+	if err == nil {
+		return cm
+	}
+	// 索引文件损坏（cache 包内部文件名 index.json）→ 备份后重试
+	if opts.Dir != "" {
+		idxPath := filepath.Join(opts.Dir, "index.json")
+		if _, serr := os.Stat(idxPath); serr == nil {
+			backup := fmt.Sprintf("%s.corrupt-%d", idxPath, time.Now().UnixNano())
+			if berr := os.Rename(idxPath, backup); berr == nil {
+				fmt.Fprintf(os.Stderr, "music-tui: 警告：缓存索引损坏，已备份至 %s 并重建\n", backup)
+				if cm, retryErr := cache.New(opts, ytdlpPath); retryErr == nil {
+					return cm
+				}
+			}
+		}
+	}
+	log.Printf("缓存初始化失败（已降级为禁用）: %v", err)
+	return cache.Disabled()
 }
 
 // loadSession 加载会话文件；文件损坏（崩溃/断电截断）时备份后重建，

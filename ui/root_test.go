@@ -13,11 +13,13 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"music-tui/cache"
 	"music-tui/cover"
 	"music-tui/history"
 	"music-tui/lyrics"
 	"music-tui/model"
 	"music-tui/player"
+	"music-tui/playlists"
 	"music-tui/session"
 )
 
@@ -168,8 +170,9 @@ func testTrack(id string) model.Track {
 	}
 }
 
-// newTestModel 组装真实服务（历史/封面用临时目录，歌词指向 404 的假服务器）。
-// onTrack 透传给 NewModel（MPRIS 曲目回调；测试可传 nil 或自定收集）。
+// newTestModel 组装真实服务（历史/封面用临时目录，歌词指向 404 的假服务器，
+// 缓存指向临时目录 + 不存在的 yt-dlp（CacheAsync 后台下载立即失败退出，
+// 无网络无泄漏））。onTrack 透传给 NewModel（MPRIS 曲目回调；测试可传 nil 或自定收集）。
 func newTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, onTrack func(*model.Track)) Model {
 	t.Helper()
 	lyricServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -189,9 +192,17 @@ func newTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, onTrack f
 	if err != nil {
 		t.Fatal(err)
 	}
+	pls, err := playlists.NewStore(filepath.Join(t.TempDir(), "playlists.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, "/nonexistent/yt-dlp")
+	if err != nil {
+		t.Fatal(err)
+	}
 	return NewModel(fp, fa,
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, onTrack)
+		cf, hist, sess, pls, cm, onTrack)
 }
 
 // execCmds 同步执行 tea.Cmd 并收集返回的非 nil 消息（测试用）。
