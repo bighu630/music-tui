@@ -20,6 +20,7 @@ import (
 	"music-tui/player"
 	"music-tui/playlists"
 	"music-tui/queue"
+	"music-tui/search"
 	"music-tui/session"
 )
 
@@ -176,6 +177,11 @@ func (f *fakeSearchAdapter) Search(ctx context.Context, query string) ([]model.T
 		return nil, f.err
 	}
 	return f.tracks, nil
+}
+
+// FetchPlaylist 是最小实现（接口扩展兼容）：返回空歌单，不参与 UI 测试逻辑。
+func (f *fakeSearchAdapter) FetchPlaylist(ctx context.Context, playlistURL string, cookies search.CookieArgs) (model.Playlist, error) {
+	return model.Playlist{}, nil
 }
 
 // ---- 测试工具 ----

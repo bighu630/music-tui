@@ -11,3 +11,10 @@ type Track struct {
 	Source   string  // 来源标识："youtube"（未来可扩展 "netease" 等）
 	CoverURL string  // 封面图 URL（maxresdefault 优先）
 }
+
+// Playlist 一个远端歌单的内容（标题 + 歌曲列表）。
+type Playlist struct {
+	ID     string
+	Title  string
+	Tracks []Track
+}
