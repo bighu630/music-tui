@@ -47,6 +47,8 @@ func (q *Queue) Replace(t model.Track) {
 // ReplaceAll 替换语义：清空队列后用整个播放列表填充，当前指针指向
 // startIdx（播放列表页 Enter：从选中曲目开始连播整个列表）。
 // startIdx 越界时 clamp 到合法范围；空列表清空队列（无当前曲目）。
+// 随机模式下 currentIdx 之后的尾部一并洗牌（同 SetMode 语义），
+// 保证“加载播放列表后随机直接可用”。
 func (q *Queue) ReplaceAll(tracks []model.Track, startIdx int) {
 	q.tracks = append([]model.Track(nil), tracks...)
 	q.currentIdx = -1
@@ -60,6 +62,14 @@ func (q *Queue) ReplaceAll(tracks []model.Track, startIdx int) {
 		startIdx = len(q.tracks) - 1
 	}
 	q.currentIdx = startIdx
+	// 随机模式：复用 SetMode 的 tail-shuffle 语义——选中曲及之前的曲目
+	// 保持原序（不打断刚选中的曲目），只洗牌其后的尾部。
+	if q.mode == Shuffle {
+		tail := q.tracks[q.currentIdx+1:]
+		rand.Shuffle(len(tail), func(i, j int) {
+			tail[i], tail[j] = tail[j], tail[i]
+		})
+	}
 }
 
 // Remove 删除指定下标的曲目。删除当前曲目时顺延下一首成为当前；

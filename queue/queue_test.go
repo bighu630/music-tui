@@ -141,6 +141,36 @@ func TestReplaceAllEmptyClears(t *testing.T) {
 	}
 }
 
+// TestReplaceAllShuffleShufflesTail 回归：随机模式下整列表替换后，当前曲之后的
+// 尾部同样洗牌（复用 SetMode 的 tail-shuffle 语义）——模式保留、currentIdx 正确、
+// 选中曲及之前的曲目保持原序、之后仅曲目集合不变（顺序随机，用集合断言）。
+func TestReplaceAllShuffleShufflesTail(t *testing.T) {
+	q := New()
+	q.Add(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.SetMode(Shuffle) // 有曲目但无当前曲：洗牌全部并进入随机模式
+	tracks := []model.Track{
+		testTrack("a"), testTrack("b"), testTrack("c"),
+		testTrack("d"), testTrack("e"), testTrack("f"), testTrack("g"),
+	}
+	q.ReplaceAll(tracks, 1) // b 当前：尾部 [c..g] 应被洗牌
+	if q.Mode() != Shuffle {
+		t.Errorf("ReplaceAll 不应改变模式: Mode = %v, want Shuffle", q.Mode())
+	}
+	if q.CurrentIndex() != 1 {
+		t.Fatalf("CurrentIndex = %d, want 1", q.CurrentIndex())
+	}
+	got := ids(q.Tracks())
+	if !eq(got[:2], []string{"a", "b"}) {
+		t.Errorf("选中曲及之前曲目应保持原序: %v", got)
+	}
+	tail := append([]string(nil), got[2:]...)
+	sort.Strings(tail)
+	if !eq(tail, []string{"c", "d", "e", "f", "g"}) {
+		t.Errorf("当前曲之后应保持曲目集合: %v, want [c d e f g]", got[2:])
+	}
+}
+
 func TestTracksReturnsCopy(t *testing.T) {
 	q := New()
 	q.Replace(testTrack("a"))
