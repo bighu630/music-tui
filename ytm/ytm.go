@@ -39,6 +39,35 @@ func NewClient(store *Store, fetcher Fetcher) *Client {
 	}
 }
 
+// SetHTTPClient 替换默认 HTTP 客户端（UI 测试注入离线 RoundTripper 用；
+// 传 nil 恢复默认超时客户端）。仅供测试/特殊场景调用，正常使用默认值即可。
+func (c *Client) SetHTTPClient(hc *http.Client) {
+	if hc == nil {
+		hc = &http.Client{Timeout: 30 * time.Second}
+	}
+	c.httpClient = hc
+}
+
+// ---- Store 门面（UI 编排层经 Client 读写登录/同步状态，不直接接触 Store） ----
+
+// Login 返回当前登录配置副本。
+func (c *Client) Login() LoginConfig { return c.store.Login() }
+
+// SetLogin 保存登录配置（自动填充 UpdatedAt）。
+func (c *Client) SetLogin(cfg LoginConfig) error { return c.store.SetLogin(cfg) }
+
+// ClearLogin 清除登录配置（保留 SyncEntry 映射）。
+func (c *Client) ClearLogin() error { return c.store.ClearLogin() }
+
+// SetPastedLogin 保存粘贴的 Cookie header 文本（落盘 cookies 文件 + 配置），
+// 返回实际 cookies 文件路径。
+func (c *Client) SetPastedLogin(header string) (string, error) {
+	return c.store.SetPastedLogin(header)
+}
+
+// SyncEntries 返回全部同步映射副本（保持插入顺序）。
+func (c *Client) SyncEntries() []SyncEntry { return c.store.SyncEntries() }
+
 // VerifyLogin 检查登录态，返回可区分错误：
 // 未登录（ErrNotLoggedIn）/失效（ErrSessionInvalid）/网络错误（透传包装）。
 // 登录有效返回 nil。

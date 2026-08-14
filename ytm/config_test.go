@@ -286,3 +286,44 @@ func TestCookieHeaderBrowserLazyExport(t *testing.T) {
 		t.Errorf("CookieFile = %q, %v", p, err)
 	}
 }
+
+// SetPastedLogin：落盘 cookies 文件（0600）+ 保存配置 + CookieHeader 可派生。
+func TestSetPastedLogin(t *testing.T) {
+	s, path := newTestStore(t)
+	p, err := s.SetPastedLogin("SAPISID=abc; __Secure-3PAPISID=xyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p != filepath.Join(filepath.Dir(path), "ytm-cookies.txt") {
+		t.Errorf("cookies 路径 = %q, want 默认 ytm-cookies.txt", p)
+	}
+	if cfg := s.Login(); cfg.Method != MethodPasted || cfg.CookiesPath != p {
+		t.Errorf("Login = %+v, want MethodPasted", cfg)
+	}
+	fi, err := os.Stat(p)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("cookies 文件应 0600: %v %v", fi, err)
+	}
+	h, err := s.CookieHeader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h, "SAPISID=abc") || !strings.Contains(h, "__Secure-3PAPISID=xyz") {
+		t.Errorf("CookieHeader = %q, want 含两个 cookie", h)
+	}
+	// 再次粘贴覆盖同一文件（幂等）
+	p2, err := s.SetPastedLogin("SAPISID=new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p2 != p {
+		t.Errorf("二次粘贴路径 = %q, want %q", p2, p)
+	}
+	if _, err := s.CookieHeader(); err != nil {
+		t.Errorf("覆盖后 CookieHeader 应可用: %v", err)
+	}
+	// 空文本 → 错误
+	if _, err := s.SetPastedLogin("   "); err == nil {
+		t.Error("空文本应报错")
+	}
+}

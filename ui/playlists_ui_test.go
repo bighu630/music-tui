@@ -1,6 +1,10 @@
 package ui
 
 import (
+	"errors"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,6 +13,7 @@ import (
 
 	"music-tui/model"
 	"music-tui/player"
+	"music-tui/ytm"
 )
 
 // ---- 播放列表页：空态与两级视图 ----
@@ -606,5 +611,747 @@ func TestNoticeClearedOnNextKey(t *testing.T) {
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	if m.notice != "" {
 		t.Errorf("新按键分发应清除 notice, got %q", m.notice)
+	}
+}
+
+// ---- YT Music 同步：状态区 / 登录设置 / URL 导入 / 同步全部 / 刷新 ----
+
+// 概览顶部状态区三态：未登录 / 已登录 / 同步中；空列表时也显示。
+func TestYTStatusLineStates(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m := env.m
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+
+	// 未登录 + 空列表：状态区与空态提示同时显示
+	got := stripANSI(m.plPage.view())
+	if !strings.Contains(got, "YT Music · 未登录") {
+		t.Errorf("未登录状态行缺失: %q", got)
+	}
+	if !strings.Contains(got, "s 登录设置 · u 导入歌单链接") {
+		t.Errorf("未登录提示行缺失: %q", got)
+	}
+	if !strings.Contains(got, "暂无播放列表") {
+		t.Errorf("空列表提示应保留: %q", got)
+	}
+
+	// 已登录（直接 seed store 并同步状态）
+	if _, err := env.store.SetPastedLogin("SAPISID=x"); err != nil {
+		t.Fatal(err)
+	}
+	env.refreshYTStatus()
+	m = env.m
+	got = stripANSI(m.plPage.view())
+	if !strings.Contains(got, "YT Music · 已登录") {
+		t.Errorf("已登录状态行缺失: %q", got)
+	}
+	if !strings.Contains(got, "y 同步全部 · s 设置 · u 导入") {
+		t.Errorf("已登录提示行缺失: %q", got)
+	}
+
+	// 同步中（三态最高优先级）
+	m.plPage = m.plPage.setYTSyncStatus(env.store.Login(), true)
+	got = stripANSI(m.plPage.view())
+	if !strings.Contains(got, "YT Music · 同步中…") {
+		t.Errorf("同步中状态行缺失: %q", got)
+	}
+}
+
+// s 登录设置：主菜单四项 → 浏览器二级列表 → Esc 逐层返回概览。
+func TestYTSyncSetupBrowserFlow(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	if m.plPage.mode != plSyncSetup || m.plPage.setupSub != setupMain {
+		t.Fatalf("s 后 mode=%v sub=%v, want plSyncSetup/setupMain", m.plPage.mode, m.plPage.setupSub)
+	}
+	got := stripANSI(m.plPage.view())
+	for _, want := range []string{"YT Music 登录设置", "浏览器读取", "cookies.txt 文件路径", "粘贴 Cookie 字符串", "退出登录"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("设置菜单应含 %q: %q", want, got)
+		}
+	}
+
+	// Enter 浏览器读取 → 二级浏览器列表
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.plPage.setupSub != setupBrowser {
+		t.Fatalf("Enter 后 sub=%v, want setupBrowser", m.plPage.setupSub)
+	}
+	got = stripANSI(m.plPage.view())
+	if !strings.Contains(got, "Google Chrome") || !strings.Contains(got, "Chromium") || !strings.Contains(got, "Opera") {
+		t.Errorf("浏览器列表应含全部支持浏览器: %q", got)
+	}
+
+	// Esc → 主菜单；再 Esc → 概览
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.plPage.setupSub != setupMain {
+		t.Fatalf("Esc 后 sub=%v, want setupMain", m.plPage.setupSub)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.plPage.mode != plOverview {
+		t.Fatalf("Esc 后 mode=%v, want plOverview", m.plPage.mode)
+	}
+}
+
+// 浏览器选择 Enter → emit ytLoginMsg{Browser} → root 保存配置并异步验证。
+// （不执行 verify cmd：浏览器方式会触碰真实浏览器 cookie 配置，仅断言编排。）
+func TestYTBrowserLoginEmitsAndSaves(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m := env.m
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 浏览器读取
+	if m.plPage.setupSub != setupBrowser {
+		t.Fatal("应进入浏览器二级列表")
+	}
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 默认选中 Google Chrome
+	var lg ytLoginMsg
+	for _, msg := range execCmds(cmd) {
+		if lm, ok := msg.(ytLoginMsg); ok {
+			lg = lm
+		}
+	}
+	if lg.cfg.Method != ytm.MethodBrowser || lg.cfg.Browser != "chrome" {
+		t.Fatalf("ytLoginMsg = %+v, want MethodBrowser/chrome", lg)
+	}
+	// 页面提交后退出设置回概览
+	if m.plPage.mode != plOverview {
+		t.Fatalf("提交后 mode=%v, want plOverview", m.plPage.mode)
+	}
+	m, cmd = update(m, lg)
+	if m.notice != "已保存登录配置，验证中…" {
+		t.Errorf("notice = %q, want 已保存登录配置，验证中…", m.notice)
+	}
+	if m.ytLogin.Method != ytm.MethodBrowser || m.ytLogin.Browser != "chrome" {
+		t.Errorf("ytLogin = %+v, want MethodBrowser/chrome", m.ytLogin)
+	}
+	if cmd == nil {
+		t.Error("保存配置后应返回异步验证 cmd")
+	}
+}
+
+// 设置输入子层：cookies.txt 路径输入流程 → ytLoginFileMsg → 异步验证成功。
+func TestYTCookiesFileLoginFlow(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	cookiesFile := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(cookiesFile,
+		[]byte("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\ttest-sap\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := env.m
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 浏览器读取 → cookies.txt 文件路径
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.plPage.setupSub != setupCookiesInput || !m.plPage.typing() {
+		t.Fatalf("应进入 cookies 路径输入: sub=%v typing=%v", m.plPage.setupSub, m.plPage.typing())
+	}
+	if !strings.Contains(stripANSI(m.plPage.view()), "输入 cookies.txt 完整路径") {
+		t.Error("输入框占位应为 cookies.txt 路径提示")
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(cookiesFile)})
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	var lf ytLoginFileMsg
+	for _, msg := range execCmds(cmd) {
+		if lm, ok := msg.(ytLoginFileMsg); ok {
+			lf = lm
+		}
+	}
+	if lf.path != cookiesFile {
+		t.Fatalf("ytLoginFileMsg.path = %q, want %q", lf.path, cookiesFile)
+	}
+	if m.plPage.mode != plOverview {
+		t.Fatalf("提交后应回概览, mode=%v", m.plPage.mode)
+	}
+
+	// root：保存配置 → 验证中 notice → 异步验证成功
+	m, cmd = update(m, lf)
+	if m.notice != "已保存登录配置，验证中…" {
+		t.Errorf("notice = %q", m.notice)
+	}
+	var vd ytVerifyDoneMsg
+	for _, msg := range execCmds(cmd) {
+		if vm, ok := msg.(ytVerifyDoneMsg); ok {
+			vd = vm
+		}
+	}
+	m, _ = update(m, vd)
+	if m.notice != "YT Music 登录有效" {
+		t.Errorf("notice = %q, want YT Music 登录有效", m.notice)
+	}
+	if m.ytLogin.Method != ytm.MethodCookiesFile || m.ytLogin.CookiesPath != cookiesFile {
+		t.Errorf("ytLogin = %+v", m.ytLogin)
+	}
+	if !strings.Contains(stripANSI(m.plPage.view()), "YT Music · 已登录") {
+		t.Error("验证成功后概览应显示已登录")
+	}
+}
+
+// cookies.txt 路径不可读：root 直接报错，不保存配置。
+func TestYTCookiesFileUnreadable(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/nonexistent/cookies.txt")})
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	var lf ytLoginFileMsg
+	for _, msg := range execCmds(cmd) {
+		if lm, ok := msg.(ytLoginFileMsg); ok {
+			lf = lm
+		}
+	}
+	m, _ = update(m, lf)
+	if !strings.Contains(m.lastError, "cookies.txt 不可读") {
+		t.Errorf("lastError = %q, want 含 cookies.txt 不可读", m.lastError)
+	}
+	if m.ytLogin.Method != ytm.MethodNone {
+		t.Errorf("不可读路径不应保存配置: %+v", m.ytLogin)
+	}
+}
+
+// 粘贴 Cookie 流程：输入 → ytLoginPasteMsg → 落盘 cookies 文件 + 配置 → 验证成功。
+func TestYTPasteLoginFlow(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m := env.m
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // → 粘贴 Cookie 字符串
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.plPage.setupSub != setupPasteInput || !m.plPage.typing() {
+		t.Fatalf("应进入粘贴输入: sub=%v typing=%v", m.plPage.setupSub, m.plPage.typing())
+	}
+	if !strings.Contains(stripANSI(m.plPage.view()), "粘贴 Cookie 字符串") {
+		t.Error("输入框占位应为粘贴提示")
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("SAPISID=abc; __Secure-3PAPISID=xyz")})
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	var lp ytLoginPasteMsg
+	for _, msg := range execCmds(cmd) {
+		if pm, ok := msg.(ytLoginPasteMsg); ok {
+			lp = pm
+		}
+	}
+	if lp.text != "SAPISID=abc; __Secure-3PAPISID=xyz" {
+		t.Fatalf("ytLoginPasteMsg.text = %q", lp.text)
+	}
+
+	m, cmd = update(m, lp)
+	if m.notice != "已保存登录配置，验证中…" {
+		t.Errorf("notice = %q", m.notice)
+	}
+	if m.ytLogin.Method != ytm.MethodPasted {
+		t.Fatalf("ytLogin = %+v, want MethodPasted", m.ytLogin)
+	}
+	// cookies 文件已落盘（0600，含粘贴的 cookie）
+	data, err := os.ReadFile(m.ytLogin.CookiesPath)
+	if err != nil {
+		t.Fatalf("cookies 文件应已落盘: %v", err)
+	}
+	if !strings.Contains(string(data), "SAPISID") {
+		t.Errorf("cookies 文件应含粘贴内容: %q", string(data))
+	}
+	if fi, err := os.Stat(m.ytLogin.CookiesPath); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("cookies 文件权限应 0600: %v %v", fi, err)
+	}
+
+	var vd ytVerifyDoneMsg
+	for _, msg := range execCmds(cmd) {
+		if vm, ok := msg.(ytVerifyDoneMsg); ok {
+			vd = vm
+		}
+	}
+	m, _ = update(m, vd)
+	if m.notice != "YT Music 登录有效" {
+		t.Errorf("notice = %q, want YT Music 登录有效", m.notice)
+	}
+}
+
+// 粘贴验证失败：HTTP 403（失效）与 logged_in=0（未登录）映射为友好文案。
+func TestYTPasteLoginVerifyFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rt   ytRoundTripper
+		want string
+	}{
+		{"session-invalid", ytRoundTripper{code: 403, body: ""}, "登录已失效，请重新导出 cookie"},
+		{"not-logged-in", ytRoundTripper{code: 200, body: ytBrowseLoggedOut}, "登录无效，请重新导出 cookie"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+			env.client.SetHTTPClient(&http.Client{Transport: tc.rt})
+			m := env.m
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+			for i := 0; i < 2; i++ {
+				m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+			}
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("SAPISID=bad")})
+			m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+			var lp ytLoginPasteMsg
+			for _, msg := range execCmds(cmd) {
+				if pm, ok := msg.(ytLoginPasteMsg); ok {
+					lp = pm
+				}
+			}
+			m, cmd = update(m, lp)
+			var vd ytVerifyDoneMsg
+			for _, msg := range execCmds(cmd) {
+				if vm, ok := msg.(ytVerifyDoneMsg); ok {
+					vd = vm
+				}
+			}
+			m, _ = update(m, vd)
+			if m.lastError != tc.want {
+				t.Errorf("lastError = %q, want %q", m.lastError, tc.want)
+			}
+			if m.notice != "" {
+				t.Errorf("失败后不应有 notice: %q", m.notice)
+			}
+			// 无论成败刷新页面登录状态
+			if !strings.Contains(stripANSI(m.plPage.view()), "YT Music · 已登录") {
+				t.Error("验证失败后概览仍应显示已登录（配置已保存）")
+			}
+		})
+	}
+}
+
+// ytVerifyErrorText 错误映射单测。
+func TestYTVerifyErrorText(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{ytm.ErrNotLoggedIn, "登录无效，请重新导出 cookie"},
+		{ytm.ErrSessionInvalid, "登录已失效，请重新导出 cookie"},
+		{ytm.ErrNoLogin, "未配置登录"},
+		{errors.New("网络错误"), "网络错误"},
+	}
+	for _, tc := range cases {
+		if got := ytVerifyErrorText(tc.err); got != tc.want {
+			t.Errorf("ytVerifyErrorText(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+	}
+}
+
+// 设置输入子层 Esc：返回主菜单而非直接退出设置。
+func TestYTSetupInputEscBackToMenu(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // cookies.txt
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("随便")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.plPage.setupSub != setupMain || m.plPage.typing() {
+		t.Fatalf("Esc 后应回主菜单且输入失焦: sub=%v typing=%v", m.plPage.setupSub, m.plPage.typing())
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.plPage.mode != plOverview {
+		t.Fatalf("主菜单 Esc 后应回概览: mode=%v", m.plPage.mode)
+	}
+}
+
+// 退出登录：设置列表末尾项 → ytLogoutMsg → ClearLogin + 状态复位 + notice。
+func TestYTLogoutFlow(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := env.store.SetPastedLogin("SAPISID=x"); err != nil {
+		t.Fatal(err)
+	}
+	env.refreshYTStatus()
+	m := env.m
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	for i := 0; i < 3; i++ {
+		m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	}
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 退出登录
+	var lo ytLogoutMsg
+	for _, msg := range execCmds(cmd) {
+		if om, ok := msg.(ytLogoutMsg); ok {
+			lo = om
+		}
+	}
+	m, _ = update(m, lo)
+	if m.notice != "已退出 YT Music 登录" {
+		t.Errorf("notice = %q", m.notice)
+	}
+	if m.ytLogin.Method != ytm.MethodNone {
+		t.Errorf("退出后 ytLogin = %+v, want MethodNone", m.ytLogin)
+	}
+	if env.store.Login().Method != ytm.MethodNone {
+		t.Errorf("store 登录配置应已清除: %+v", env.store.Login())
+	}
+	if !strings.Contains(stripANSI(m.plPage.view()), "YT Music · 未登录") {
+		t.Error("退出后概览应显示未登录")
+	}
+}
+
+// u URL 导入：输入 → ytImportMsg → 异步导入成功 → notice + 列表创建 + 同步映射。
+func TestYTURLImportSuccess(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	url := ytTrackURL("PLIMP")
+	env.fetcher.playlists[url] = model.Playlist{
+		ID:     "PLIMP",
+		Title:  "导入歌单",
+		Tracks: []model.Track{testTrack("v1"), testTrack("v2")},
+	}
+	m := env.m
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	if m.plPage.mode != plURLImport || !m.plPage.typing() {
+		t.Fatalf("u 后应进入 URL 导入: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+	if !strings.Contains(stripANSI(m.plPage.view()), "粘贴 YouTube Music 歌单链接，Enter 导入") {
+		t.Error("URL 导入占位缺失")
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(url)})
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	var im ytImportMsg
+	for _, msg := range execCmds(cmd) {
+		if imsg, ok := msg.(ytImportMsg); ok {
+			im = imsg
+		}
+	}
+	if im.url != url {
+		t.Fatalf("ytImportMsg.url = %q, want %q", im.url, url)
+	}
+	if m.plPage.mode != plOverview {
+		t.Fatalf("提交后应回概览: mode=%v", m.plPage.mode)
+	}
+
+	m, cmd = update(m, im)
+	if !m.ytSyncing {
+		t.Fatal("导入期间应置 syncing")
+	}
+	if !strings.Contains(stripANSI(m.plPage.view()), "YT Music · 同步中…") {
+		t.Error("导入期间状态区应显示同步中")
+	}
+	var id ytImportDoneMsg
+	for _, msg := range execCmds(cmd) {
+		if dm, ok := msg.(ytImportDoneMsg); ok {
+			id = dm
+		}
+	}
+	m, _ = update(m, id)
+	if m.notice != "已导入「导入歌单」2 首" {
+		t.Errorf("notice = %q, want 已导入「导入歌单」2 首", m.notice)
+	}
+	if m.ytSyncing {
+		t.Error("导入完成后 syncing 应复位")
+	}
+	lists := m.pl.Lists()
+	if len(lists) != 1 || lists[0].Name != "YT: 导入歌单" {
+		t.Fatalf("导入后列表 = %+v, want [YT: 导入歌单]", lists)
+	}
+	if len(m.pl.Tracks("YT: 导入歌单")) != 2 {
+		t.Errorf("导入歌曲数 = %d, want 2", len(m.pl.Tracks("YT: 导入歌单")))
+	}
+	if !m.plPage.ytSyncNames["YT: 导入歌单"] {
+		t.Error("导入后同步映射应推入页面")
+	}
+}
+
+// u URL 导入：空输入 Enter 忽略（不产生消息、不退出输入）。
+func TestYTURLImportEmptyIgnored(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Errorf("空 URL Enter 不应产生消息: %v", cmd)
+	}
+	if m.plPage.mode != plURLImport {
+		t.Errorf("空输入应留在导入模式: mode=%v", m.plPage.mode)
+	}
+}
+
+// u URL 导入失败：lastError + syncing 复位（页面已退出输入，用户可重新按 u）。
+func TestYTURLImportFailure(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	env.fetcher.err = errors.New("yt-dlp 拉取失败")
+	m := env.m
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(ytTrackURL("PLIMP"))})
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	var im ytImportMsg
+	for _, msg := range execCmds(cmd) {
+		if imsg, ok := msg.(ytImportMsg); ok {
+			im = imsg
+		}
+	}
+	m, cmd = update(m, im)
+	var id ytImportDoneMsg
+	for _, msg := range execCmds(cmd) {
+		if dm, ok := msg.(ytImportDoneMsg); ok {
+			id = dm
+		}
+	}
+	m, _ = update(m, id)
+	if !strings.Contains(m.lastError, "导入失败") {
+		t.Errorf("lastError = %q, want 含导入失败", m.lastError)
+	}
+	if m.ytSyncing {
+		t.Error("失败后 syncing 应复位")
+	}
+	if len(m.pl.Lists()) != 0 {
+		t.Errorf("失败不应创建列表: %+v", m.pl.Lists())
+	}
+}
+
+// y 同步全部：成功 notice + 本地列表创建 + 同步映射 + 重复触发忽略。
+func TestYTSyncAllFlow(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := env.store.SetPastedLogin("SAPISID=sap; __Secure-3PAPISID=3p"); err != nil {
+		t.Fatal(err)
+	}
+	env.refreshYTStatus()
+	env.fetcher.playlists[ytTrackURL("PLAAA")] = model.Playlist{
+		ID: "PLAAA", Title: "我的最爱",
+		Tracks: []model.Track{testTrack("v1"), testTrack("v2")},
+	}
+	env.fetcher.playlists[ytTrackURL("PLBBB")] = model.Playlist{
+		ID: "PLBBB", Title: "通勤歌单",
+		Tracks: []model.Track{testTrack("v3"), testTrack("v4")},
+	}
+	m := env.m
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	var sa ytSyncAllMsg
+	for _, msg := range execCmds(cmd) {
+		if am, ok := msg.(ytSyncAllMsg); ok {
+			sa = am
+		}
+	}
+	m, cmd = update(m, sa)
+	if !m.ytSyncing {
+		t.Fatal("y 后应置 syncing")
+	}
+	if !strings.Contains(stripANSI(m.plPage.view()), "YT Music · 同步中…") {
+		t.Error("同步中状态区应显示")
+	}
+
+	// 同步中重复按 y：emit 的消息回灌后被 root 忽略（不产生新同步 cmd）
+	m2, dup := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	var sa2 ytSyncAllMsg
+	for _, msg := range execCmds(dup) {
+		if am, ok := msg.(ytSyncAllMsg); ok {
+			sa2 = am
+		}
+	}
+	m2, dup = update(m2, sa2)
+	if dup != nil {
+		t.Errorf("同步中 ytSyncAllMsg 应被忽略, got cmd %v", dup)
+	}
+	if !m2.ytSyncing {
+		t.Error("忽略后 syncing 应保持")
+	}
+
+	var sd ytSyncDoneMsg
+	for _, msg := range execCmds(cmd) {
+		if dm, ok := msg.(ytSyncDoneMsg); ok {
+			sd = dm
+		}
+	}
+	if sd.err != nil {
+		t.Fatalf("SyncAll 应成功: %v", sd.err)
+	}
+	m, _ = update(m, sd)
+	if m.notice != "已同步 2 个歌单 · 共 4 首" {
+		t.Errorf("notice = %q, want 已同步 2 个歌单 · 共 4 首", m.notice)
+	}
+	if m.ytSyncing {
+		t.Error("同步完成后 syncing 应复位")
+	}
+	lists := m.pl.Lists()
+	if len(lists) != 2 || lists[0].Name != "YT: 我的最爱" || lists[1].Name != "YT: 通勤歌单" {
+		t.Fatalf("同步后列表 = %+v", lists)
+	}
+	if got := idsOf(m.pl.Tracks("YT: 我的最爱")); len(got) != 2 || got[0] != "v1" || got[1] != "v2" {
+		t.Errorf("我的最爱曲目 = %v", got)
+	}
+	if !m.plPage.ytSyncNames["YT: 我的最爱"] || !m.plPage.ytSyncNames["YT: 通勤歌单"] {
+		t.Error("同步后页面同步映射缺失")
+	}
+	got := stripANSI(m.plPage.view())
+	if !strings.Contains(got, "YT Music · 已登录") || strings.Contains(got, "同步中") {
+		t.Errorf("同步完成后状态区应回已登录: %q", got)
+	}
+}
+
+// y 同步全部（未登录）：错误提示 + syncing 复位。
+func TestYTSyncAllNotLoggedIn(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m := env.m
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	var sa ytSyncAllMsg
+	for _, msg := range execCmds(cmd) {
+		if am, ok := msg.(ytSyncAllMsg); ok {
+			sa = am
+		}
+	}
+	m, cmd = update(m, sa)
+	var sd ytSyncDoneMsg
+	for _, msg := range execCmds(cmd) {
+		if dm, ok := msg.(ytSyncDoneMsg); ok {
+			sd = dm
+		}
+	}
+	m, _ = update(m, sd)
+	if !strings.Contains(m.lastError, "同步失败") || !strings.Contains(m.lastError, "登录") {
+		t.Errorf("lastError = %q, want 含同步失败与登录提示", m.lastError)
+	}
+	if m.ytSyncing {
+		t.Error("失败后 syncing 应复位")
+	}
+}
+
+// 详情 r：同步列表刷新成功（notice + 列表内容替换 + 映射更新）。
+func TestYTRefreshSyncList(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := env.store.SetPastedLogin("SAPISID=sap; __Secure-3PAPISID=3p"); err != nil {
+		t.Fatal(err)
+	}
+	env.refreshYTStatus()
+	m := env.m
+	if _, err := m.pl.Create("YT: 我的最爱"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.pl.AddTrack("YT: 我的最爱", testTrack("old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.UpsertSync(ytm.SyncEntry{PlaylistID: "PLAAA", ListName: "YT: 我的最爱", Count: 1}); err != nil {
+		t.Fatal(err)
+	}
+	env.fetcher.playlists[ytTrackURL("PLAAA")] = model.Playlist{
+		ID: "PLAAA", Title: "我的最爱",
+		Tracks: []model.Track{testTrack("v1"), testTrack("v2")},
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+	m.plPage = m.plPage.setYTSyncs(env.store.SyncEntries())
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 进入详情
+	if !m.plPage.ytSyncNames["YT: 我的最爱"] {
+		t.Fatal("同步列表应标记在页面")
+	}
+	if !strings.Contains(stripANSI(m.plPage.view()), "r 刷新") {
+		t.Error("同步列表详情应提示 r 刷新")
+	}
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	var rm ytRefreshMsg
+	for _, msg := range execCmds(cmd) {
+		if rmsg, ok := msg.(ytRefreshMsg); ok {
+			rm = rmsg
+		}
+	}
+	if rm.listName != "YT: 我的最爱" {
+		t.Fatalf("ytRefreshMsg.listName = %q", rm.listName)
+	}
+	m, cmd = update(m, rm)
+	if !m.ytSyncing {
+		t.Fatal("刷新期间应置 syncing")
+	}
+	var rd ytRefreshDoneMsg
+	for _, msg := range execCmds(cmd) {
+		if dm, ok := msg.(ytRefreshDoneMsg); ok {
+			rd = dm
+		}
+	}
+	m, _ = update(m, rd)
+	if m.notice != "已刷新「YT: 我的最爱」2 首" {
+		t.Errorf("notice = %q, want 已刷新「YT: 我的最爱」2 首", m.notice)
+	}
+	if got := idsOf(m.pl.Tracks("YT: 我的最爱")); len(got) != 2 || got[0] != "v1" || got[1] != "v2" {
+		t.Errorf("刷新后曲目 = %v, want [v1 v2]（旧曲替换）", got)
+	}
+	if m.ytSyncing {
+		t.Error("刷新完成后 syncing 应复位")
+	}
+}
+
+// 详情 r：非同步列表 → 红字提示，不触发同步。
+func TestYTRefreshNonSyncList(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m := env.m
+	if _, err := m.pl.Create("普通列表"); err != nil {
+		t.Fatal(err)
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 进入详情
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	var rm ytRefreshMsg
+	for _, msg := range execCmds(cmd) {
+		if rmsg, ok := msg.(ytRefreshMsg); ok {
+			rm = rmsg
+		}
+	}
+	m, cmd = update(m, rm)
+	if m.lastError != "该列表不是 YT Music 同步列表" {
+		t.Errorf("lastError = %q", m.lastError)
+	}
+	if cmd != nil {
+		t.Errorf("非同步列表不应触发同步 cmd: %v", cmd)
+	}
+	if m.ytSyncing {
+		t.Error("非同步列表不应置 syncing")
+	}
+}
+
+// 详情模式下 s/y/u 不响应（仅概览）；r 在概览不响应（仅详情）。
+func TestYTSyncKeysScopedToMode(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := m.pl.Create("列表A"); err != nil {
+		t.Fatal(err)
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 详情
+	if m.plPage.mode != plDetail {
+		t.Fatal("应进入详情")
+	}
+	for _, k := range []rune{'s', 'y', 'u'} {
+		m2, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{k}})
+		if cmd != nil {
+			t.Errorf("详情模式 %c 不应产生 cmd: %v", k, cmd)
+		}
+		if m2.plPage.mode != plDetail {
+			t.Errorf("详情模式 %c 不应切换模式: %v", k, m2.plPage.mode)
+		}
+	}
+	// 概览模式 r：重命名（原有语义，非刷新）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc}) // 回概览
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if m.plPage.mode != plNaming {
+		t.Errorf("概览 r 应仍为重命名: mode=%v", m.plPage.mode)
+	}
+	if cmd != nil {
+		t.Errorf("概览 r 不应产生刷新消息: %v", cmd)
+	}
+}
+
+// URL 导入输入聚焦时 p/空格/q 是输入字符（root 让位，同命名输入模式）。
+func TestYTURLImportConsumesGlobalKeys(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	if m.plPicker != nil {
+		t.Fatal("URL 导入输入聚焦时 p 不应打开选择器")
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if got := m.plPage.input.Value(); got != "p q" {
+		t.Errorf("input = %q, want %q", got, "p q")
+	}
+	if !m.plPage.typing() {
+		t.Error("输入后应仍在 URL 导入模式")
 	}
 }

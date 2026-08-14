@@ -123,6 +123,27 @@ func (s *Store) ClearLogin() error {
 	return s.saveLocked()
 }
 
+// SetPastedLogin 保存粘贴的 Cookie header 文本（MethodPasted）：
+// 先落盘 cookies 文件（0600，默认路径 ytm-cookies.txt，与 ytm.json 同目录），
+// 再保存配置。Netscape 格式文本原样保留；单行 Cookie header 自动转为
+// Netscape 格式（供 yt-dlp 读取）。返回实际 cookies 文件路径。
+func (s *Store) SetPastedLogin(header string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.defaultCookiesPath()
+	if err := writeFileAtomic(p, []byte(header), 0o600); err != nil {
+		return "", fmt.Errorf("写入 cookie 文件失败: %w", err)
+	}
+	if err := ensurePastedFile(p); err != nil {
+		return "", err
+	}
+	s.data.Login = LoginConfig{Method: MethodPasted, CookiesPath: p, UpdatedAt: time.Now()}
+	if err := s.saveLocked(); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
 // SyncEntries 返回全部同步映射副本（保持插入顺序）。
 func (s *Store) SyncEntries() []SyncEntry {
 	s.mu.Lock()

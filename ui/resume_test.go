@@ -18,6 +18,7 @@ import (
 	"music-tui/playlists"
 	"music-tui/queue"
 	"music-tui/session"
+	"music-tui/ytm"
 )
 
 // newResumeTestModel 组装带指定会话状态的测试 model（会话文件已写入 st）。
@@ -50,9 +51,13 @@ func newResumeTestModel(t *testing.T, st *session.State, onTrack func(*model.Tra
 	if err != nil {
 		t.Fatal(err)
 	}
+	ytStore, err := ytm.NewStore(filepath.Join(t.TempDir(), "ytm.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	m := NewModel(fp, &fakeSearchAdapter{},
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, pls, onTrack)
+		cf, hist, sess, pls, ytm.NewClient(ytStore, &fakeYTFetcher{}), onTrack)
 	return m, fp
 }
 

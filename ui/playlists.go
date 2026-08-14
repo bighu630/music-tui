@@ -13,6 +13,7 @@ import (
 
 	"music-tui/model"
 	"music-tui/playlists"
+	"music-tui/ytm"
 )
 
 // ---- 消息（root 执行 store 操作） ----
@@ -58,6 +59,67 @@ func emitPlRemoveTrack(name string, index int) tea.Cmd {
 	return func() tea.Msg { return plRemoveTrackMsg{name: name, index: index} }
 }
 
+// ---- YT Music 同步消息（页面 emit，root 编排） ----
+
+// ytLoginMsg 登录设置提交：浏览器方式（cookies.txt/粘贴走专用消息）。
+type ytLoginMsg struct {
+	cfg ytm.LoginConfig
+}
+
+// ytLoginFileMsg cookies.txt 路径提交。
+type ytLoginFileMsg struct {
+	path string
+}
+
+// ytLoginPasteMsg 粘贴 Cookie 字符串提交。
+type ytLoginPasteMsg struct {
+	text string
+}
+
+// ytLogoutMsg 退出登录。
+type ytLogoutMsg struct{}
+
+// ytSyncAllMsg 概览 y：同步全部歌单。
+type ytSyncAllMsg struct{}
+
+// ytImportMsg 概览 u：导入歌单 URL。
+type ytImportMsg struct {
+	url string
+}
+
+// ytRefreshMsg 详情 r：刷新当前列表（仅 YT 同步列表）。
+type ytRefreshMsg struct {
+	listName string
+}
+
+func emitYtLogin(cfg ytm.LoginConfig) tea.Cmd {
+	return func() tea.Msg { return ytLoginMsg{cfg: cfg} }
+}
+
+func emitYtLoginFile(path string) tea.Cmd {
+	return func() tea.Msg { return ytLoginFileMsg{path: path} }
+}
+
+func emitYtLoginPaste(text string) tea.Cmd {
+	return func() tea.Msg { return ytLoginPasteMsg{text: text} }
+}
+
+func emitYtLogout() tea.Cmd {
+	return func() tea.Msg { return ytLogoutMsg{} }
+}
+
+func emitYtSyncAll() tea.Cmd {
+	return func() tea.Msg { return ytSyncAllMsg{} }
+}
+
+func emitYtImport(url string) tea.Cmd {
+	return func() tea.Msg { return ytImportMsg{url: url} }
+}
+
+func emitYtRefresh(listName string) tea.Cmd {
+	return func() tea.Msg { return ytRefreshMsg{listName: listName} }
+}
+
 // ---- 列表条目 ----
 
 // overviewItem 概览条目：列表名 + 歌曲数 · 创建时间。
@@ -95,19 +157,79 @@ const (
 	plOverview plMode = iota // 概览：全部列表
 	plDetail                 // 详情：某列表的歌曲
 	plNaming                 // 命名输入（新建/重命名）
+	plSyncSetup              // YT Music 登录设置（含二级浏览器选择与输入子层）
+	plURLImport              // YT Music URL 导入输入框
 )
 
-// playlistModel 播放列表页：概览 ↔ 详情 两级列表，命名输入用于新建/重命名。
-// 数据由 root 经 setLists 推入，页面自身不持有服务。
+// setupSub 是登录设置视图的子状态。
+type setupSub int
+
+const (
+	setupMain setupSub = iota // 登录方式菜单
+	setupBrowser              // 浏览器二级选择
+	setupCookiesInput         // cookies.txt 路径输入
+	setupPasteInput           // 粘贴 Cookie 字符串输入
+)
+
+// setupKind 是登录设置菜单项类型。
+type setupKind int
+
+const (
+	setupKindBrowser setupKind = iota
+	setupKindCookies
+	setupKindPaste
+	setupKindLogout
+)
+
+// setupItem 登录设置主菜单项。
+type setupItem struct {
+	label string
+	desc  string
+	kind  setupKind
+}
+
+func (i setupItem) Title() string       { return i.label }
+func (i setupItem) Description() string { return i.desc }
+func (i setupItem) FilterValue() string { return i.label }
+
+// setupItems 返回登录方式菜单（含末尾"退出登录"项）。
+func setupItems() []list.Item {
+	return []list.Item{
+		setupItem{label: "浏览器读取", desc: "支持 Chrome / Chromium / Brave / Edge / Vivaldi / Opera", kind: setupKindBrowser},
+		setupItem{label: "cookies.txt 文件路径", desc: "填写浏览器导出的 cookies.txt 完整路径", kind: setupKindCookies},
+		setupItem{label: "粘贴 Cookie 字符串", desc: "粘贴 Cookie header（name=value; ...）", kind: setupKindPaste},
+		setupItem{label: "退出登录", desc: "清除已保存的 YT Music 登录状态", kind: setupKindLogout},
+	}
+}
+
+// browserItem 浏览器二级选择项。
+type browserItem struct {
+	info ytm.BrowserInfo
+}
+
+func (i browserItem) Title() string       { return i.info.Label }
+func (i browserItem) Description() string { return "自动导出浏览器 cookie（Windows 请改用 cookies.txt）" }
+func (i browserItem) FilterValue() string { return i.info.Label }
+
+// playlistModel 播放列表页：概览 ↔ 详情 两级列表，命名输入用于新建/重命名，
+// 另有 YT Music 登录设置与 URL 导入两种输入模式。
+// 数据由 root 经 setLists/setYTSyncStatus/setYTSyncs 推入，页面自身不持有服务。
 type playlistModel struct {
 	overview list.Model
 	detail   list.Model
+	setup    list.Model
 	input    textinput.Model
 	lists    []playlists.List
 
 	mode      plMode
 	curName   string // detail 模式当前列表名
 	namingOld string // 命名输入预填的旧名（重命名；空 = 新建）
+	setupSub  setupSub
+
+	// YT Music 状态（root 推入；页面不直接持有 ytm 服务）
+	ytLogin     ytm.LoginConfig
+	ytSyncing   bool
+	ytSyncNames map[string]bool // 本地列表名 → 是否 YT 同步列表（详情 r 刷新提示）
 
 	width, height int
 }
@@ -124,16 +246,27 @@ func newPlaylistModel() playlistModel {
 	dt.SetShowHelp(false)
 	dt.SetFilteringEnabled(false)
 	dt.SetShowStatusBar(false)
+	st := list.New(nil, delegate, 80, 24)
+	st.Title = ""
+	st.SetShowHelp(false)
+	st.SetFilteringEnabled(false)
+	st.SetShowStatusBar(false)
 	ti := textinput.New()
 	ti.Placeholder = "输入列表名，Enter 确认"
-	ti.CharLimit = 60
-	return playlistModel{overview: ov, detail: dt, input: ti}
+	ti.CharLimit = 4096 // 共享输入框：URL 导入/粘贴 Cookie 需要长输入（列表名仅占小头）
+	return playlistModel{overview: ov, detail: dt, setup: st, input: ti, ytSyncNames: map[string]bool{}}
 }
 
 // Update 处理播放列表页按键。
-// overview：Enter 进入详情、n 新建、r 重命名、d 删除；
-// detail：Enter 整列表播放、a 加入队列、d 移除、Esc/← 返回概览；
-// 命名输入：Enter 提交、Esc 取消；其余按键交给对应 list/textinput。
+// overview：Enter 进入详情、n 新建、r 重命名、d 删除、s 登录设置、
+//   y 同步全部、u URL 导入（s/y/u 仅概览响应，详情不响应）；
+// detail：Enter 整列表播放、a 加入队列、d 移除、r 刷新（YT 同步列表）、
+//   Esc/← 返回概览；
+// 命名输入：Enter 提交、Esc 取消；
+// URL 导入：Enter 提交（空值忽略）、Esc 返回概览；
+// 登录设置：主菜单/浏览器二级列表 Enter 确认、Esc 返回上一层，
+//   输入子层 Enter 提交、Esc 返回菜单；
+// 其余按键交给对应 list/textinput。
 func (p playlistModel) Update(msg tea.Msg) (playlistModel, tea.Cmd) {
 	if msg, ok := msg.(tea.KeyMsg); ok {
 		switch p.mode {
@@ -143,6 +276,68 @@ func (p playlistModel) Update(msg tea.Msg) (playlistModel, tea.Cmd) {
 				return p, p.submitNaming()
 			case "esc":
 				return p.exitNaming(), nil
+			}
+		case plSyncSetup:
+			// Enter/Esc 按子状态处理；其余按键落在下方对应组件的 Update。
+			switch p.setupSub {
+			case setupMain:
+				switch msg.String() {
+				case "enter":
+					it, ok := p.setup.SelectedItem().(setupItem)
+					if !ok {
+						return p, nil
+					}
+					switch it.kind {
+					case setupKindBrowser:
+						return p.enterSetupBrowser(), nil
+					case setupKindCookies:
+						return p.beginSetupInput(setupCookiesInput, "输入 cookies.txt 完整路径"), nil
+					case setupKindPaste:
+						return p.beginSetupInput(setupPasteInput, "粘贴 Cookie 字符串（name=value; ...）"), nil
+					case setupKindLogout:
+						return p.exitSyncSetup(), emitYtLogout()
+					}
+					return p, nil
+				case "esc":
+					return p.exitSyncSetup(), nil
+				}
+			case setupBrowser:
+				switch msg.String() {
+				case "enter":
+					it, ok := p.setup.SelectedItem().(browserItem)
+					if !ok {
+						return p, nil
+					}
+					cfg := ytm.LoginConfig{Method: ytm.MethodBrowser, Browser: it.info.Name}
+					return p.exitSyncSetup(), emitYtLogin(cfg)
+				case "esc":
+					return p.exitSetupBrowser(), nil
+				}
+			default: // setupCookiesInput / setupPasteInput
+				switch msg.String() {
+				case "enter":
+					val := strings.TrimSpace(p.input.Value())
+					if val == "" {
+						return p, nil // 空值忽略（留在输入层）
+					}
+					if p.setupSub == setupCookiesInput {
+						return p.exitSyncSetup(), emitYtLoginFile(val)
+					}
+					return p.exitSyncSetup(), emitYtLoginPaste(val)
+				case "esc":
+					return p.exitSetupInput(), nil
+				}
+			}
+		case plURLImport:
+			switch msg.String() {
+			case "enter":
+				url := strings.TrimSpace(p.input.Value())
+				if url == "" {
+					return p, nil // 空值忽略
+				}
+				return p.exitURLImport(), emitYtImport(url)
+			case "esc":
+				return p.exitURLImport(), nil
 			}
 		case plDetail:
 			switch msg.String() {
@@ -161,6 +356,9 @@ func (p playlistModel) Update(msg tea.Msg) (playlistModel, tea.Cmd) {
 					return p, emitTrackAppend(item.track)
 				}
 				return p, nil
+			case "r":
+				// 刷新当前列表：是否同步列表由 root 校验（非同步列表红字提示）
+				return p, emitYtRefresh(p.curName)
 			case "esc", "left":
 				p.mode = plOverview
 				return p, nil
@@ -184,13 +382,25 @@ func (p playlistModel) Update(msg tea.Msg) (playlistModel, tea.Cmd) {
 					return p, emitPlDelete(item.list.Name)
 				}
 				return p, nil
+			case "s":
+				return p.enterSyncSetup(), nil
+			case "y":
+				return p, emitYtSyncAll()
+			case "u":
+				return p.enterURLImport(), nil
 			}
 		}
 	}
 	var cmd tea.Cmd
 	switch p.mode {
-	case plNaming:
+	case plNaming, plURLImport:
 		p.input, cmd = p.input.Update(msg)
+	case plSyncSetup:
+		if p.setupSub == setupCookiesInput || p.setupSub == setupPasteInput {
+			p.input, cmd = p.input.Update(msg)
+		} else {
+			p.setup, cmd = p.setup.Update(msg)
+		}
 	case plDetail:
 		p.detail, cmd = p.detail.Update(msg)
 	default:
@@ -286,10 +496,12 @@ func (p playlistModel) enterDetail(l playlists.List) playlistModel {
 }
 
 // beginNaming 进入命名输入（old 非空 = 重命名，预填旧名）。
+// 显式恢复占位文案：输入框被 YT 登录设置/URL 导入复用时改过 Placeholder。
 func (p playlistModel) beginNaming(old string) playlistModel {
 	p.mode = plNaming
 	p.namingOld = old
 	p.input.SetValue(old)
+	p.input.Placeholder = "输入列表名，Enter 确认"
 	p.input.CursorEnd()
 	p.input.Focus()
 	return p
@@ -298,6 +510,85 @@ func (p playlistModel) beginNaming(old string) playlistModel {
 // exitNaming 退出命名输入回到概览。
 func (p playlistModel) exitNaming() playlistModel {
 	if p.mode == plNaming {
+		p.mode = plOverview
+		p.input.Blur()
+	}
+	return p
+}
+
+// enterSyncSetup 进入登录设置主菜单。
+func (p playlistModel) enterSyncSetup() playlistModel {
+	p.mode = plSyncSetup
+	p.setupSub = setupMain
+	p.setup.SetItems(setupItems())
+	p.setup.Select(0)
+	return p
+}
+
+// enterSetupBrowser 进入浏览器二级选择。
+func (p playlistModel) enterSetupBrowser() playlistModel {
+	p.setupSub = setupBrowser
+	items := make([]list.Item, 0, len(ytm.SupportedBrowsers))
+	for _, b := range ytm.SupportedBrowsers {
+		items = append(items, browserItem{info: b})
+	}
+	p.setup.SetItems(items)
+	p.setup.Select(0)
+	return p
+}
+
+// exitSetupBrowser 从浏览器选择返回主菜单。
+func (p playlistModel) exitSetupBrowser() playlistModel {
+	if p.setupSub == setupBrowser {
+		p.setupSub = setupMain
+		p.setup.SetItems(setupItems())
+		p.setup.Select(0)
+	}
+	return p
+}
+
+// beginSetupInput 进入登录输入子层（cookies.txt 路径 / 粘贴 Cookie）。
+func (p playlistModel) beginSetupInput(sub setupSub, placeholder string) playlistModel {
+	p.setupSub = sub
+	p.input.SetValue("")
+	p.input.Placeholder = placeholder
+	p.input.CursorEnd()
+	p.input.Focus()
+	return p
+}
+
+// exitSetupInput 输入子层 Esc：返回主菜单。
+func (p playlistModel) exitSetupInput() playlistModel {
+	if p.setupSub == setupCookiesInput || p.setupSub == setupPasteInput {
+		p.setupSub = setupMain
+		p.input.Blur()
+	}
+	return p
+}
+
+// exitSyncSetup 退出登录设置回概览。
+func (p playlistModel) exitSyncSetup() playlistModel {
+	if p.mode == plSyncSetup {
+		p.mode = plOverview
+		p.setupSub = setupMain
+		p.input.Blur()
+	}
+	return p
+}
+
+// enterURLImport 进入 URL 导入输入框。
+func (p playlistModel) enterURLImport() playlistModel {
+	p.mode = plURLImport
+	p.input.SetValue("")
+	p.input.Placeholder = "粘贴 YouTube Music 歌单链接，Enter 导入"
+	p.input.CursorEnd()
+	p.input.Focus()
+	return p
+}
+
+// exitURLImport 退出 URL 导入回概览。
+func (p playlistModel) exitURLImport() playlistModel {
+	if p.mode == plURLImport {
 		p.mode = plOverview
 		p.input.Blur()
 	}
@@ -313,8 +604,34 @@ func (p playlistModel) submitNaming() tea.Cmd {
 	return emitPlCreate(name)
 }
 
-// typing 返回命名输入框是否聚焦（root 让字符类全局键 p/空格/q 让位）。
-func (p playlistModel) typing() bool { return p.mode == plNaming }
+// typing 返回是否有输入框聚焦（root 让字符类全局键 p/空格/q 让位）。
+// 命名输入、URL 导入、登录设置的 cookies/粘贴输入子层均算聚焦。
+func (p playlistModel) typing() bool {
+	switch p.mode {
+	case plNaming, plURLImport:
+		return true
+	case plSyncSetup:
+		return p.setupSub == setupCookiesInput || p.setupSub == setupPasteInput
+	}
+	return false
+}
+
+// setYTSyncStatus 推入 YT 登录状态与同步中标记（root 调用）。
+func (p playlistModel) setYTSyncStatus(login ytm.LoginConfig, syncing bool) playlistModel {
+	p.ytLogin = login
+	p.ytSyncing = syncing
+	return p
+}
+
+// setYTSyncs 推入 YT 同步列表名集合（root 调用；详情 r 刷新提示用）。
+func (p playlistModel) setYTSyncs(entries []ytm.SyncEntry) playlistModel {
+	names := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		names[e.ListName] = true
+	}
+	p.ytSyncNames = names
+	return p
+}
 
 // selectedTrack 详情模式且有选中项时返回（供全局 p 键添加到播放列表）。
 func (p playlistModel) selectedTrack() (model.Track, bool) {
@@ -332,6 +649,7 @@ func (p playlistModel) setSize(width, height int) playlistModel {
 	p.width, p.height = width, height
 	p.overview.SetSize(width, height-3)
 	p.detail.SetSize(width, height-3)
+	p.setup.SetSize(width, height-3)
 	p.input.Width = width - 6
 	if p.input.Width < 10 {
 		p.input.Width = 10
@@ -339,11 +657,17 @@ func (p playlistModel) setSize(width, height int) playlistModel {
 	return p
 }
 
-// view 渲染播放列表页（概览/详情/命名输入三态，底部快捷键提示 faint）。
+// view 渲染播放列表页（概览/详情/命名输入/登录设置/URL 导入五态，
+// 底部快捷键提示 faint；概览顶部渲染 YT Music 状态区，空列表时也显示）。
 func (p playlistModel) view() string {
 	switch p.mode {
 	case plNaming:
 		return p.overview.View() + "\n\n" + p.input.View()
+	case plURLImport:
+		return p.overview.View() + "\n\n" + p.input.View() + "\n" +
+			lipgloss.NewStyle().Faint(true).Render("Enter 导入 · Esc 返回")
+	case plSyncSetup:
+		return p.setupView()
 	case plDetail:
 		if len(p.detail.Items()) == 0 {
 			return lipgloss.NewStyle().
@@ -351,18 +675,77 @@ func (p playlistModel) view() string {
 				Faint(true).
 				Render("列表为空\n\n在搜索/历史页选中歌曲后按 p 添加到播放列表")
 		}
+		hint := "Enter 从选中曲播放整个列表 · a 加入队列 · d 移除 · Esc 返回"
+		if p.ytSyncNames[p.curName] {
+			hint += " · r 刷新"
+		}
 		return p.detail.View() + "\n" +
-			lipgloss.NewStyle().Faint(true).Render("Enter 从选中曲播放整个列表 · a 加入队列 · d 移除 · Esc 返回")
+			lipgloss.NewStyle().Faint(true).Render(hint)
 	default:
+		status := p.ytStatusBlock()
 		if len(p.lists) == 0 {
-			return lipgloss.NewStyle().
+			return status + "\n" + lipgloss.NewStyle().
 				Padding(1, 0).
 				Faint(true).
 				Render("暂无播放列表\n\n按 n 新建播放列表")
 		}
-		return p.overview.View() + "\n" +
-			lipgloss.NewStyle().Faint(true).Render("Enter 查看 · n 新建 · r 重命名 · d 删除")
+		return status + "\n" + p.overview.View() + "\n" +
+			lipgloss.NewStyle().Faint(true).Render("Enter 查看 · n 新建 · r 重命名 · d 删除 · s 登录设置 · y 同步全部 · u 导入")
 	}
+}
+
+// ytStatusBlock 渲染概览顶部 YT Music 状态区（列表上方；空列表时也显示）。
+// 未登录：YT Music · 未登录（faint：s 登录设置 · u 导入歌单链接）
+// 已登录：YT Music · 已登录（faint：y 同步全部 · s 设置 · u 导入）
+// 同步中：YT Music · 同步中…（无提示行）
+func (p playlistModel) ytStatusBlock() string {
+	status := "YT Music · 未登录"
+	hint := "s 登录设置 · u 导入歌单链接"
+	if p.ytSyncing {
+		status = "YT Music · 同步中…"
+		hint = ""
+	} else if p.ytLogin.Method != ytm.MethodNone {
+		status = "YT Music · 已登录"
+		hint = "y 同步全部 · s 设置 · u 导入"
+	}
+	out := lipgloss.NewStyle().Bold(true).Render(status)
+	if hint != "" {
+		out += "\n" + lipgloss.NewStyle().Faint(true).Render(hint)
+	}
+	return out
+}
+
+// setupView 渲染登录设置视图：标题 + 当前状态行 + 菜单/浏览器列表
+// （输入子层附加输入框）。
+func (p playlistModel) setupView() string {
+	title := "YT Music 登录设置"
+	if p.setupSub == setupBrowser {
+		title = "选择浏览器"
+	}
+	status := "未登录"
+	if p.ytLogin.Method != ytm.MethodNone {
+		status = "已登录 · " + p.ytLoginMethodLabel() + " · " + p.ytLogin.UpdatedAt.Format("01-02 15:04")
+	}
+	head := lipgloss.NewStyle().Bold(true).Render(title) + "\n" +
+		lipgloss.NewStyle().Faint(true).Render("当前状态：" + status)
+	body := p.setup.View()
+	if p.setupSub == setupCookiesInput || p.setupSub == setupPasteInput {
+		body += "\n\n" + p.input.View()
+	}
+	body += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ 选择 · Enter 确认 · Esc 返回")
+	return head + "\n\n" + body
+}
+
+// ytLoginMethodLabel 返回当前登录方式的展示名（浏览器方式显示浏览器名）。
+func (p playlistModel) ytLoginMethodLabel() string {
+	if p.ytLogin.Method == ytm.MethodBrowser {
+		for _, b := range ytm.SupportedBrowsers {
+			if b.Name == p.ytLogin.Browser {
+				return b.Label
+			}
+		}
+	}
+	return p.ytLogin.Method.String()
 }
 
 // ---- 全局 p 键选择器 ----

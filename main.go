@@ -22,6 +22,7 @@ import (
 	"music-tui/search"
 	"music-tui/session"
 	"music-tui/ui"
+	"music-tui/ytm"
 )
 
 // version 是应用版本号，展示于 User-Agent 与错误信息中。
@@ -65,6 +66,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("加载播放列表失败: %w", err)
 	}
+	ytStore, err := loadYTM(filepath.Join(cfgRoot, "music-tui", "ytm.json"))
+	if err != nil {
+		return fmt.Errorf("加载 YT Music 配置失败: %w", err)
+	}
 	cacheRoot, err := os.UserCacheDir()
 	if err != nil {
 		return fmt.Errorf("获取用户缓存目录失败: %w", err)
@@ -92,14 +97,16 @@ func run() error {
 	}
 
 	// 4. 组装服务并启动 TUI（退出后 run 返回，defer 清理 mpv）
+	searchAdapter := search.NewYouTubeAdapter(ytdlpPath)
 	model := ui.NewModel(
 		mpv,
-		search.NewYouTubeAdapter(ytdlpPath),
+		searchAdapter,
 		lyrics.NewClient(userAgent),
 		covers,
 		hist,
 		sess,
 		pls,
+		ytm.NewClient(ytStore, searchAdapter),
 		mprisSrv.SetTrack,
 	)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
@@ -160,6 +167,25 @@ func loadSession(path string) (*session.Store, error) {
 	}
 	fmt.Fprintf(os.Stderr, "music-tui: 警告：会话文件损坏，已备份至 %s 并重建\n", backup)
 	store, retryErr := session.NewStore(path)
+	if retryErr != nil {
+		return nil, retryErr
+	}
+	return store, nil
+}
+
+// loadYTM 加载 ytm 配置文件；文件损坏（崩溃/断电截断）时备份后重建，
+// 避免缓存文件阻止应用启动（与 loadPlaylists 同款降级）。
+func loadYTM(path string) (*ytm.Store, error) {
+	store, err := ytm.NewStore(path)
+	if err == nil {
+		return store, nil
+	}
+	backup := fmt.Sprintf("%s.corrupt-%d", path, time.Now().UnixNano())
+	if berr := os.Rename(path, backup); berr != nil {
+		return nil, err // 备份失败（如权限问题），按原样返回错误
+	}
+	fmt.Fprintf(os.Stderr, "music-tui: 警告：YT Music 配置文件损坏，已备份至 %s 并重建\n", backup)
+	store, retryErr := ytm.NewStore(path)
 	if retryErr != nil {
 		return nil, retryErr
 	}

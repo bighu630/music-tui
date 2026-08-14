@@ -153,3 +153,37 @@ func TestLoadHistoryCorruptBackupFail(t *testing.T) {
 		t.Fatal("备份失败时应返回错误而非降级")
 	}
 }
+
+func TestLoadYTMMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ytm.json")
+	store, err := loadYTM(path)
+	if err != nil {
+		t.Fatalf("ytm 文件不存在时应返回空 store: %v", err)
+	}
+	if store == nil {
+		t.Fatal("store 不应为 nil")
+	}
+}
+
+func TestLoadYTMCorruptBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ytm.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := loadYTM(path)
+	if err != nil {
+		t.Fatalf("损坏 ytm 配置应降级重建而非报错: %v", err)
+	}
+	if store == nil {
+		t.Fatal("store 不应为 nil")
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "ytm.json.corrupt-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("应生成 1 个损坏备份文件, got %d: %v", len(matches), matches)
+	}
+}
