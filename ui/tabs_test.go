@@ -137,6 +137,9 @@ func TestTabBarDividerLine(t *testing.T) {
 	if !strings.Contains(lines[0], "首页") {
 		t.Errorf("第 1 行应为标签行（含“首页”），实际 = %q", lines[0])
 	}
+	if !strings.Contains(m.View(), dividerStyle.Render(strings.Repeat("─", 80))) {
+		t.Error("分隔线应使用 dividerStyle（Faint 弱化样式，与整体风格一致）")
+	}
 
 	m, _ = update(m, tea.WindowSizeMsg{Width: 100, Height: 24})
 	lines = strings.Split(stripANSI(m.View()), "\n")
