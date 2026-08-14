@@ -6,11 +6,11 @@ import (
 	"strings"
 
 	"github.com/blacktop/go-termimg"
-	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"music-tui/lyrics"
 	"music-tui/model"
@@ -22,8 +22,59 @@ import (
 const (
 	coverW = 30
 	coverH = 17
-	topH   = coverH + 2 // 顶部区域总高，供歌词区高度计算
 )
+
+// ---- 控制消息（root 消费；root 接线在后续任务，本文件只定义类型与 emit） ----
+
+// prevTrackMsg 上一首请求：root 消费（queue.Prev + beginPlay）。
+type prevTrackMsg struct{}
+
+// nextTrackMsg 下一首请求：root 消费（queue.Next + beginPlay）。
+type nextTrackMsg struct{}
+
+// togglePlayMsg 播放/暂停请求：root 复用现有 togglePlay 处理。
+type togglePlayMsg struct{}
+
+// toggleModeMsg 播放模式三态循环请求（Sequential→Shuffle→RepeatOne→Sequential）：
+// root 消费（queue.SetMode + player.SetLoop 同步）。
+type toggleModeMsg struct{}
+
+// emitPrevTrack 产生上一首消息（首页 , 键 / ⏮ 按钮）。
+func emitPrevTrack() tea.Cmd {
+	return func() tea.Msg { return prevTrackMsg{} }
+}
+
+// emitNextTrack 产生下一首消息（首页 . 键 / ⏭ 按钮）。
+func emitNextTrack() tea.Cmd {
+	return func() tea.Msg { return nextTrackMsg{} }
+}
+
+// emitTogglePlay 产生播放/暂停消息（首页 ⏯ 按钮）。
+func emitTogglePlay() tea.Cmd {
+	return func() tea.Msg { return togglePlayMsg{} }
+}
+
+// emitToggleMode 产生模式切换消息（首页模式按钮）。
+func emitToggleMode() tea.Cmd {
+	return func() tea.Msg { return toggleModeMsg{} }
+}
+
+// ---- 底部按钮行常量 ----
+
+// 按钮行（页面内 Y == height-1）各按钮的 X 区间（点击命中区间；
+// 图标渲染位置 = 区间起点）：⏮[0,3) ⏯[4,7) ⏭[8,11) 模式[13,16)。
+const (
+	btnPrevStart   = 0
+	btnToggleStart = 4
+	btnNextStart   = 8
+	btnModeStart   = 13
+	btnHitWidth    = 3 // 每个按钮的点击宽度
+)
+
+// hitBtn 判断点击列 x 是否落在起点 start、宽 btnHitWidth 的按钮区间内。
+func hitBtn(x, start int) bool {
+	return x >= start && x < start+btnHitWidth
+}
 
 // lyricsState 歌词展示状态（四种态）。
 type lyricsState int
@@ -41,7 +92,7 @@ type coverRenderer interface {
 	Render() (string, error)
 }
 
-// homeModel 首页：封面 + 歌曲信息 + 进度条 + 播放控制 + 同步歌词。
+// homeModel 首页：封面 + 歌词 + 底部进度条行与按钮行。
 // 播放状态由 root 通过 syncState 推入，页面自身不持有服务。
 type homeModel struct {
 	player player.Player
@@ -54,7 +105,6 @@ type homeModel struct {
 	queueTotal int // 队列总长；0 = 无队列信息（隐藏展示）
 	queueMode  queue.Mode
 
-	progress  progress.Model
 	spinner   spinner.Model
 	lyricView viewport.Model
 
@@ -72,7 +122,6 @@ type homeModel struct {
 func newHomeModel(p player.Player) homeModel {
 	return homeModel{
 		player:      p,
-		progress:    progress.New(progress.WithDefaultGradient(), progress.WithWidth(40)),
 		spinner:     spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("63")))),
 		lyricView:   viewport.New(0, 0),
 		lyricsState: lyricsNone,
@@ -83,7 +132,10 @@ func newHomeModel(p player.Player) homeModel {
 // Init 首页无独立 cmd（spinner tick 由 root 统一驱动）。
 func (m homeModel) Init() tea.Cmd { return nil }
 
-// Update 处理首页局部按键（←/→ seek）；全局按键由 root 处理。
+// Update 处理首页局部按键（←/→ seek、, 上一首、. 下一首）与鼠标
+// （进度条点击 seek、按钮行点击）；全局按键（空格等）由 root 处理。
+// 鼠标坐标换算：屏幕坐标 - 1 = 页面坐标（Tab 栏占 1 行，root.onMouse
+// 在 Y!=0 时已把事件 delegate 到本页）。
 func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -109,6 +161,48 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 			}
 			m.state.Position = target
 			return m, seekCmd(m.player, target)
+		case ",":
+			if m.state.Track == nil {
+				return m, nil
+			}
+			return m, emitPrevTrack()
+		case ".":
+			if m.state.Track == nil {
+				return m, nil
+			}
+			return m, emitNextTrack()
+		}
+	case tea.MouseMsg:
+		// 屏幕坐标 → 页面坐标（Tab 栏占 1 行）
+		pageY := msg.Y - 1
+		pressLeft := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft
+		switch {
+		case pageY == m.height-2 && pressLeft:
+			// 进度条行：点击列 ∈ [0, barW) → seek 到对应百分比位置
+			if m.state.Track == nil {
+				return m, nil
+			}
+			barW := m.progressBarWidth()
+			if msg.X >= 0 && msg.X < barW {
+				return m, seekCmd(m.player, progressClickPercent(msg.X, barW)*m.state.Duration)
+			}
+			return m, nil
+		case pageY == m.height-1 && pressLeft:
+			// 按钮行：按 X 区间触发对应动作
+			if m.state.Track == nil {
+				return m, nil
+			}
+			switch {
+			case hitBtn(msg.X, btnPrevStart):
+				return m, emitPrevTrack()
+			case hitBtn(msg.X, btnToggleStart):
+				return m, emitTogglePlay()
+			case hitBtn(msg.X, btnNextStart):
+				return m, emitNextTrack()
+			case hitBtn(msg.X, btnModeStart):
+				return m, emitToggleMode()
+			}
+			return m, nil
 		}
 	}
 	return m, nil
@@ -256,8 +350,10 @@ func (m homeModel) setSize(width, height int) homeModel {
 			m.coverFailed = true
 		}
 	}
-	m.lyricView.Width = width
-	lyricH := height - topH - 2
+	// 歌词 viewport 尺寸 = 中间区歌词列尺寸：宽 = width-coverW-4（gap 2 + 边距 2），
+	// 高 = height-2（底部两行之外的中间区高度）
+	m.lyricView.Width = m.lyricsColumnWidth()
+	lyricH := height - 2
 	if lyricH < 3 {
 		lyricH = 3
 	}
@@ -295,16 +391,120 @@ func (m *homeModel) scrollLyricsTo(idx int) {
 	m.lyricView.SetYOffset(offset)
 }
 
-// view 渲染首页。
+// view 渲染首页（全屏撑满：输出恰好 m.height 行）。
+// 无曲目空态：全屏居中提示；有曲目：中间区（封面+歌词）+ 底部进度条行
+// + 底部按钮行。
 func (m homeModel) view() string {
 	if m.state.Track == nil {
-		return lipgloss.NewStyle().
-			Padding(2, 0).
+		hint := lipgloss.NewStyle().
 			Faint(true).
 			Render("🎵 未在播放\n\n按 Tab 或 2 前往搜索页，输入关键词开始搜索")
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, hint)
 	}
-	top := lipgloss.JoinHorizontal(lipgloss.Top, m.coverView(), "  ", m.trackInfoView())
-	return lipgloss.JoinVertical(lipgloss.Left, top, "\n", m.lyricsView())
+	return m.middleView() + "\n" + m.progressRowView() + "\n" + m.controlBarView()
+}
+
+// middleHeight 中间区高度（页面高 - 底部两行）。
+func (m homeModel) middleHeight() int {
+	h := m.height - 2
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
+// lyricsColumnWidth 歌词列宽：页面宽 - 封面宽 - gap 2 - 边距 2。
+func (m homeModel) lyricsColumnWidth() int {
+	w := m.width - coverW - 4
+	if w < 10 {
+		w = 10
+	}
+	return w
+}
+
+// middleView 中间区（占 height-2 行）：封面列与歌词列水平并排（gap 2），
+// 整体在页面宽度内水平居中；封面与歌词内容各自在列内垂直居中。
+func (m homeModel) middleView() string {
+	midH := m.middleHeight()
+	lyricsW := m.lyricsColumnWidth()
+	coverCol := lipgloss.Place(coverW, midH, lipgloss.Center, lipgloss.Center, m.coverView())
+	lyricsCol := lipgloss.Place(lyricsW, midH, lipgloss.Center, lipgloss.Center, m.lyricsColumnView())
+	block := lipgloss.JoinHorizontal(lipgloss.Top, coverCol, "  ", lyricsCol)
+	return lipgloss.Place(m.width, midH, lipgloss.Center, lipgloss.Center, block)
+}
+
+// lyricsColumnView 按四种歌词态渲染歌词列内容（居中由外层 Place 处理；
+// synced/plain 走 viewport：行数溢出时保持滚动 + scrollLyricsTo 当前行居中，
+// 内容少时 viewport.View() 输出固定高、顶部对齐）。
+func (m homeModel) lyricsColumnView() string {
+	switch m.lyricsState {
+	case lyricsLoading:
+		return lipgloss.NewStyle().Faint(true).Render(m.spinner.View() + " 歌词加载中…")
+	case lyricsNone:
+		return lipgloss.NewStyle().Faint(true).Render("暂无歌词")
+	case lyricsSynced, lyricsPlain:
+		return m.lyricView.View()
+	}
+	return ""
+}
+
+// progressBarWidth 进度条可见宽（与渲染一致；点击命中区间 [0, barW)）。
+func (m homeModel) progressBarWidth() int {
+	timeStr := formatDuration(m.state.Position) + " / " + formatDuration(m.state.Duration)
+	w := m.width - ansi.StringWidth(timeStr) - 2
+	if w < 1 {
+		w = 1
+	}
+	return w
+}
+
+// progressRowView 底部行 1（页面内 Y == height-2）：线条渐变进度条 + 时间串。
+func (m homeModel) progressRowView() string {
+	timeStr := formatDuration(m.state.Position) + " / " + formatDuration(m.state.Duration)
+	return lineProgressBar(m.progressBarWidth(), m.percent()) + " " + timeStr
+}
+
+// controlBarView 底部行 2（页面内 Y == height-1）：控制按钮 + 曲目信息 + 队列位置。
+// 按钮图标渲染在 X 区间起点：⏮(0) ⏯(4) ⏭(8) 模式图标(13)，与点击区间一致。
+// 标题超宽截断（lipgloss Width）；无队列信息时省略 "3/12 · 模式" 段。
+func (m homeModel) controlBarView() string {
+	t := m.state.Track
+	controls := "⏮   ⏯   ⏭    " + modeIcon(m.queueMode) + "  | "
+	right := ""
+	if m.queueTotal > 0 {
+		right = fmt.Sprintf(" | %d/%d · %s", m.queuePos, m.queueTotal, modeShortName(m.queueMode))
+	}
+	avail := m.width - ansi.StringWidth(controls) - ansi.StringWidth(right)
+	if avail < 1 {
+		avail = 1
+	}
+	title := lipgloss.NewStyle().Width(avail).Render(t.Title + " - " + t.Artist)
+	return controls + title + right
+}
+
+// modeIcon 三态播放模式图标。
+func modeIcon(m queue.Mode) string {
+	switch m {
+	case queue.Shuffle:
+		return "🔀"
+	case queue.RepeatOne:
+		return "🔂"
+	default:
+		return "🔁"
+	}
+}
+
+// modeShortName 三态播放模式短名（首页按钮行展示；
+// 后续与 queue.go 的 modeName 统一）。
+func modeShortName(m queue.Mode) string {
+	switch m {
+	case queue.Shuffle:
+		return "随机"
+	case queue.RepeatOne:
+		return "单曲循环"
+	default:
+		return "顺序"
+	}
 }
 
 // coverView 渲染封面；无封面（失败/加载中）时显示占位框。
@@ -325,30 +525,6 @@ func (m homeModel) coverView() string {
 		Render("🎵\nNo Cover")
 }
 
-// trackInfoView 渲染歌曲信息 + 进度条 + 播放状态。
-func (m homeModel) trackInfoView() string {
-	t := m.state.Track
-	infoW := m.width - coverW - 6
-	if infoW < 20 {
-		infoW = 20
-	}
-	title := lipgloss.NewStyle().Bold(true).Width(infoW).Render(t.Title)
-	meta := lipgloss.NewStyle().Faint(true).Render(t.Artist + " · " + t.Source)
-	bar := m.progress.ViewAs(m.percent())
-	pos := formatDuration(m.state.Position) + " / " + formatDuration(m.state.Duration)
-	status := "⏸ 已暂停"
-	if m.state.Playing {
-		status = "⏵ 播放中"
-	}
-	lines := []string{title, meta, bar + "  " + pos, status}
-	// 队列位置与模式（如 "3/12 · 随机"）；无队列信息时不展示
-	if m.queueTotal > 0 {
-		lines = append(lines, lipgloss.NewStyle().Faint(true).Render(
-			fmt.Sprintf("%d/%d · %s", m.queuePos, m.queueTotal, modeName(m.queueMode))))
-	}
-	return strings.Join(lines, "\n")
-}
-
 // percent 计算进度百分比并 clamp 到 [0,1]。
 func (m homeModel) percent() float64 {
 	if m.state.Duration <= 0 {
@@ -362,18 +538,4 @@ func (m homeModel) percent() float64 {
 		return 1
 	}
 	return p
-}
-
-// lyricsView 按四种歌词态渲染歌词区。
-func (m homeModel) lyricsView() string {
-	style := lipgloss.NewStyle().Faint(true)
-	switch m.lyricsState {
-	case lyricsLoading:
-		return style.Render(m.spinner.View() + " 歌词加载中…")
-	case lyricsNone:
-		return style.Render("暂无歌词")
-	case lyricsSynced, lyricsPlain:
-		return m.lyricView.View()
-	}
-	return ""
 }
