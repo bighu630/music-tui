@@ -493,30 +493,47 @@ func (m homeModel) middleView() string {
 func (m homeModel) lyricsColumnView() string {
 	switch m.lyricsState {
 	case lyricsLoading:
-		return lipgloss.NewStyle().Faint(true).Render(m.spinner.View() + " 歌词加载中…")
+		// 提示文本同样以屏幕中心居中（centerLyrics 补尾空格到列宽，
+		// 外层 Place 不再重新水平居中）。
+		return m.centerLyrics(lipgloss.NewStyle().Faint(true).Render(m.spinner.View() + " 歌词加载中…"))
 	case lyricsNone:
-		return lipgloss.NewStyle().Faint(true).Render("暂无歌词")
+		return m.centerLyrics(lipgloss.NewStyle().Faint(true).Render("暂无歌词"))
 	case lyricsSynced, lyricsPlain:
-		// 歌词文本在列内水平居中：viewport 输出每行已 pad 到列宽（左对齐），
-		// 重新计算前导空格使文本居中（注：viewport 的 Style.Align 不生效——
-		// bubbles viewport.View 会把 Style 的 Width/Height Unset 后再 Render）。
-		return centerPad(m.lyricView.View(), m.lyricsColumnWidth())
+		// 歌词文本以屏幕中心为基准水平居中：viewport 输出每行已 pad 到
+		// 列宽（左对齐），重新计算前导空格使文本中心 ≈ 屏幕中心。
+		// （歌词列内居中会让文本整体偏右 ~15 列：歌词列起点 = 封面右缘
+		//  + gap = 32，列内居中 → 文本中心 = 32 + 列宽/2 = 76 ≠ 屏幕中心 60。
+		//  注：viewport 的 Style.Align 不生效——bubbles viewport.View 会把
+		//  Style 的 Width/Height Unset 后再 Render。）
+		return m.centerLyrics(m.lyricView.View())
 	}
 	return ""
 }
 
-// centerPad 把多行文本每行在其 width 列内水平居中（行宽不足时补前导空格；
-// 超宽行保持原样）。viewport 填充的行尾空格先剔除，避免宽度计算失真。
-func centerPad(s string, width int) string {
+// centerLyrics 把每行文本水平居中到屏幕中心（歌词列起点 = coverW+2），
+// 并补尾空格到歌词列宽——外层 Place(lyricsW, ...) 对满宽行不再重新水平
+// 居中（否则短行/提示文本会被推回歌词列中心，回归：暂无歌词偏右）。
+// viewport 填充的行尾空格先剔除，避免宽度计算失真；超宽行保持原样。
+func (m homeModel) centerLyrics(s string) string {
+	colStart := coverW + 2 // 歌词列在中间区的起点（封面列 + gap）
+	midX := m.width / 2    // 屏幕中心（歌词视觉居中基准）
+	lyricsW := m.lyricsColumnWidth()
+	if midX <= colStart {
+		return s
+	}
 	lines := strings.Split(s, "\n")
 	for i, ln := range lines {
 		trimmed := strings.TrimRight(ln, " ")
-		if vis := ansi.StringWidth(trimmed); vis < width {
-			pad := (width - vis) / 2
-			lines[i] = strings.Repeat(" ", pad) + trimmed
-		} else {
-			lines[i] = trimmed
+		vis := ansi.StringWidth(trimmed)
+		pad := midX - colStart - vis/2
+		if pad < 0 {
+			pad = 0
 		}
+		tail := lyricsW - pad - vis
+		if tail < 0 {
+			tail = 0
+		}
+		lines[i] = strings.Repeat(" ", pad) + trimmed + strings.Repeat(" ", tail)
 	}
 	return strings.Join(lines, "\n")
 }
