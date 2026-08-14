@@ -2,14 +2,12 @@ package ui
 
 import (
 	"bytes"
-	"errors"
 	"image"
 	"image/png"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -91,14 +89,17 @@ func TestHomeCoverStates(t *testing.T) {
 
 	// 失败 → 占位框
 	m, _ = update(m, coverResultMsg{trackID: "t1", err: lyrics.ErrNotFound})
-	if m.home.coverWidget != nil || !m.home.coverFallback {
-		t.Error("下载失败应显示占位框")
+	if !m.home.coverFallback {
+		t.Error("下载失败应置 coverFallback（占位框）")
 	}
 
-	// 成功 → 创建 widget
+	// 成功 → 渲染缓存
 	m, _ = update(m, coverResultMsg{trackID: "t1", path: pngPath})
-	if m.home.coverWidget == nil || m.home.coverFallback {
-		t.Error("下载成功应创建 coverWidget")
+	if m.home.coverFallback || m.home.coverRenderCache == "" {
+		t.Error("下载成功应渲染 coverRenderCache 且不置 fallback")
+	}
+	if got := m.home.coverView(); got != m.home.coverRenderCache {
+		t.Error("coverView 应直接返回缓存")
 	}
 }
 
@@ -112,140 +113,43 @@ func TestHomeCoverRenderCache(t *testing.T) {
 	writeTestPNG(t, pngPath)
 
 	m, _ = update(m, coverResultMsg{trackID: "t1", path: pngPath})
-	if m.home.coverWidget == nil {
-		t.Fatal("封面下载成功应创建 widget")
-	}
-	// setCover 后应立即渲染并缓存（避免 view 每帧重复 Render）
+	// setCover 后应立即渲染并缓存（避免 view 每帧重复解码/缩放）
 	if m.home.coverRenderCache == "" {
 		t.Fatal("setCover 后 coverRenderCache 应为非空")
 	}
-	if m.home.coverFailed {
-		t.Error("渲染成功后 coverFailed 应为 false")
+	if m.home.coverFallback {
+		t.Error("渲染成功后 coverFallback 应为 false")
 	}
 	if got := m.home.coverView(); got != m.home.coverRenderCache {
 		t.Error("coverView 应直接返回缓存")
 	}
 
-	// setSize 失效并立即重试渲染一次（结果赋回模型）：缓存回填后仍命中
+	// 固定 30×17 字符画与终端尺寸无关：setSize 不清缓存、不重渲
+	cacheBefore := m.home.coverRenderCache
 	m.home = m.home.setSize(120, 40)
-	if m.home.coverRenderCache == "" {
-		t.Error("setSize 后应立即重渲并回填 coverRenderCache")
-	}
-	if m.home.coverFailed {
-		t.Error("setSize 重渲成功后 coverFailed 应为 false")
+	if m.home.coverRenderCache != cacheBefore {
+		t.Error("setSize 不应改动封面缓存（固定尺寸与终端无关）")
 	}
 	if got := m.home.coverView(); got != m.home.coverRenderCache {
 		t.Error("setSize 后 coverView 应直接返回缓存")
 	}
 }
 
-// failCover 渲染总是失败的 fake 封面 widget（用于验证首次 Render 失败后
-// coverView 不再每帧重试；渲染成功后可翻转）。
-type failCover struct {
-	mu    sync.Mutex
-	calls int
-	fail  bool // true 时 Render 返回错误
-	out   string
-}
-
-func (f *failCover) Render() (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls++
-	if f.fail {
-		return "", errors.New("render boom")
-	}
-	return f.out, nil
-}
-
-func (f *failCover) callCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.calls
-}
-
-// setFail 切换渲染失败/成功模式。
-func (f *failCover) setFail(fail bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.fail = fail
-}
-
-// TestHomeCoverRenderFailureStopsPerFrameRetry 守护：setCover 首次 Render
-// 失败（等价状态：widget 存在、缓存为空、coverFailed=true）后，coverView
-// 不再每帧重试（16MiB 解码+缩放）；仅 setSize 时允许重试一次，再失败重新置位。
-func TestHomeCoverRenderFailureStopsPerFrameRetry(t *testing.T) {
+// TestHomeCoverRenderStable 回归：自绘封面缓存行数恒定（coverH 行），
+// 窄窗口裁剪只影响展示不影响缓存。
+func TestHomeCoverRenderStable(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 
-	// 构造 setCover 首次 Render 失败后的状态
-	fc := &failCover{fail: true}
-	m.home.coverWidget = fc
-	m.home.coverRenderCache = ""
-	m.home.coverFailed = true
+	pngPath := filepath.Join(t.TempDir(), "cover.png")
+	writeTestPNG(t, pngPath)
+	m, _ = update(m, coverResultMsg{trackID: "t1", path: pngPath})
 
-	// 失败标记置位：coverView 应直接占位框，不触发任何 Render
-	if got := m.home.coverView(); got == "" || !strings.Contains(got, "No Cover") {
-		t.Errorf("coverView 应显示占位框, got %q", got)
-	}
-	if n := fc.callCount(); n != 0 {
-		t.Errorf("coverFailed 置位后 coverView 不应重试 Render, calls = %d", n)
-	}
-
-	// setSize 失效缓存并重置失败标记 → 仅重试一次，仍失败则重新置位
-	m.home = m.home.setSize(120, 40)
-	if got := m.home.coverView(); got == "" || !strings.Contains(got, "No Cover") {
-		t.Errorf("重试失败后 coverView 应显示占位框, got %q", got)
-	}
-	if n := fc.callCount(); n != 1 {
-		t.Errorf("setSize 后应只重试一次 Render, calls = %d", n)
-	}
-	if !m.home.coverFailed {
-		t.Error("重试仍失败应重新置位 coverFailed")
-	}
-
-	// 再次渲染（如下一帧）不得再触发 Render
-	_ = m.home.coverView()
-	if n := fc.callCount(); n != 1 {
-		t.Errorf("重试失败后 coverView 不应再每帧重试, calls = %d", n)
-	}
-}
-
-// TestHomeCoverRenderRetryAfterSetSizeRecovers 守护：setSize 重试一次成功
-// 后应回填缓存并正常展示，后续 view 不再触发 Render。
-func TestHomeCoverRenderRetryAfterSetSizeRecovers(t *testing.T) {
-	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
-	m, cmd := m.startPlay(testTrack("t1"))
-	_ = execCmds(cmd)
-
-	fc := &failCover{fail: true, out: "▶" + strings.Repeat("\n", 4)}
-	m.home.coverWidget = fc
-	m.home.coverRenderCache = ""
-	m.home.coverFailed = true
-
-	// setSize 触发一次重试：成功 → 缓存回填，coverFailed 复位
-	fc.setFail(false)
-	m.home = m.home.setSize(120, 40)
-	if got := m.home.coverView(); got == "" || !strings.Contains(got, "▶") {
-		t.Errorf("重试成功后 coverView 应返回渲染结果, got %q", got)
-	}
-	if m.home.coverFailed {
-		t.Error("重试成功后 coverFailed 应为 false")
-	}
-	if m.home.coverRenderCache == "" {
-		t.Error("重试成功后应回填 coverRenderCache")
-	}
-	if n := fc.callCount(); n != 1 {
-		t.Errorf("重试成功应只渲染一次, calls = %d", n)
-	}
-	// 命中缓存：后续 view 不再触发 Render
-	_ = m.home.coverView()
-	_ = m.home.coverView()
-	if n := fc.callCount(); n != 1 {
-		t.Errorf("命中缓存后不应再 Render, calls = %d", n)
+	lines := strings.Split(m.home.coverRenderCache, "\n")
+	if len(lines) != coverH {
+		t.Errorf("封面缓存行数 = %d, want %d（恒定）", len(lines), coverH)
 	}
 }
 
@@ -655,4 +559,103 @@ func TestHomeMouseButtonClick(t *testing.T) {
 	if c := press(0); c != nil {
 		t.Error("无曲目时点击按钮不应产生命令")
 	}
+}
+
+// TestHomeCoverRenderSize 回归：自绘封面输出必须恰好 coverH 行
+// （曾依赖 go-termimg：尺寸单位混乱导致 1~17 行漂移，布局崩坏）。
+func TestHomeCoverRenderSize(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	pngPath := filepath.Join(t.TempDir(), "cover.png")
+	writeTestPNG(t, pngPath)
+	m, _ = update(m, coverResultMsg{trackID: "t1", path: pngPath})
+	if m.home.coverRenderCache == "" {
+		t.Fatal("封面渲染缓存应为非空")
+	}
+	lines := strings.Split(m.home.coverRenderCache, "\n")
+	if len(lines) != coverH {
+		t.Errorf("封面渲染行数 = %d, want %d（恒定）", len(lines), coverH)
+	}
+}
+
+// TestHomeLyricsCenteredWhenFew 回归：歌词行数少于视口高时，歌词列内容
+// 应垂直居中（视口收缩到歌词行数，由外层 Place 居中）而非顶部对齐。
+func TestHomeLyricsCenteredWhenFew(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	ly, err := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n[00:30.00]第三行\n[00:40.00]第四行\n[00:50.00]第五行\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 25, Duration: 200}})
+	m.home = m.home.setSize(120, 39)
+
+	out := m.home.view()
+	lines := strings.Split(out, "\n")
+	if len(lines) != 39 {
+		t.Fatalf("view 行数 = %d, want 39", len(lines))
+	}
+	// 5 行歌词应出现在中间区中部（37 行中间区 → 首行在 ~16 行附近）
+	first := -1
+	for i, ln := range lines {
+		if strings.Contains(stripAnsiForTest(ln), "第一行") {
+			first = i
+			break
+		}
+	}
+	if first < 10 || first > 22 {
+		t.Errorf("歌词首行出现在行 %d, want 中间区中部（10~22）", first)
+	}
+}
+
+// TestHomeLyricsFillWhenMany 歌词行数多于视口高时占满歌词列（滚动语义不变）。
+func TestHomeLyricsFillWhenMany(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	var sb strings.Builder
+	for i := 0; i < 60; i++ {
+		sb.WriteString("[00:10.00]歌词行 ")
+		sb.WriteString(string(rune('A' + i%26)))
+		sb.WriteString("\n")
+	}
+	ly, err := lyrics.ParseLRC([]byte(sb.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 25, Duration: 200}})
+	m.home = m.home.setSize(120, 39)
+
+	if m.home.lyricView.Height != 37 {
+		t.Errorf("歌词超多时 lyricView.Height = %d, want 37（占满中间区）", m.home.lyricView.Height)
+	}
+}
+
+func stripAnsiForTest(s string) string {
+	var sb strings.Builder
+	in := false
+	for _, r := range s {
+		if r == '\x1b' {
+			in = true
+			continue
+		}
+		if in {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				in = false
+			}
+			continue
+		}
+		sb.WriteRune(r)
+	}
+	return sb.String()
 }

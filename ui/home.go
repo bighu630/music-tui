@@ -2,10 +2,13 @@ package ui
 
 import (
 	"fmt"
+	"image"
 	"os"
 	"strings"
 
-	"github.com/blacktop/go-termimg"
+	_ "image/jpeg"
+	_ "image/png"
+
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -86,12 +89,6 @@ const (
 	lyricsNone                       // 无歌词
 )
 
-// coverRenderer 封面渲染接口（*termimg.ImageWidget 实现；测试可注入
-// 渲染失败的 fake，验证首次 Render 失败后不再每帧重试）。
-type coverRenderer interface {
-	Render() (string, error)
-}
-
 // homeModel 首页：封面 + 歌词 + 底部进度条行与按钮行。
 // 播放状态由 root 通过 syncState 推入，页面自身不持有服务。
 type homeModel struct {
@@ -113,11 +110,8 @@ type homeModel struct {
 	lyrics      *lyrics.Lyrics
 	currentLine int // 当前高亮行下标；-1 = 无高亮
 
-	coverWidget      coverRenderer
-	coverRenderCache string // 封面渲染缓存：setCover 时渲染一次；setSize/resetForTrack 时失效
-	coverFailed      bool   // 封面渲染失败标记：置位后 coverView 不再每帧重试（仅 setSize 时重置重试一次）
-	coverFallback    bool   // 降级链全部失败 → 占位框
-	coverTrackID     string // 当前封面所属歌曲 ID
+	coverRenderCache string // 封面渲染缓存：setCover 时渲染一次（固定 30×17 字符画，不依赖终端尺寸）
+	coverFallback    bool   // 封面加载失败 → 占位框
 }
 
 func newHomeModel(p player.Player) homeModel {
@@ -226,11 +220,8 @@ func (m homeModel) resetForTrack(track *model.Track) homeModel {
 	m.lyricsState = lyricsLoading
 	m.currentLine = -1
 	m.lyricView.SetContent("")
-	m.coverWidget = nil
 	m.coverRenderCache = ""
-	m.coverFailed = false
 	m.coverFallback = false
-	m.coverTrackID = track.ID
 	return m
 }
 
@@ -286,10 +277,13 @@ func (m homeModel) setLyrics(err error, ly *lyrics.Lyrics) homeModel {
 		m.lyrics = ly
 		m.lyricsState = lyricsSynced
 		m.currentLine = -1
+		// 歌词到达后按行数收缩视口高度（行少时内容垂直居中）。
+		m.lyricView.Height = m.lyricsHeight()
 		m.rebuildLyrics()
 	case ly.Plain != "":
 		m.lyrics = ly
 		m.lyricsState = lyricsPlain
+		m.lyricView.Height = m.lyricsHeight()
 		m.lyricView.SetContent(ly.Plain)
 	default:
 		m.lyricsState = lyricsNone
@@ -306,69 +300,73 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 		m.coverFallback = true
 		return m
 	}
-	w, err := termimg.NewImageWidgetFromFile(path)
+	// 自绘像素封面：图片 → 缩放 → 固定 coverW×coverH 半块字符画。
+	// 弃用 go-termimg（mosaic 尺寸单位是像素需 ×2 折算、tmux 下渲染输出
+	// 行数不稳定实测 1~17 行漂移、每行 SGR 数百字节），自绘输出恒定
+	// 行数/宽度、纯 256 色 SGR，与终端特性无关。
+	f, err := os.Open(path)
 	if err != nil {
 		m.coverFallback = true
 		return m
 	}
-	w.SetSize(coverW, coverH)
-	if os.Getenv("TMUX") != "" {
-		// tmux 下强制字符模式并跳过终端特性探测：tmux 对 kitty/sixel 的像素
-		// 尺寸查询（CSI 16t）不响应，且 go-termimg 的探测在 tmux 下每个查询
-		// 超时 100ms（多次查询合计 ~500ms 同步冻结 UI）。TERMIMG_BYPASS_DETECTION
-		// 是库原生支持的环境变量（detect.go getBypassedFeatures），设为
-		// halfblocks 后不查询终端、直接字符模式渲染。
-		// 回归：tmux 中恢复会话后按键全部失效（go-termimg 无超时读 goroutine
-		// 劫持 /dev/tty 输入，32b4b3b 已在库内修复）。
-		_ = os.Setenv("TERMIMG_BYPASS_DETECTION", "halfblocks")
-		w.SetProtocol(termimg.Halfblocks)
-	} else {
-		w.SetProtocol(termimg.Auto)
+	defer f.Close()
+	img, _, err := image.Decode(f)
+	if err != nil {
+		m.coverFallback = true
+		return m
 	}
-	m.coverWidget = w
+	s := renderCoverArt(img, coverW, coverH)
+	if s == "" {
+		m.coverFallback = true
+		return m
+	}
+	m.coverRenderCache = s
 	m.coverFallback = false
-	m.coverTrackID = trackID
-	// 创建后立即渲染并缓存：go-termimg 渲染涉及图片加载/缩放，代价高，
-	// 不能在 view 每帧重复调用；首次渲染失败置 coverFailed，禁止 coverView
-	// 每帧重试（仅 setSize 时重置允许重试一次）。
-	m.coverFailed = false
-	if s, err := w.Render(); err == nil && s != "" {
-		m.coverRenderCache = s
-	} else {
-		m.coverFailed = true
-	}
 	return m
 }
 
 // setSize 响应窗口尺寸变化。
 func (m homeModel) setSize(width, height int) homeModel {
 	m.width, m.height = width, height
-	m.coverRenderCache = "" // 渲染输出可能依赖终端尺寸，尺寸变化后失效重渲
-	// 尺寸变化后重试一次封面渲染：重置 coverFailed 允许重试（含此前失败
-	// 的场景），成功回填缓存，失败重新置位。setSize 的返回值会被赋回模型，
-	// 写盘持久——view 侧（值接收者）的写入会丢失，故渲染不能放在 coverView。
-	m.coverFailed = false
-	if m.coverWidget != nil {
-		if s, err := m.coverWidget.Render(); err == nil && s != "" {
-			m.coverRenderCache = s
-		} else {
-			m.coverFailed = true
+	// 封面字符画固定 30×17、与终端尺寸无关：setSize 不清缓存不重渲。
+	// 歌词 viewport 尺寸 = 中间区歌词列尺寸：宽 = width-coverW-4（gap 2 + 边距 2），
+	// 高 = 歌词内容行数收缩后居中（见 lyricsHeight），窄窗口下不超过中间区高。
+	m.lyricView.Width = m.lyricsColumnWidth()
+	m.lyricView.Height = m.lyricsHeight()
+	// 视口高度可能已变化（歌词行数收缩），重算滚动偏移：此前基于
+	// 未知尺寸（Height=1）的 scrollLyricsTo 会留下越界 YOffset，
+	// 导致歌词首行被吞（回归：TestHomeLyricsCenteredWhenFew）。
+	if m.lyricsState == lyricsSynced && m.currentLine >= 0 {
+		m.scrollLyricsTo(m.currentLine)
+	}
+	return m
+}
+
+// lyricLineCount 歌词总行数（synced = 同步歌词行数；plain = 纯文本行数；
+// 其他态 = 0）。用于歌词行数少于视口时收缩视口高度实现内容垂直居中。
+func (m homeModel) lyricLineCount() int {
+	switch m.lyricsState {
+	case lyricsSynced:
+		if m.lyrics != nil {
+			return len(m.lyrics.Lines)
+		}
+	case lyricsPlain:
+		if m.lyrics != nil && m.lyrics.Plain != "" {
+			return len(strings.Split(m.lyrics.Plain, "\n"))
 		}
 	}
-	// 歌词 viewport 尺寸 = 中间区歌词列尺寸：宽 = width-coverW-4（gap 2 + 边距 2），
-	// 高 = 中间区高；高度下限 3 也 clamp 到中间区高——窄窗口下歌词列不允许
-	// 比中间区还高（回归：TestHomeViewNarrowWindow）。
-	m.lyricView.Width = m.lyricsColumnWidth()
+	return 0
+}
+
+// lyricsHeight 歌词视口高度：歌词行数已知且少于中间区高时收缩到行数
+// （歌词列内容垂直居中，而非顶部对齐）；行数未知/超多时占满中间区
+// （viewport 滚动 + scrollLyricsTo 当前行居中）。
+func (m homeModel) lyricsHeight() int {
 	midH := m.middleHeight()
-	lyricH := height - 2
-	if lyricH < 3 {
-		lyricH = 3
+	if n := m.lyricLineCount(); n > 0 && n < midH {
+		return n
 	}
-	if lyricH > midH {
-		lyricH = midH
-	}
-	m.lyricView.Height = lyricH
-	return m
+	return midH
 }
 
 // rebuildLyrics 用当前高亮行重渲染歌词内容。
@@ -509,10 +507,8 @@ func modeIcon(m queue.Mode) string {
 }
 
 // coverView 渲染封面；无封面（失败/加载中）时显示占位框。
-// 纯读取：渲染只发生在 setCover（首次）与 setSize（尺寸变化后重试一次），
-// 成功回填 coverRenderCache，失败置 coverFailed；coverView 绝不触发 Render，
-// 避免每帧重复 16MiB 解码+缩放（值接收者写入不持久，渲染写回必须在
-// setCover/setSize 这类结果被赋回模型的路径上完成）。
+// 纯读取：渲染只发生在 setCover（解码 + 自绘字符画，一次完成），
+// 缓存固定 30×17 与终端尺寸无关；coverView 绝不触发渲染。
 // 窄窗口（中间区高 < 封面行数）：lipgloss.Place 不截断超高内容，会把进度条/
 // 按钮行推出可视区（回归：TestHomeViewNarrowWindow），故按行裁剪到中间区高。
 // 对整块渲染串按行切分是安全的：halfblocks 渲染每行自含 ANSI 序列，无跨行
@@ -520,7 +516,7 @@ func modeIcon(m queue.Mode) string {
 // （height==0，尚未收到 WindowSizeMsg）时不裁剪，保留完整封面。
 func (m homeModel) coverView() string {
 	var s string
-	if m.coverWidget != nil && !m.coverFailed && m.coverRenderCache != "" {
+	if !m.coverFallback && m.coverRenderCache != "" {
 		s = m.coverRenderCache
 	} else {
 		s = lipgloss.NewStyle().

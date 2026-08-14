@@ -599,15 +599,36 @@ func (m Model) View() string {
 			body = m.historyPage.view()
 		}
 	}
-	if m.lastError != "" {
-		body += "\n\n" + lipgloss.NewStyle().
-			Foreground(lipgloss.Color("9")).
-			Render("⚠ "+m.lastError)
-	}
-	if m.notice != "" {
-		body += "\n\n" + lipgloss.NewStyle().
-			Foreground(lipgloss.Color("10")).
-			Render("✔ "+m.notice)
+	if m.lastError != "" || m.notice != "" {
+		// 横幅替换 body 末尾行而非追加：全屏撑满约束下追加会使 root.View
+		// 超出终端高度，终端滚动把顶部 Tab 栏滚出屏幕并残留旧帧
+		// （回归：播放失败/恢复失败横幅曾导致 Tab 栏消失 + 画面残影）。
+		lines := strings.Split(body, "\n")
+		if m.lastError != "" {
+			banner := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("9")).
+				Render("⚠ " + m.lastError)
+			if len(lines) > 0 {
+				lines[len(lines)-1] = banner
+			} else {
+				body = banner
+			}
+		}
+		if m.notice != "" {
+			banner := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("10")).
+				Render("✔ " + m.notice)
+			idx := len(lines) - 1
+			if m.lastError != "" {
+				idx-- // error 占末尾行时，notice 显示在其上方
+			}
+			if idx >= 0 && len(lines) > 0 {
+				lines[idx] = banner
+			}
+		}
+		if len(lines) > 0 {
+			body = strings.Join(lines, "\n")
+		}
 	}
 	return m.tabBar() + "\n" + body
 }

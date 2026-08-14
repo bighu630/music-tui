@@ -575,7 +575,7 @@ func TestStaleAsyncResultsIgnored(t *testing.T) {
 		t.Error("过期歌词结果不应被应用")
 	}
 	m, _ = update(m, coverResultMsg{trackID: "stale", path: "/tmp/x.jpg"})
-	if m.home.coverWidget != nil {
+	if m.home.coverRenderCache != "" {
 		t.Error("过期封面结果不应被应用")
 	}
 }
@@ -1376,5 +1376,46 @@ func TestLoadFailHint(t *testing.T) {
 		if got := loadFailureHint(tc.fileErr); !strings.Contains(got, tc.want) {
 			t.Errorf("loadFailureHint(%q) = %q, want 含 %q", tc.fileErr, got, tc.want)
 		}
+	}
+}
+
+// TestRootViewBannerStaysWithinHeight 回归：错误/成功横幅必须替换 body 末尾行
+// 而非追加——全屏撑满约束下追加会让 root.View 超出终端高度，终端滚动把
+// Tab 栏滚出屏幕（曾导致 Tab 栏消失 + 帧残影）。
+func TestRootViewBannerStaysWithinHeight(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	m.lastError = "恢复播放失败: 测试错误"
+	out := m.View()
+	if got := len(strings.Split(out, "\n")); got != 24 {
+		t.Errorf("有错误横幅时 View 行数 = %d, want 24（不超屏）", got)
+	}
+	if !strings.Contains(out, "⚠") {
+		t.Error("View 应包含错误横幅")
+	}
+
+	m.lastError = ""
+	m.notice = "已添加到「收藏」"
+	out = m.View()
+	if got := len(strings.Split(out, "\n")); got != 24 {
+		t.Errorf("有成功横幅时 View 行数 = %d, want 24", got)
+	}
+	if !strings.Contains(out, "✔") {
+		t.Error("View 应包含成功横幅")
+	}
+
+	// 两者同时存在：行数仍不超屏，且 error 在末尾、notice 在其上方
+	m.lastError = "播放失败"
+	out = m.View()
+	if got := len(strings.Split(out, "\n")); got != 24 {
+		t.Errorf("双横幅时 View 行数 = %d, want 24", got)
+	}
+	lines := strings.Split(out, "\n")
+	if !strings.Contains(lines[23], "⚠") {
+		t.Errorf("错误横幅应在末尾行, got %q", lines[23])
+	}
+	if !strings.Contains(lines[22], "✔") {
+		t.Errorf("成功横幅应在错误横幅上方, got %q", lines[22])
 	}
 }
