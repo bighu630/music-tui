@@ -105,3 +105,4 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] Nit 5：进度条行宽差 1（barW = width-timeW-1 + 可见宽断言）
 - [x] Nit 6：lineProgressBar 色阶预渲染（sync.Once 惰性，字节一致；TestProgressPreRenderedBytes）
 - [x] Nit 8：queuePos 注释更正（0 渲染 "0/N · 模式" 非隐藏）
+- [ ] 已知限制（reviewer 接受跳过）：按钮命中区假设图标单宽，双宽字体终端下模式按钮命中可能偏 1 格（N7 有意未修，可用 m/s 键兜底）
