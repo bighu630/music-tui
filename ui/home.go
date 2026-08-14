@@ -451,9 +451,28 @@ func (m homeModel) lyricsColumnView() string {
 	case lyricsNone:
 		return lipgloss.NewStyle().Faint(true).Render("暂无歌词")
 	case lyricsSynced, lyricsPlain:
-		return m.lyricView.View()
+		// 歌词文本在列内水平居中：viewport 输出每行已 pad 到列宽（左对齐），
+		// 重新计算前导空格使文本居中（注：viewport 的 Style.Align 不生效——
+		// bubbles viewport.View 会把 Style 的 Width/Height Unset 后再 Render）。
+		return centerPad(m.lyricView.View(), m.lyricsColumnWidth())
 	}
 	return ""
+}
+
+// centerPad 把多行文本每行在其 width 列内水平居中（行宽不足时补前导空格；
+// 超宽行保持原样）。viewport 填充的行尾空格先剔除，避免宽度计算失真。
+func centerPad(s string, width int) string {
+	lines := strings.Split(s, "\n")
+	for i, ln := range lines {
+		trimmed := strings.TrimRight(ln, " ")
+		if vis := ansi.StringWidth(trimmed); vis < width {
+			pad := (width - vis) / 2
+			lines[i] = strings.Repeat(" ", pad) + trimmed
+		} else {
+			lines[i] = trimmed
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // progressBarWidth 进度条可见宽（与渲染一致；点击命中区间 [0, barW)）。

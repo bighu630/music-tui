@@ -659,3 +659,36 @@ func stripAnsiForTest(s string) string {
 	}
 	return sb.String()
 }
+
+// TestHomeLyricsHorizontallyCentered 回归：歌词文本在歌词列内水平居中
+// （左封面右歌词的"居中"语义），而非左对齐。
+func TestHomeLyricsHorizontallyCentered(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	ly, err := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m.home = m.home.setSize(120, 39)
+
+	out := m.home.view()
+	lines := strings.Split(out, "\n")
+	for _, ln := range lines {
+		vis := stripAnsiForTest(ln)
+		if !strings.Contains(vis, "第一行") {
+			continue
+		}
+		col := strings.Index(vis, "第一行")
+		// 歌词列宽 86、歌词 4 字 = 8 列：居中前导 ≈ (86-8)/2 = 39，
+		// 加上封面列 30 + gap 2 → 歌词起始列 ≥ 60（左对齐时仅 ~32）。
+		if col < 60 {
+			t.Errorf("歌词起始列 = %d, want ≥ 60（水平居中），行内容 %q", col, vis)
+		}
+		return
+	}
+	t.Error("view 中未找到歌词行")
+}
