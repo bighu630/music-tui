@@ -690,6 +690,100 @@ func TestSetModeBackToSequentialKeepsOrder(t *testing.T) {
 	}
 }
 
+// ---- PeekNext（预加载预读：返回 Next 将推进到的下一首，不改变状态） ----
+
+func TestPeekNextEmptyQueue(t *testing.T) {
+	q := New()
+	if _, ok := q.PeekNext(); ok {
+		t.Error("空队列 PeekNext 应返回 false")
+	}
+}
+
+func TestPeekNextWithoutCurrentReturnsHead(t *testing.T) {
+	q := New()
+	q.Add(testTrack("a"))
+	q.Add(testTrack("b"))
+	tr, ok := q.PeekNext()
+	if !ok || tr.ID != "a" {
+		t.Errorf("无当前曲目 PeekNext = %v/%v, want a（队首）", tr.ID, ok)
+	}
+	if q.CurrentIndex() != -1 {
+		t.Errorf("PeekNext 不应改变状态: CurrentIndex = %d, want -1", q.CurrentIndex())
+	}
+}
+
+func TestPeekNextMiddle(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.Add(testTrack("c"))
+	q.Next() // b 当前（1）
+	tr, ok := q.PeekNext()
+	if !ok || tr.ID != "c" {
+		t.Errorf("中间 PeekNext = %v/%v, want c", tr.ID, ok)
+	}
+	if q.CurrentIndex() != 1 {
+		t.Errorf("PeekNext 不应推进: CurrentIndex = %d, want 1", q.CurrentIndex())
+	}
+	// 与 Next 一致性：PeekNext 所见即 Next 所达
+	tr2, _ := q.Next()
+	if tr2.ID != tr.ID {
+		t.Errorf("PeekNext 与 Next 不一致: peek %s, next %s", tr.ID, tr2.ID)
+	}
+}
+
+func TestPeekNextWrapsAtEnd(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.Add(testTrack("c"))
+	q.Next() // b
+	q.Next() // c（末位，2）
+	tr, ok := q.PeekNext()
+	if !ok || tr.ID != "a" {
+		t.Errorf("末尾 PeekNext = %v/%v, want a（回绕到队首）", tr.ID, ok)
+	}
+	if q.CurrentIndex() != 2 {
+		t.Errorf("PeekNext 不应推进: CurrentIndex = %d, want 2", q.CurrentIndex())
+	}
+	// 与 Next 一致性：回绕后 Next 到达队首
+	tr2, _ := q.Next()
+	if tr2.ID != "a" {
+		t.Errorf("回绕后 Next = %s, want a（与 PeekNext 一致）", tr2.ID)
+	}
+}
+
+func TestPeekNextSingleTrackWrapsToSelf(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	tr, ok := q.PeekNext()
+	if !ok || tr.ID != "a" {
+		t.Errorf("单曲 PeekNext = %v/%v, want a（回绕到自身）", tr.ID, ok)
+	}
+	if q.CurrentIndex() != 0 {
+		t.Errorf("PeekNext 不应推进: CurrentIndex = %d, want 0", q.CurrentIndex())
+	}
+}
+
+// 多次 PeekNext 调用后队列状态（快照）完全不变：预读不推进、不回绕、不洗牌。
+func TestPeekNextStateUnchanged(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.Add(testTrack("c"))
+	q.Next() // b 当前（1）
+	before := q.Snapshot()
+	for i := 0; i < 3; i++ {
+		if _, ok := q.PeekNext(); !ok {
+			t.Fatal("非空队列 PeekNext 应返回 true")
+		}
+	}
+	after := q.Snapshot()
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("多次 PeekNext 不应改变队列状态:\nbefore %+v\nafter  %+v", before, after)
+	}
+}
+
 func TestSetModeSameModeIsNoop(t *testing.T) {
 	q := New()
 	q.Replace(testTrack("a"))
