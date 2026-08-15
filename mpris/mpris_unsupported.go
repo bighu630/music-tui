@@ -7,6 +7,7 @@ package mpris
 import (
 	"music-tui/model"
 	"music-tui/player"
+	"music-tui/queue"
 )
 
 // playerLike 与 mpris_linux.go 中定义保持一致（两文件互斥编译，
@@ -19,6 +20,16 @@ type playerLike interface {
 	Seek(seconds float64) error
 	SetVolume(percent float64) error
 	Volume() (float64, error)
+}
+
+// controller 与 mpris_linux.go 中定义保持一致（两文件互斥编译，
+// 仅用于 SetController 签名匹配；桩不使用该参数）。
+type controller interface {
+	PlayNext() error
+	PlayPrevious() error
+	SetMode(queue.Mode)
+	Mode() queue.Mode
+	Len() int
 }
 
 // Server 非 Linux 平台下的 no-op 桩。
@@ -35,3 +46,9 @@ func (s *Server) Close() error { return nil }
 
 // SetTrack no-op。
 func (s *Server) SetTrack(t *model.Track) {}
+
+// SetController no-op（注入队列控制器）。
+func (s *Server) SetController(ctrl controller) {}
+
+// SyncMode no-op（同步播放模式投影）。
+func (s *Server) SyncMode(m queue.Mode) {}

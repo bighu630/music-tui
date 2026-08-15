@@ -15,6 +15,7 @@ import (
 
 	"music-tui/model"
 	"music-tui/player"
+	"music-tui/queue"
 )
 
 // ---- fake 依赖 ----
@@ -134,6 +135,112 @@ func newTestServer() *Server {
 	return &Server{p: newFakePlayer(), conn: &fakeBus{}, props: newFakeProps()}
 }
 
+// fakeController 实现 controller：记录调用并支持注入队列状态/错误。
+type fakeController struct {
+	mu       sync.Mutex
+	mode     queue.Mode
+	len      int
+	nextErr  error
+	prevErr  error
+	nexts    int
+	prevs    int
+	setModes []queue.Mode
+}
+
+func newFakeController() *fakeController { return &fakeController{} }
+
+func (f *fakeController) PlayNext() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nexts++
+	return f.nextErr
+}
+func (f *fakeController) PlayPrevious() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prevs++
+	return f.prevErr
+}
+func (f *fakeController) SetMode(m queue.Mode) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setModes = append(f.setModes, m)
+}
+func (f *fakeController) Mode() queue.Mode {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mode
+}
+func (f *fakeController) Len() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.len
+}
+
+// TestSetControllerSyncsProperties 注入 controller 即初始化队列相关属性。
+func TestSetControllerSyncsProperties(t *testing.T) {
+	s := newTestServer()
+	fpr := s.props.(*fakeProps)
+	fc := newFakeController()
+	fc.mode = queue.RepeatOne
+	fc.len = 5
+
+	s.SetController(fc)
+
+	if got := fpr.GetMust(ifacePlayer, "LoopStatus"); got != "Track" {
+		t.Errorf("LoopStatus = %v, want Track（RepeatOne 投影）", got)
+	}
+	if got := fpr.GetMust(ifacePlayer, "Shuffle"); got != false {
+		t.Errorf("Shuffle = %v, want false", got)
+	}
+	if got := fpr.GetMust(ifacePlayer, "CanGoNext"); got != true {
+		t.Errorf("CanGoNext = %v, want true（Len>1）", got)
+	}
+	if got := fpr.GetMust(ifacePlayer, "CanGoPrevious"); got != true {
+		t.Errorf("CanGoPrevious = %v, want true", got)
+	}
+}
+
+// TestSyncModeUpdatesProperties UI 模式变更后投影同步。
+func TestSyncModeUpdatesProperties(t *testing.T) {
+	s := newTestServer()
+	fpr := s.props.(*fakeProps)
+	s.SetController(newFakeController())
+
+	s.SyncMode(queue.Shuffle)
+
+	if got := fpr.GetMust(ifacePlayer, "LoopStatus"); got != "Playlist" {
+		t.Errorf("LoopStatus = %v, want Playlist（Shuffle 投影）", got)
+	}
+	if got := fpr.GetMust(ifacePlayer, "Shuffle"); got != true {
+		t.Errorf("Shuffle = %v, want true", got)
+	}
+}
+
+// TestRefreshNav 单曲/空队列不可跳转；多曲可跳转。
+func TestRefreshNav(t *testing.T) {
+	s := newTestServer()
+	fpr := s.props.(*fakeProps)
+	fc := newFakeController()
+
+	s.SetController(fc)
+	fc.mu.Lock()
+	fc.len = 1
+	fc.mu.Unlock()
+	s.refreshNav()
+	if got := fpr.GetMust(ifacePlayer, "CanGoNext"); got != false {
+		t.Errorf("单曲队列 CanGoNext = %v, want false", got)
+	}
+
+	fc.mu.Lock()
+	fc.len = 2
+	fc.mu.Unlock()
+	s.refreshNav()
+	if got := fpr.GetMust(ifacePlayer, "CanGoNext"); got != true {
+		t.Errorf("多曲队列 CanGoNext = %v, want true", got)
+	}
+}
+
 // ---- 纯函数测试 ----
 
 func TestMetadataFor(t *testing.T) {
@@ -230,6 +337,75 @@ func TestClamp01(t *testing.T) {
 	}
 }
 
+// ---- 模式 ↔ MPRIS 属性映射 ----
+
+func TestLoopStatusFor(t *testing.T) {
+	cases := []struct {
+		mode queue.Mode
+		want string
+	}{
+		{queue.Sequential, "Playlist"}, // 列表循环（播完回绕）
+		{queue.RepeatOne, "Track"},     // 单曲循环
+		{queue.Shuffle, "Playlist"},    // 随机播完也回绕，语义即列表循环
+	}
+	for _, c := range cases {
+		if got := loopStatusFor(c.mode); got != c.want {
+			t.Errorf("loopStatusFor(%v) = %q, want %q", c.mode, got, c.want)
+		}
+	}
+}
+
+func TestShuffleFor(t *testing.T) {
+	if !shuffleFor(queue.Shuffle) {
+		t.Error("Shuffle 模式应映射 Shuffle=true")
+	}
+	for _, m := range []queue.Mode{queue.Sequential, queue.RepeatOne} {
+		if shuffleFor(m) {
+			t.Errorf("模式 %v 不应映射 Shuffle=true", m)
+		}
+	}
+}
+
+func TestModeForLoopStatus(t *testing.T) {
+	cases := []struct {
+		val  string
+		cur  queue.Mode
+		want queue.Mode
+	}{
+		{"Track", queue.Sequential, queue.RepeatOne},
+		{"Track", queue.Shuffle, queue.RepeatOne},
+		{"None", queue.Shuffle, queue.Sequential}, // 方案 A：None 归入列表循环
+		{"None", queue.RepeatOne, queue.Sequential},
+		{"Playlist", queue.RepeatOne, queue.Sequential},  // 列表循环：单曲循环切走
+		{"Playlist", queue.Sequential, queue.Sequential}, // 已是列表循环：不变
+		{"Playlist", queue.Shuffle, queue.Shuffle},       // 随机保持：投影已是 Playlist，写 Playlist 不应关随机
+	}
+	for _, c := range cases {
+		if got := modeForLoopStatus(c.val, c.cur); got != c.want {
+			t.Errorf("modeForLoopStatus(%q, %v) = %v, want %v", c.val, c.cur, got, c.want)
+		}
+	}
+}
+
+func TestModeForShuffle(t *testing.T) {
+	cases := []struct {
+		b    bool
+		cur  queue.Mode
+		want queue.Mode
+	}{
+		{true, queue.Sequential, queue.Shuffle},
+		{true, queue.RepeatOne, queue.Shuffle},
+		{false, queue.Shuffle, queue.Sequential},  // 关随机：随机模式切回列表循环
+		{false, queue.RepeatOne, queue.RepeatOne}, // 关随机：不动单曲循环
+		{false, queue.Sequential, queue.Sequential},
+	}
+	for _, c := range cases {
+		if got := modeForShuffle(c.b, c.cur); got != c.want {
+			t.Errorf("modeForShuffle(%v, %v) = %v, want %v", c.b, c.cur, got, c.want)
+		}
+	}
+}
+
 // ---- handleEvent 测试 ----
 
 func TestHandleEventProgress(t *testing.T) {
@@ -309,6 +485,53 @@ func TestHandleEventStateAndLifecycle(t *testing.T) {
 }
 
 // ---- 方法测试 ----
+
+// TestNextPreviousTransfer 非空队列转调 controller 并刷新导航属性。
+func TestNextPreviousTransfer(t *testing.T) {
+	s := newTestServer()
+	fpr := s.props.(*fakeProps)
+	fc := newFakeController()
+	fc.mode = queue.Sequential
+	fc.len = 3
+	s.SetController(fc)
+
+	if err := s.Next(); err != nil {
+		t.Fatalf("Next 转调失败: %v", err)
+	}
+	if err := s.Previous(); err != nil {
+		t.Fatalf("Previous 转调失败: %v", err)
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if fc.nexts != 1 || fc.prevs != 1 {
+		t.Errorf("转调次数 nexts=%d prevs=%d, want 1/1", fc.nexts, fc.prevs)
+	}
+	_ = fpr // CanGoNext 已在 SetController 时置 true
+}
+
+// TestNextEmptyQueueNotSupported 空队列（ErrEmpty）→ NotSupported。
+func TestNextEmptyQueueNotSupported(t *testing.T) {
+	s := newTestServer()
+	fc := newFakeController()
+	fc.nextErr = queue.ErrEmpty
+	s.SetController(fc)
+
+	err := s.Next()
+	if err == nil || err.Name != "org.freedesktop.DBus.Error.NotSupported" {
+		t.Fatalf("空队列 Next 应返回 NotSupported, got %v", err)
+	}
+}
+
+// TestNextPreviousNilController 未注入 controller → NotSupported。
+func TestNextPreviousNilController(t *testing.T) {
+	s := newTestServer()
+	if err := s.Next(); err == nil || err.Name != "org.freedesktop.DBus.Error.NotSupported" {
+		t.Fatalf("未注入 controller 时 Next 应返回 NotSupported, got %v", err)
+	}
+	if err := s.Previous(); err == nil || err.Name != "org.freedesktop.DBus.Error.NotSupported" {
+		t.Fatalf("未注入 controller 时 Previous 应返回 NotSupported, got %v", err)
+	}
+}
 
 func TestMethodsForwardToPlayer(t *testing.T) {
 	s := newTestServer()
@@ -427,6 +650,89 @@ func TestVolumeCallback(t *testing.T) {
 	// 注意：props 未变化（回调失败时 prop 包不会写入）
 	if got := fpr.GetMust(ifacePlayer, "Volume"); got != nil && got != 1.0 {
 		t.Logf("Volume 属性当前值: %v（本测试不校验）", got)
+	}
+}
+
+// TestLoopStatusCallback 合法值转调 SetMode（含保持逻辑），非法值 InvalidArgs。
+func TestLoopStatusCallback(t *testing.T) {
+	s := newTestServer()
+	fc := newFakeController()
+	fc.mode = queue.Sequential
+	s.SetController(fc)
+
+	// Track → RepeatOne
+	if err := s.loopStatusCallback(&prop.Change{Value: "Track"}); err != nil {
+		t.Fatalf("写 LoopStatus=Track 被拒: %v", err)
+	}
+	// None → Sequential
+	if err := s.loopStatusCallback(&prop.Change{Value: "None"}); err != nil {
+		t.Fatalf("写 LoopStatus=None 被拒: %v", err)
+	}
+	// Playlist + 当前 Shuffle → 保持 Shuffle
+	fc.mu.Lock()
+	fc.mode = queue.Shuffle
+	fc.mu.Unlock()
+	if err := s.loopStatusCallback(&prop.Change{Value: "Playlist"}); err != nil {
+		t.Fatalf("写 LoopStatus=Playlist 被拒: %v", err)
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.setModes) != 3 || fc.setModes[0] != queue.RepeatOne || fc.setModes[1] != queue.Sequential || fc.setModes[2] != queue.Shuffle {
+		t.Errorf("setModes = %v, want [RepeatOne Sequential Shuffle]", fc.setModes)
+	}
+
+	// 非法值 → InvalidArgs 且不转调
+	fc.setModes = nil
+	if err := s.loopStatusCallback(&prop.Change{Value: "Loop"}); err == nil {
+		t.Fatal("非法 LoopStatus 应报错")
+	}
+	if err := s.loopStatusCallback(&prop.Change{Value: 42}); err == nil {
+		t.Fatal("非字符串 LoopStatus 应报错")
+	}
+	if len(fc.setModes) != 0 {
+		t.Error("非法值不应转调 SetMode")
+	}
+}
+
+// TestLoopStatusCallbackNilController 未注入 controller → Failed。
+func TestLoopStatusCallbackNilController(t *testing.T) {
+	s := newTestServer()
+	if err := s.loopStatusCallback(&prop.Change{Value: "Track"}); err == nil {
+		t.Fatal("未注入 controller 时应报错")
+	}
+}
+
+// TestShuffleCallback 写 Shuffle 转调 SetMode（含保持逻辑）。
+func TestShuffleCallback(t *testing.T) {
+	s := newTestServer()
+	fc := newFakeController()
+	fc.mode = queue.Sequential
+	s.SetController(fc)
+
+	// true → Shuffle
+	if err := s.shuffleCallback(&prop.Change{Value: true}); err != nil {
+		t.Fatalf("写 Shuffle=true 被拒: %v", err)
+	}
+	// false + 当前 Shuffle → Sequential
+	fc.mu.Lock()
+	fc.mode = queue.Shuffle
+	fc.mu.Unlock()
+	if err := s.shuffleCallback(&prop.Change{Value: false}); err != nil {
+		t.Fatalf("写 Shuffle=false 被拒: %v", err)
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.setModes) != 2 || fc.setModes[0] != queue.Shuffle || fc.setModes[1] != queue.Sequential {
+		t.Errorf("setModes = %v, want [Shuffle Sequential]", fc.setModes)
+	}
+
+	// 非 bool → InvalidArgs 且不转调
+	fc.setModes = nil
+	if err := s.shuffleCallback(&prop.Change{Value: "yes"}); err == nil {
+		t.Fatal("非布尔 Shuffle 应报错")
+	}
+	if len(fc.setModes) != 0 {
+		t.Error("非法值不应转调 SetMode")
 	}
 }
 
