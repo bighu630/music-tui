@@ -182,8 +182,8 @@ func (m homeModel) Init() tea.Cmd { return nil }
 
 // Update 处理首页局部按键（←/→ seek、, 上一首、. 下一首）与鼠标
 // （进度条点击 seek、按钮行点击）；全局按键（空格等）由 root 处理。
-// 鼠标坐标换算：屏幕坐标 - 1 = 页面坐标（Tab 栏占 1 行，root.onMouse
-// 在 Y!=0 时已把事件 delegate 到本页）。
+// 鼠标坐标换算：屏幕坐标 - 3 = 页面坐标（顶部空行 + Tab 栏 + 分隔线占 3 行，
+// root.onMouse 在 Y!=1 时已把事件 delegate 到本页）。
 func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -225,9 +225,10 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 			return m, emitToggleMode()
 		}
 	case tea.MouseMsg:
-		// 屏幕坐标 → 页面坐标：Tab 栏 2 行（标签 + 分隔线），页面从屏幕行 2 起。
-		// （回归：曾按 1 行 Tab 换算（-1），进度条/按钮点击整体偏移 1 行不命中。）
-		pageY := msg.Y - 2
+		// 屏幕坐标 → 页面坐标：顶部 3 行（空行 + Tab 栏标签 + 分隔线），页面从屏幕行 3 起。
+		// （回归：曾按 1 行 Tab 换算（-1），进度条/按钮点击整体偏移 1 行不命中；
+		//  顶部留空后必须同步 -3，否则点击整体偏移 1 行。）
+		pageY := msg.Y - 3
 		// 滚轮：歌词视口手动滚动（仅歌词列区域：X ≥ 封面列+gap，Y 在中间区）。
 		// 播放推进时 scrollLyricsTo 会重新把当前行居中（自动跟随优先）。
 		if tea.MouseEvent(msg).IsWheel() {

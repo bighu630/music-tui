@@ -109,19 +109,19 @@ func TestTabBarPlayStateIcon(t *testing.T) {
 }
 
 // 回归：queuePage.setSize 此前从未被调用（列表固定 80x24）；
-// 现在 WindowSizeMsg 应下发尺寸，且高度减 3（Tab 栏 + 分隔线 2 行 + 底部状态栏 1 行）。
+// 现在 WindowSizeMsg 应下发尺寸，且高度减 4（顶部空行 + Tab 栏 + 分隔线 3 行 + 底部状态栏 1 行）。
 func TestQueuePageReceivesWindowSize(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	if m.queuePage.width != 100 || m.queuePage.height != 37 {
-		t.Errorf("queuePage 尺寸 = %dx%d, want 100x37（高度减 Tab 栏 + 分隔线 2 行 + 状态栏 1 行）",
+	if m.queuePage.width != 100 || m.queuePage.height != 36 {
+		t.Errorf("queuePage 尺寸 = %dx%d, want 100x36（高度减 顶部空行+Tab 栏+分隔线 3 行 + 状态栏 1 行）",
 			m.queuePage.width, m.queuePage.height)
 	}
 }
 
 // 分隔线：未收到 WindowSizeMsg（宽度为 0）时不输出；收到窗口尺寸后
-// 第 2 行为横贯全宽的 ─ 线（第 1 行仍为标签行），且宽度跟随窗口变化。
+// 第 3 行为横贯全宽的 ─ 线（第 1 行空行、第 2 行为标签行），且宽度跟随窗口变化。
 func TestTabBarDividerLine(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -131,11 +131,14 @@ func TestTabBarDividerLine(t *testing.T) {
 
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	lines := strings.Split(stripANSI(m.View()), "\n")
-	if len(lines) < 2 || lines[1] != strings.Repeat("─", 80) {
-		t.Errorf("第 2 行应为 80 个 ─，实际 = %q", lines[1])
+	if len(lines) < 3 || lines[0] != "" {
+		t.Errorf("第 1 行应为空行（顶部留空），实际 = %q", lines[0])
 	}
-	if !strings.Contains(lines[0], "首页") {
-		t.Errorf("第 1 行应为标签行（含“首页”），实际 = %q", lines[0])
+	if len(lines) < 3 || lines[2] != strings.Repeat("─", 80) {
+		t.Errorf("第 3 行应为 80 个 ─，实际 = %q", lines[2])
+	}
+	if !strings.Contains(lines[1], "首页") {
+		t.Errorf("第 2 行应为标签行（含“首页”），实际 = %q", lines[1])
 	}
 	if !strings.Contains(m.View(), dividerStyle.Render(strings.Repeat("─", 80))) {
 		t.Error("分隔线应使用 dividerStyle（Faint 弱化样式，与整体风格一致）")
@@ -143,8 +146,8 @@ func TestTabBarDividerLine(t *testing.T) {
 
 	m, _ = update(m, tea.WindowSizeMsg{Width: 100, Height: 24})
 	lines = strings.Split(stripANSI(m.View()), "\n")
-	if len(lines) < 2 || lines[1] != strings.Repeat("─", 100) {
-		t.Errorf("宽度变化后第 2 行应为 100 个 ─，实际 = %q", lines[1])
+	if len(lines) < 3 || lines[2] != strings.Repeat("─", 100) {
+		t.Errorf("宽度变化后第 3 行应为 100 个 ─，实际 = %q", lines[2])
 	}
 }
 
@@ -167,33 +170,33 @@ func TestTabBarCentered(t *testing.T) {
 	m, _ = update(m, tea.WindowSizeMsg{Width: 100, Height: 24})
 
 	lines := strings.Split(stripANSI(m.View()), "\n")
-	gotPad := len(lines[0]) - len(strings.TrimLeft(lines[0], " "))
+	gotPad := len(lines[1]) - len(strings.TrimLeft(lines[1], " "))
 	wantPad := (100 - totalWidth) / 2
 	if gotPad != wantPad {
 		t.Errorf("标签行前缀空格 = %d, want %d（(100-%d)/2），行 = %q",
-			gotPad, wantPad, totalWidth, lines[0])
+			gotPad, wantPad, totalWidth, lines[1])
 	}
-	if len(lines) < 2 || lines[1] != strings.Repeat("─", 100) {
-		t.Errorf("分隔线应保持横贯全宽 100 个 ─，实际 = %q", lines[1])
+	if len(lines) < 3 || lines[2] != strings.Repeat("─", 100) {
+		t.Errorf("分隔线应保持横贯全宽 100 个 ─，实际 = %q", lines[2])
 	}
 
 	// 窗口过窄（宽度 < 标签总宽）：不居中，左对齐
 	m, _ = update(m, tea.WindowSizeMsg{Width: 20, Height: 24})
 	lines = strings.Split(stripANSI(m.View()), "\n")
-	gotPad = len(lines[0]) - len(strings.TrimLeft(lines[0], " "))
+	gotPad = len(lines[1]) - len(strings.TrimLeft(lines[1], " "))
 	if gotPad != 0 {
 		t.Errorf("Width=20（小于标签总宽 %d）时不应居中，前缀空格 = %d", totalWidth, gotPad)
 	}
 
-	// 窗口宽度恰等于标签总宽：不居中（pad=0）且首行满宽
+	// 窗口宽度恰等于标签总宽：不居中（pad=0）且标签行满宽
 	m, _ = update(m, tea.WindowSizeMsg{Width: totalWidth, Height: 24})
 	lines = strings.Split(stripANSI(m.View()), "\n")
-	gotPad = len(lines[0]) - len(strings.TrimLeft(lines[0], " "))
+	gotPad = len(lines[1]) - len(strings.TrimLeft(lines[1], " "))
 	if gotPad != 0 {
 		t.Errorf("Width=标签总宽 %d 时不应居中，前缀空格 = %d", totalWidth, gotPad)
 	}
-	if ansi.StringWidth(lines[0]) != totalWidth {
-		t.Errorf("Width=标签总宽时首行应满宽 %d 列，实际 %d 列", totalWidth, ansi.StringWidth(lines[0]))
+	if ansi.StringWidth(lines[1]) != totalWidth {
+		t.Errorf("Width=标签总宽时标签行应满宽 %d 列，实际 %d 列", totalWidth, ansi.StringWidth(lines[1]))
 	}
 }
 
@@ -237,11 +240,11 @@ func TestMouseClickSwitchesPage(t *testing.T) {
 	}
 	seps := mouseTabCols()
 	// 先注入悬停状态：悬停在“搜索”标签上（hoverTab=1），验证点击会清除悬停
-	m, _ = update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: seps[1].col + 1, Y: 0})
+	m, _ = update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: seps[1].col + 1, Y: 1})
 	for _, lb := range seps {
 		click := lb.col + 1 // 标签内部一列（0-based）
 		m2, _ := update(m, tea.MouseMsg{
-			Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: click, Y: 0,
+			Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: click, Y: 1,
 		})
 		if m2.current != lb.want {
 			t.Errorf("点击 %q (x=%d) 后 current = %v, want %v", lb.text, click, m2.current, lb.want)
@@ -252,13 +255,13 @@ func TestMouseClickSwitchesPage(t *testing.T) {
 	}
 	// 幂等：先切到搜索页，再点当前页“搜索”应保持 pageSearch
 	m, _ = update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[3].col + 1, Y: 0,
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[3].col + 1, Y: 1,
 	})
 	if m.current != pageSearch {
 		t.Fatalf("点击“搜索”后 current = %v, want pageSearch", m.current)
 	}
 	m2, _ := update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[3].col + 1, Y: 0,
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[3].col + 1, Y: 1,
 	})
 	if m2.current != pageSearch {
 		t.Errorf("点击当前页“搜索”应幂等, current = %v, want pageSearch", m2.current)
@@ -278,7 +281,7 @@ func TestMouseClickOnSeparatorIgnored(t *testing.T) {
 		// 上一标签末尾与下一标签起始之间的两个分隔格
 		for _, x := range []int{seps[i].col - 2, seps[i].col - 1} {
 			m2, _ := update(m, tea.MouseMsg{
-				Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: 0,
+				Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: 1,
 			})
 			if m2.current != pageHome {
 				t.Errorf("点击分隔 (x=%d) 不应切页, current = %v", x, m2.current)
@@ -287,18 +290,24 @@ func TestMouseClickOnSeparatorIgnored(t *testing.T) {
 	}
 }
 
-// 点击非首行、或 X 超出最后一个标签 → 不切页。
+// 点击顶部空行（首行）、或点击 Tab 栏 X 超界、或点击页面区（Y>=3）→ 不切页。
 func TestMouseClickOutsideTabBarIgnored(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m2, _ := update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 1, // 第二行
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 0, // 首行空行
 	})
 	if m2.current != pageHome {
-		t.Error("点击非首行不应切页")
+		t.Error("点击空行不应切页")
 	}
 	m2, _ = update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 500, Y: 0, // 超界
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 3, // 页面区（第 4 行）
+	})
+	if m2.current != pageHome {
+		t.Error("点击页面区不应切页")
+	}
+	m2, _ = update(m, tea.MouseMsg{
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 500, Y: 1, // 超界
 	})
 	if m2.current != pageHome {
 		t.Error("点击超界位置不应切页")
@@ -314,7 +323,7 @@ func TestMouseHoverHighlightsTab(t *testing.T) {
 	}
 	seps := mouseTabCols()
 	x := seps[1].col + 1 // 悬停"队列"标签
-	m2, _ := update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: x, Y: 0})
+	m2, _ := update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: x, Y: 1})
 	if m2.hoverTab != int(pageQueue) {
 		t.Errorf("hoverTab = %d, want %d", m2.hoverTab, int(pageQueue))
 	}
@@ -353,7 +362,7 @@ func TestMouseClickCenteredTabBar(t *testing.T) {
 	// 点击居中后"搜索"标签的实际位置 → 切到 pageSearch
 	dst := pad + seps[3].col + 1
 	m2, _ := update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: dst, Y: 0,
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: dst, Y: 1,
 	})
 	if m2.current != pageSearch {
 		t.Errorf("点击居中“搜索”（x=%d）后 current = %v, want pageSearch", dst, m2.current)
@@ -361,7 +370,7 @@ func TestMouseClickCenteredTabBar(t *testing.T) {
 
 	// 点击标签行左侧留白 → 不切页
 	m2, _ = update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: pad - 1, Y: 0,
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: pad - 1, Y: 1,
 	})
 	if m2.current != pageHome {
 		t.Errorf("点击左侧留白 (x=%d) 不应切页, current = %v", pad-1, m2.current)
@@ -370,7 +379,7 @@ func TestMouseClickCenteredTabBar(t *testing.T) {
 	// 点击标签行右侧留白（标签行右缘之后）→ 不切页
 	rightPad := pad + last.col + ansi.StringWidth(last.text)
 	m2, _ = update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: rightPad, Y: 0,
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: rightPad, Y: 1,
 	})
 	if m2.current != pageHome {
 		t.Errorf("点击右侧留白 (x=%d) 不应切页, current = %v", rightPad, m2.current)
@@ -378,7 +387,7 @@ func TestMouseClickCenteredTabBar(t *testing.T) {
 
 	// 悬停居中"队列"标签 → 下划线高亮
 	hx := pad + seps[1].col + 1
-	m2, _ = update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: hx, Y: 0})
+	m2, _ = update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: hx, Y: 1})
 	if m2.hoverTab != int(pageQueue) {
 		t.Errorf("悬停居中“队列”（x=%d）后 hoverTab = %d, want %d", hx, m2.hoverTab, int(pageQueue))
 	}
@@ -387,7 +396,7 @@ func TestMouseClickCenteredTabBar(t *testing.T) {
 	}
 
 	// 悬停后移出到左侧留白 → 清除悬停
-	m2, _ = update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: 0, Y: 0})
+	m2, _ = update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: 0, Y: 1})
 	if m2.hoverTab != -1 {
 		t.Errorf("移出到留白后 hoverTab = %d, want -1", m2.hoverTab)
 	}
@@ -400,7 +409,7 @@ func TestMouseClickCenteredTabBar(t *testing.T) {
 func TestMouseHoverOnCurrentTabKeepsTabStyle(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
-	m2, _ := update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: 1, Y: 0}) // 悬停首页
+	m2, _ := update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: 1, Y: 1}) // 悬停首页
 	if !strings.Contains(m2.View(), tabStyle.Render("⏹ 首页")) {
 		t.Error("悬停当前页应保持 tabStyle（高亮优先于 hover）")
 	}

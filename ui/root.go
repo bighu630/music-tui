@@ -239,9 +239,9 @@ type Model struct {
 	cache            *cache.Manager // 音频缓存（命中优先本地文件；未命中后台下载）
 	playingFromCache bool           // 当前曲目是否播放自缓存文件（LoadFailed 时据此移除损坏条目）
 
-	state     model.PlaybackState
-	current   page
-	width     int // 窗口宽度（分隔线按此宽度渲染，不写死）
+	state    model.PlaybackState
+	current  page
+	width    int // 窗口宽度（分隔线按此宽度渲染，不写死）
 	hoverTab int // Tab 栏悬停标签下标（= page 枚举值）；-1 = 无悬停
 	// toast 活跃 toast（单条覆盖；定时自动消失，不参与布局）。替代旧 lastError/notice 横幅。
 	toast   *toast
@@ -840,15 +840,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, spinnerTick
 
 	case tea.WindowSizeMsg:
-		// 顶部 Tab 栏 + 分隔线占 2 行、底部状态栏占 1 行，页面高度相应减 3
+		// 顶部空行 + Tab 栏 + 分隔线占 3 行、底部状态栏占 1 行，页面高度相应减 4
 		m.width = msg.Width
-		m.home = m.home.setSize(msg.Width, msg.Height-3)
-		m.searchPage = m.searchPage.setSize(msg.Width, msg.Height-3)
-		m.historyPage = m.historyPage.setSize(msg.Width, msg.Height-3)
-		m.queuePage = m.queuePage.setSize(msg.Width, msg.Height-3)
-		m.plPage = m.plPage.setSize(msg.Width, msg.Height-3)
+		m.home = m.home.setSize(msg.Width, msg.Height-4)
+		m.searchPage = m.searchPage.setSize(msg.Width, msg.Height-4)
+		m.historyPage = m.historyPage.setSize(msg.Width, msg.Height-4)
+		m.queuePage = m.queuePage.setSize(msg.Width, msg.Height-4)
+		m.plPage = m.plPage.setSize(msg.Width, msg.Height-4)
 		if m.plPicker != nil {
-			picker := m.plPicker.setSize(msg.Width, msg.Height-3)
+			picker := m.plPicker.setSize(msg.Width, msg.Height-4)
 			m.plPicker = &picker
 		}
 		return m, nil
@@ -923,7 +923,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View 渲染当前页面（选择器打开时全屏替换），底部附常驻状态栏；
-// 活跃 toast 覆盖在状态栏上方一行的右端（不参与布局，行数不变）。
+// 顶部首行留空（布局整体下移一行：空行第 1 行、Tab 栏第 2 行、分隔线第 3 行、
+// 页面自第 4 行起）；活跃 toast 覆盖在状态栏上方一行的右端（不参与布局，行数不变）。
 func (m Model) View() string {
 	var body string
 	if m.plPicker != nil {
@@ -942,7 +943,7 @@ func (m Model) View() string {
 			body = m.historyPage.view()
 		}
 	}
-	out := m.tabBar() + "\n" + body + "\n" + m.statusBarView()
+	out := "\n" + m.tabBar() + "\n" + body + "\n" + m.statusBarView()
 	return m.overlayToast(out)
 }
 
@@ -1511,18 +1512,19 @@ func emitClearHistory() tea.Cmd {
 	return func() tea.Msg { return clearHistoryMsg{} }
 }
 
-// onMouse 处理鼠标事件：Tab 栏（首行 Y==0，bubbletea X/Y 为 0-based）——
-// 点击标签（左键按下）切换页面，移动更新悬停高亮；Y==1 为分隔线行
-// （点击/移动直接委托页面，无特殊处理）；其余区域事件不拦截，
-// 交给当前页面（歌词区 viewport 原生支持滚轮；bubbles v1.0.0 的列表/输入框暂无鼠标处理）。
+// onMouse 处理鼠标事件：Tab 栏（屏幕第 2 行 Y==1，bubbletea X/Y 为 0-based）——
+// 点击标签（左键按下）切换页面，移动更新悬停高亮；Y==0 为顶部空行、Y==2 为
+// 分隔线行（点击/移动与页面区行为一致：清除悬停并委托页面，无特殊处理）；
+// 页面区（Y>=3）事件不拦截，交给当前页面（歌词区 viewport 原生支持滚轮；
+// bubbles v1.0.0 的列表/输入框暂无鼠标处理）。
 func (m Model) onMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	// 选择器打开时忽略一切鼠标事件（与“选择器打开时所有输入交给选择器”的语义一致）：
 	// 点击 Tab 栏/页面区域不得穿透改 m.current 或落到页面。
 	if m.plPicker != nil {
 		return m, nil
 	}
-	if msg.Y != 0 {
-		// 鼠标不在 Tab 栏：清除悬停高亮，事件交给页面
+	if msg.Y != 1 {
+		// 鼠标不在 Tab 栏（空行/分隔线/页面区）：清除悬停高亮，事件交给页面
 		if m.hoverTab >= 0 {
 			m.hoverTab = -1
 		}

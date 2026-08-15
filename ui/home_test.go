@@ -537,7 +537,7 @@ func TestHomeMouseSeekClick(t *testing.T) {
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
 		X:      barW / 2,
-		Y:      m.home.height, // 屏幕 Y = height（Tab 2 行）→ 页面 Y = height-2（进度条行）
+		Y:      m.home.height + 1, // 屏幕 Y = height+1（顶部 3 行）→ 页面 Y = height-2（进度条行）
 	})
 	_ = execCmds(cmd)
 	if len(fp.seeks) != 1 {
@@ -556,7 +556,7 @@ func TestHomeMouseSeekClick(t *testing.T) {
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
 		X:      barW, // 越界
-		Y:      m.home.height,
+		Y:      m.home.height + 1,
 	})
 	if cmd != nil {
 		t.Error("进度条 X 越界不应产生命令")
@@ -569,7 +569,7 @@ func TestHomeMouseSeekClick(t *testing.T) {
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
 		X:      0,
-		Y:      m.home.height,
+		Y:      m.home.height + 1,
 	})
 	if cmd != nil {
 		t.Error("无曲目时点击进度条不应产生命令")
@@ -591,7 +591,7 @@ func TestHomeMouseButtonClick(t *testing.T) {
 			Action: tea.MouseActionPress,
 			Button: tea.MouseButtonLeft,
 			X:      x,
-			Y:      m.home.height + 1, // 屏幕 Y = height+1（Tab 2 行）→ 页面 Y = height-1（按钮行）
+			Y:      m.home.height + 2, // 屏幕 Y = height+2（顶部 3 行）→ 页面 Y = height-1（按钮行）
 		})
 		return c
 	}
@@ -982,8 +982,8 @@ func TestHomeResizeRelayout(t *testing.T) {
 		m, _ = update(m, tea.WindowSizeMsg{Width: sz[0], Height: sz[1]})
 		out := m.home.view()
 		lines := strings.Split(out, "\n")
-		if len(lines) != sz[1]-3 {
-			t.Errorf("%dx%d: 行数 = %d, want %d", sz[0], sz[1], len(lines), sz[1]-3)
+		if len(lines) != sz[1]-4 {
+			t.Errorf("%dx%d: 行数 = %d, want %d", sz[0], sz[1], len(lines), sz[1]-4)
 		}
 		if w := ansi.StringWidth(lines[len(lines)-2]); w != sz[0] {
 			t.Errorf("%dx%d: 进度条行宽 = %d, want %d", sz[0], sz[1], w, sz[0])
