@@ -47,7 +47,7 @@ func TestPlaylistDetailEmptyState(t *testing.T) {
 		t.Fatalf("mode = %v, want plDetail", m.plPage.mode)
 	}
 	got := m.plPage.view()
-	if !strings.Contains(got, "列表为空") || !strings.Contains(got, "按 p 添加到播放列表") {
+	if !strings.Contains(got, "列表为空") || !strings.Contains(got, "按 a 添加到播放列表") {
 		t.Errorf("空列表详情应提示, got %q", got)
 	}
 }
@@ -199,7 +199,8 @@ func TestPlaylistSetListsKeepsSelection(t *testing.T) {
 	}
 }
 
-// 详情页：a 加入队列（trackAppendMsg 回灌后 queue.Len 验证）、d 移除歌曲。
+// 详情页：a 弹“添加到”选择器 → 默认队列项追加（trackAppendMsg 回灌后 queue.Len 验证）、
+// d 移除歌曲。
 func TestPlaylistDetailRemoveAndAppend(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -223,8 +224,12 @@ func TestPlaylistDetailRemoveAndAppend(t *testing.T) {
 		t.Errorf("详情应显示歌曲, got %q", got)
 	}
 
-	// a 加入队列（默认选中 t1）
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	// a 弹选择器 → Enter 默认队列项（追加 t1）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if m.plPicker == nil {
+		t.Fatal("按 a 应打开选择器")
+	}
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	var ta trackAppendMsg
 	for _, msg := range execCmds(cmd) {
 		if am, ok := msg.(trackAppendMsg); ok {
@@ -235,8 +240,11 @@ func TestPlaylistDetailRemoveAndAppend(t *testing.T) {
 		t.Fatalf("trackAppendMsg.track = %s, want t1", ta.track.ID)
 	}
 	m, _ = update(m, ta)
+	if m.plPicker != nil {
+		t.Fatal("追加后选择器应关闭")
+	}
 	if m.queue.Len() != 1 || fp.playCount() != 0 {
-		t.Errorf("a 加入队列应只入队不播放: Len=%d playCount=%d", m.queue.Len(), fp.playCount())
+		t.Errorf("a 追加应只入队不播放: Len=%d playCount=%d", m.queue.Len(), fp.playCount())
 	}
 
 	// d 移除选中歌曲（t1）
@@ -307,22 +315,29 @@ func TestPlaylistDetailEnterPlaysList(t *testing.T) {
 	}
 }
 
-// 命名输入聚焦时 p/空格 是输入字符（root 让位，同搜索输入框模式）。
+// 命名输入聚焦时 a/p/空格 是输入字符（root 让位，同搜索输入框模式）。
 func TestNamingInputConsumesGlobalKeys(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")}) // p 应输入而非打开选择器
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}) // a 应输入而非打开选择器
 	if m.plPicker != nil {
-		t.Fatal("命名输入聚焦时 p 不应打开选择器")
+		t.Fatal("命名输入聚焦时 a 不应打开选择器")
+	}
+	if got := m.plPage.input.Value(); got != "a" {
+		t.Errorf("input = %q, want %q", got, "a")
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")}) // p 应输入而非播放
+	if got := m.plPage.input.Value(); got != "ap" {
+		t.Errorf("input = %q, want %q", got, "ap")
 	}
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace}) // 空格应输入而非切换播放
-	if got := m.plPage.input.Value(); got != "p " {
-		t.Errorf("input = %q, want %q", got, "p ")
+	if got := m.plPage.input.Value(); got != "ap " {
+		t.Errorf("input = %q, want %q", got, "ap ")
 	}
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}) // q 应输入而非退出程序
-	if got := m.plPage.input.Value(); got != "p q" {
-		t.Errorf("input = %q, want %q", got, "p q")
+	if got := m.plPage.input.Value(); got != "ap q" {
+		t.Errorf("input = %q, want %q", got, "ap q")
 	}
 	if m.plPicker != nil {
 		t.Fatal("q 不应打开选择器")
@@ -332,10 +347,10 @@ func TestNamingInputConsumesGlobalKeys(t *testing.T) {
 	}
 }
 
-// ---- 全局 p 键选择器 ----
+// ---- 全局 a 键选择器 ----
 
-// 搜索页选中歌曲按 p：picker 出现 → Enter 选择列表 → AddTrack 生效 →
-// notice 显示 → picker 关闭 → 列表页刷新。
+// 搜索页选中歌曲按 a：picker 出现（首项为"当前播放队列"）→ 下移到列表名 →
+// Enter 选择列表 → AddTrack 生效 → notice 显示 → picker 关闭 → 列表页刷新。
 func TestPickTrackFromSearchAddsToPlaylist(t *testing.T) {
 	toastSuccessDuration = time.Millisecond // 快进 toast 定时器（成功提示 cmd 是 tea.Tick）
 	defer func() { toastSuccessDuration = 3 * time.Second }()
@@ -348,17 +363,21 @@ func TestPickTrackFromSearchAddsToPlaylist(t *testing.T) {
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	if m.plPicker == nil {
-		t.Fatal("按 p 应打开选择器")
+		t.Fatal("按 a 应打开选择器")
 	}
-	if !strings.Contains(stripANSI(m.plPicker.view()), "添加到播放列表") {
+	if !strings.Contains(stripANSI(m.plPicker.view()), "添加到") {
 		t.Errorf("选择器标题缺失: %q", m.plPicker.view())
 	}
 	if m.plPicker.naming {
 		t.Fatal("选择器初始不应在命名输入模式")
 	}
-
+	// 默认选中首项"当前播放队列"；下移到列表"收藏"再 Enter
+	if _, ok := m.plPicker.list.SelectedItem().(pickerQueueItem); !ok {
+		t.Fatalf("默认选中项 = %+v, want pickerQueueItem", m.plPicker.list.SelectedItem())
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	// cmd 为 toast 消失定时器（成功提示走 toast 通道）：执行后仅产生过期消息
 	for _, msg := range execCmds(cmd) {
@@ -404,9 +423,9 @@ func TestPickerOpenStillProcessesPlayerEvents(t *testing.T) {
 	}
 	// 搜索页流程选中歌曲按 p 打开选择器
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	if m.plPicker == nil {
-		t.Fatal("按 p 应打开选择器")
+		t.Fatal("按 a 应打开选择器")
 	}
 	// 选择器打开时 t1 播完 → 仍应连播 t2（picker 不拦截播放事件）
 	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
@@ -426,11 +445,12 @@ func TestPickerCreateNewListFlow(t *testing.T) {
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1")}}
 	m := newTestModel(t, newFakePlayer(), fa, nil)
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	if m.plPicker == nil {
-		t.Fatal("按 p 应打开选择器")
+		t.Fatal("按 a 应打开选择器")
 	}
-	// 无既有列表：“＋ 新建列表”是唯一项，直接 Enter
+	// 无既有列表：首项"当前播放队列"+ 末尾"＋ 新建列表"；下移选中新建项
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if m.plPicker == nil || !m.plPicker.naming {
 		t.Fatal("Enter 后应进入命名输入模式")
@@ -463,8 +483,9 @@ func TestPickerCreateDuplicateShowsError(t *testing.T) {
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中“＋ 新建列表”
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 队列项 → 收藏
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 收藏 → "＋ 新建列表"
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if m.plPicker == nil || !m.plPicker.naming {
 		t.Fatal("应进入命名输入模式")
@@ -495,11 +516,12 @@ func TestPickerEscCancels(t *testing.T) {
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	if m.plPicker == nil {
-		t.Fatal("按 p 应打开选择器")
+		t.Fatal("按 a 应打开选择器")
 	}
-	// 下移到“＋ 新建列表”→ Enter 进入命名输入
+	// 下移到"＋ 新建列表"（跳过队列项与"收藏"）→ Enter 进入命名输入
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if m.plPicker == nil || !m.plPicker.naming {
@@ -527,32 +549,54 @@ func TestPickerEscCancels(t *testing.T) {
 	}
 }
 
-// 首页无选中歌曲：按 p 提示错误，不打开选择器。
-func TestPickWithoutSelectionShowsError(t *testing.T) {
+// 首页无选中歌曲：按 a 提示错误，不打开选择器；按 p 静默无操作（delegate 到首页）。
+func TestAToastWhenNoSelection(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	if m.plPicker != nil {
 		t.Error("无选中歌曲不应打开选择器")
 	}
 	if !strings.Contains(activeToastText(m), "当前没有可添加的歌曲") {
 		t.Errorf("toast = %q", activeToastText(m))
 	}
+	if m.toast == nil || m.toast.kind != toastError {
+		t.Errorf("toast kind = %+v, want toastError", m.toast)
+	}
+	// p 无选中时静默：不弹选择器、不产生 cmd、不改 toast
+	before := m.toast
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	if m.plPicker != nil {
+		t.Error("p 不应打开选择器")
+	}
+	if cmd != nil {
+		t.Errorf("p 不应产生 cmd, got %v", cmd)
+	}
+	if m.toast != before {
+		t.Error("p 不应改变 toast")
+	}
 }
 
-// 搜索输入框聚焦时 p 是输入字符（不打开选择器）。
+// 搜索输入框聚焦时 a/p 是输入字符（不打开选择器/不触发播放）。
 func TestPickKeyTypesWhenSearchInputFocused(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ppp")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("aaa")})
+	if m.plPicker != nil {
+		t.Error("输入框聚焦时 a 不应打开选择器")
+	}
+	if got := m.searchPage.input.Value(); got != "aaa" {
+		t.Errorf("input = %q, want aaa", got)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	if got := m.searchPage.input.Value(); got != "aaap" {
+		t.Errorf("input = %q, want aaap", got)
+	}
 	if m.plPicker != nil {
 		t.Error("输入框聚焦时 p 不应打开选择器")
 	}
-	if got := m.searchPage.input.Value(); got != "ppp" {
-		t.Errorf("input = %q, want ppp", got)
-	}
 }
 
-// 历史页选中记录按 p：picker 出现并可直接加入。
+// 历史页选中记录按 a：picker 出现，下移到列表名后 Enter 加入。
 func TestPickTrackFromHistory(t *testing.T) {
 	fa := &fakeSearchAdapter{}
 	m := newTestModel(t, newFakePlayer(), fa, nil)
@@ -566,10 +610,11 @@ func TestPickTrackFromHistory(t *testing.T) {
 	m = m.refreshHistory()
 
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 历史页
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	if m.plPicker == nil {
-		t.Fatal("历史页选中记录按 p 应打开选择器")
+		t.Fatal("历史页选中记录按 a 应打开选择器")
 	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 队列项 → "收藏"
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if m.plPicker != nil {
 		t.Fatal("Enter 后选择器应关闭")
@@ -579,25 +624,260 @@ func TestPickTrackFromHistory(t *testing.T) {
 	}
 }
 
+// 选择器首项"当前播放队列"：Enter 追加到队尾（走全局 trackAppendMsg），
+// 不设 notice（无成功 toast）、选择器关闭、不触发播放。
+func TestPickerQueueItemAppendsToQueue(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1")}}
+	m := newTestModel(t, fp, fa, nil)
+	if _, err := m.pl.Create("收藏"); err != nil {
+		t.Fatal(err)
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+
+	m = searchAndPick(t, m, fa)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if m.plPicker == nil {
+		t.Fatal("按 a 应打开选择器")
+	}
+	// 第一项固定为"当前播放队列"且默认选中
+	it, ok := m.plPicker.list.SelectedItem().(pickerQueueItem)
+	if !ok {
+		t.Fatalf("默认选中项 = %+v, want pickerQueueItem", m.plPicker.list.SelectedItem())
+	}
+	if stripANSI(it.Title()) != "▶ 当前播放队列" {
+		t.Errorf("队列项 Title = %q, want ▶ 当前播放队列", it.Title())
+	}
+	if it.Description() != "追加到队尾" {
+		t.Errorf("队列项 Description = %q, want 追加到队尾", it.Description())
+	}
+
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	var ta trackAppendMsg
+	for _, msg := range execCmds(cmd) {
+		if am, ok := msg.(trackAppendMsg); ok {
+			ta = am
+		}
+	}
+	if ta.track.ID != "t1" {
+		t.Fatalf("trackAppendMsg.track = %s, want t1", ta.track.ID)
+	}
+	m, _ = update(m, ta)
+	if m.plPicker != nil {
+		t.Fatal("Enter 后选择器应关闭")
+	}
+	if m.queue.Len() != 1 || m.queue.CurrentIndex() != -1 {
+		t.Errorf("追加后 Len/CurrentIndex = %d/%d, want 1/-1", m.queue.Len(), m.queue.CurrentIndex())
+	}
+	if fp.playCount() != 0 {
+		t.Errorf("追加不应触发播放, playCount = %d", fp.playCount())
+	}
+	if activeToastText(m) != "" {
+		t.Errorf("队列项追加不应有成功 toast, got %q", activeToastText(m))
+	}
+	// 曲目未加入任何播放列表（"收藏"仍为空）
+	if trs := m.pl.Tracks("收藏"); len(trs) != 0 {
+		t.Errorf("队列项不应写入播放列表: %+v", trs)
+	}
+}
+
+// 搜索页 p 播放选中歌曲：与 Enter 相同（替换语义，回首页）。
+func TestPPlaysSelectedInSearch(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1"), testTrack("t2")}}
+	m := newTestModel(t, fp, fa, nil)
+	m = searchAndPick(t, m, fa)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t2
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	var sel trackSelectedMsg
+	for _, msg := range execCmds(cmd) {
+		if sm, ok := msg.(trackSelectedMsg); ok {
+			sel = sm
+		}
+	}
+	if sel.track.ID != "t2" {
+		t.Fatalf("p 应选中 t2, got %s", sel.track.ID)
+	}
+	m, _ = update(m, sel)
+	if m.queue.Len() != 1 || m.queue.CurrentIndex() != 0 {
+		t.Fatalf("替换后 Len/CurrentIndex = %d/%d, want 1/0", m.queue.Len(), m.queue.CurrentIndex())
+	}
+	if fp.playCount() != 1 || fp.lastPlayed() != testTrack("t2").URL {
+		t.Errorf("play = %d %q, want 1 次 t2", fp.playCount(), fp.lastPlayed())
+	}
+	if m.current != pageHome {
+		t.Errorf("播放后应回首页, current = %v", m.current)
+	}
+}
+
+// 历史页 p 重播选中记录：与 Enter 相同（替换语义，回首页）。
+func TestPPlaysSelectedInHistory(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	if err := m.history.Add(testTrack("t1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.history.Add(testTrack("t2")); err != nil {
+		t.Fatal(err)
+	}
+	m = m.refreshHistory()
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 历史页
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})                      // 选中 t1（列表新项在前）
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	var sel trackSelectedMsg
+	for _, msg := range execCmds(cmd) {
+		if sm, ok := msg.(trackSelectedMsg); ok {
+			sel = sm
+		}
+	}
+	if sel.track.ID != "t1" {
+		t.Fatalf("p 应重播 t1, got %s", sel.track.ID)
+	}
+	m, _ = update(m, sel)
+	if m.queue.Len() != 1 || m.queue.CurrentIndex() != 0 {
+		t.Fatalf("替换后 Len/CurrentIndex = %d/%d, want 1/0", m.queue.Len(), m.queue.CurrentIndex())
+	}
+	if fp.playCount() != 1 || fp.lastPlayed() != testTrack("t1").URL {
+		t.Errorf("play = %d %q, want 1 次 t1", fp.playCount(), fp.lastPlayed())
+	}
+	if m.current != pageHome {
+		t.Errorf("播放后应回首页, current = %v", m.current)
+	}
+}
+
+// 详情模式 p 与 Enter 相同：整列表替换进队列，从选中曲开始播放，回首页。
+func TestPPlaysPlaylistFromDetail(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	if _, err := m.pl.Create("歌单A"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"t1", "t2", "t3"} {
+		if err := m.pl.AddTrack("歌单A", testTrack(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 进入详情
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})  // 选中 t2（下标 1）
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	var pl plLoadMsg
+	for _, msg := range execCmds(cmd) {
+		if lm, ok := msg.(plLoadMsg); ok {
+			pl = lm
+		}
+	}
+	if pl.name != "歌单A" || pl.index != 1 {
+		t.Fatalf("plLoadMsg = %+v, want 歌单A/1", pl)
+	}
+	m, _ = update(m, pl)
+	if m.queue.Len() != 3 || m.queue.CurrentIndex() != 1 {
+		t.Fatalf("队列 Len/CurrentIndex = %d/%d, want 3/1", m.queue.Len(), m.queue.CurrentIndex())
+	}
+	if fp.playCount() != 1 || fp.lastPlayed() != testTrack("t2").URL {
+		t.Errorf("play = %d %q, want 1 次 t2", fp.playCount(), fp.lastPlayed())
+	}
+	if m.current != pageHome {
+		t.Errorf("播放后应回首页, current = %v", m.current)
+	}
+}
+
+// 概览模式 p：播放选中列表（从第一首开始）。
+func TestPPlaysPlaylistFromOverview(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	if _, err := m.pl.Create("歌单A"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"t1", "t2", "t3"} {
+		if err := m.pl.AddTrack("歌单A", testTrack(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	var pl plLoadMsg
+	for _, msg := range execCmds(cmd) {
+		if lm, ok := msg.(plLoadMsg); ok {
+			pl = lm
+		}
+	}
+	if pl.name != "歌单A" || pl.index != 0 {
+		t.Fatalf("plLoadMsg = %+v, want 歌单A/0（从第一首开始）", pl)
+	}
+	m, _ = update(m, pl)
+	if got := idsOf(m.queue.Tracks()); len(got) != 3 || got[0] != "t1" {
+		t.Fatalf("队列 = %v, want [t1 t2 t3]", got)
+	}
+	if m.queue.CurrentIndex() != 0 {
+		t.Errorf("CurrentIndex = %d, want 0", m.queue.CurrentIndex())
+	}
+	if fp.playCount() != 1 || fp.lastPlayed() != testTrack("t1").URL {
+		t.Errorf("play = %d %q, want 1 次 t1", fp.playCount(), fp.lastPlayed())
+	}
+	if m.current != pageHome {
+		t.Errorf("播放后应回首页, current = %v", m.current)
+	}
+}
+
+// 队列页 p 与 Enter 相同：跳转播放选中曲目（保留队列）。
+func TestPPlaysSelectedInQueue(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t3（下标 2）
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	var qp queuePlayMsg
+	for _, msg := range execCmds(cmd) {
+		if qm, ok := msg.(queuePlayMsg); ok {
+			qp = qm
+		}
+	}
+	if qp.index != 2 {
+		t.Fatalf("queuePlayMsg.index = %d, want 2", qp.index)
+	}
+	m, _ = update(m, qp)
+	if m.queue.Len() != 3 || m.queue.CurrentIndex() != 2 {
+		t.Errorf("跳转后 Len/CurrentIndex = %d/%d, want 3/2", m.queue.Len(), m.queue.CurrentIndex())
+	}
+	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t3").URL {
+		t.Errorf("play = %d %q, want 2 次 t3", fp.playCount(), fp.lastPlayed())
+	}
+	if m.current != pageHome {
+		t.Errorf("跳转播放后应回首页, current = %v", m.current)
+	}
+}
+
 // ---- 尺寸与提示 ----
 
 // WindowSizeMsg 应下发到播放列表页与选择器（高度减 Tab 栏 + 分隔线 2 行 + 状态栏 1 行）。
 func TestPlaylistsPageReceivesWindowSize(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	if m.plPage.width != 100 || m.plPage.height != 37 {
-		t.Errorf("plPage 尺寸 = %dx%d, want 100x37（高度减 Tab 栏 + 分隔线 2 行 + 状态栏 1 行）",
-			m.plPage.width, m.plPage.height)
+	// 高度 = 40 - 4（顶部空行 + Tab 栏 + 分隔线 3 行 + 状态栏 1 行）
+	if m.plPage.width != 100 || m.plPage.height != 36 {
+		t.Errorf("plPage 尺寸 = %dx%d, want 100x36", m.plPage.width, m.plPage.height)
 	}
 
 	// 选择器打开时同样接收尺寸
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1")}}
 	m2 := newTestModel(t, newFakePlayer(), fa, nil)
 	m2 = searchAndPick(t, m2, fa)
-	m2, _ = update(m2, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m2, _ = update(m2, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	m2, _ = update(m2, tea.WindowSizeMsg{Width: 100, Height: 40})
-	if m2.plPicker.width != 100 || m2.plPicker.height != 37 {
-		t.Errorf("picker 尺寸 = %dx%d, want 100x37", m2.plPicker.width, m2.plPicker.height)
+	if m2.plPicker.width != 100 || m2.plPicker.height != 36 {
+		t.Errorf("picker 尺寸 = %dx%d, want 100x36", m2.plPicker.width, m2.plPicker.height)
 	}
 }
 
@@ -611,7 +891,8 @@ func TestToastNotClearedByKeyDispatch(t *testing.T) {
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 队列项 → "收藏"
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if activeToastText(m) == "" {
 		t.Fatal("前置失败: 应有成功 toast")
@@ -1534,19 +1815,19 @@ func TestYTSyncKeysScopedToMode(t *testing.T) {
 	}
 }
 
-// URL 导入输入聚焦时 p/空格/q 是输入字符（root 让位，同命名输入模式）。
+// URL 导入输入聚焦时 a/空格/q 是输入字符（root 让位，同命名输入模式）。
 func TestYTURLImportConsumesGlobalKeys(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	if m.plPicker != nil {
-		t.Fatal("URL 导入输入聚焦时 p 不应打开选择器")
+		t.Fatal("URL 导入输入聚焦时 a 不应打开选择器")
 	}
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	if got := m.plPage.input.Value(); got != "p q" {
-		t.Errorf("input = %q, want %q", got, "p q")
+	if got := m.plPage.input.Value(); got != "a q" {
+		t.Errorf("input = %q, want %q", got, "a q")
 	}
 	if !m.plPage.typing() {
 		t.Error("输入后应仍在 URL 导入模式")

@@ -1674,7 +1674,7 @@ func TestToastLifecycle(t *testing.T) {
 }
 
 // TestShowToastTickCmd 校验 showToast 返回的 cmd 产生匹配 id 的过期消息
-//（用 execCmds 执行；时长调小避免测试等待）。
+// （用 execCmds 执行；时长调小避免测试等待）。
 func TestShowToastTickCmd(t *testing.T) {
 	toastErrorDuration = time.Millisecond
 	defer func() { toastErrorDuration = 5 * time.Second }()

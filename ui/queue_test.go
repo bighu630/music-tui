@@ -31,10 +31,16 @@ func searchAndPick(t *testing.T, m Model, fa *fakeSearchAdapter) Model {
 	return m
 }
 
-// appendSelected 对当前列表选中项按 a（追加到队尾），并回灌 trackAppendMsg。
-func appendSelected(t *testing.T, m Model) Model {
+// openPickerAndAppendQueue 对当前列表选中项按 a 弹出“添加到”选择器 →
+// Enter 确认默认第一项"当前播放队列"（追加到队尾）→ 回灌 trackAppendMsg。
+// 可复用：搜索/历史/播放列表详情页选中歌曲后的追加流程。
+func openPickerAndAppendQueue(t *testing.T, m Model) Model {
 	t.Helper()
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if m.plPicker == nil {
+		t.Fatal("按 a 应打开选择器")
+	}
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 默认选中首项“当前播放队列”
 	var ta trackAppendMsg
 	for _, msg := range execCmds(cmd) {
 		if am, ok := msg.(trackAppendMsg); ok {
@@ -42,7 +48,7 @@ func appendSelected(t *testing.T, m Model) Model {
 		}
 	}
 	if ta.track.ID == "" {
-		t.Fatal("按 a 未产生 trackAppendMsg")
+		t.Fatal("选择器队列项 Enter 未产生 trackAppendMsg")
 	}
 	m, _ = update(m, ta)
 	return m
@@ -71,9 +77,9 @@ func TestSearchAppendBuildsQueue(t *testing.T) {
 	m := newTestModel(t, fp, fa, nil)
 	m = searchAndPick(t, m, fa)
 
-	m = appendSelected(t, m)                        // 追加 t1
+	m = openPickerAndAppendQueue(t, m)              // 追加 t1
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t2
-	m = appendSelected(t, m)
+	m = openPickerAndAppendQueue(t, m)
 	if m.queue.Len() != 2 {
 		t.Fatalf("queue.Len = %d, want 2", m.queue.Len())
 	}
@@ -101,9 +107,9 @@ func TestSearchEnterReplacesQueue(t *testing.T) {
 	m = searchAndPick(t, m, fa)
 
 	// 先 a 追加 t1、t2 建立队列
-	m = appendSelected(t, m)
+	m = openPickerAndAppendQueue(t, m)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m = appendSelected(t, m)
+	m = openPickerAndAppendQueue(t, m)
 	if m.queue.Len() != 2 {
 		t.Fatalf("前置追加失败: Len = %d", m.queue.Len())
 	}
@@ -439,7 +445,7 @@ func TestModeLabels(t *testing.T) {
 	}
 }
 
-// TestHistoryAppend 历史页 a 追加到队尾。
+// TestHistoryAppend 历史页 a：弹出选择器 → 默认队列项 → 追加到队尾。
 func TestHistoryAppend(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -449,7 +455,11 @@ func TestHistoryAppend(t *testing.T) {
 	m = m.refreshHistory()
 
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if m.plPicker == nil {
+		t.Fatal("历史页按 a 应打开选择器")
+	}
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 默认选中首项“当前播放队列”
 	var ta trackAppendMsg
 	for _, msg := range execCmds(cmd) {
 		if am, ok := msg.(trackAppendMsg); ok {
