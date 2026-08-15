@@ -31,8 +31,8 @@ type EnhancedClient struct {
 	aiCache  *aiCache
 	lrcCache *lrcCache
 
-	// cnSources 中文歌词源链（网易云/QQ 音乐，匿名接口）：AI 识别成功且
-	// lrclib 严格重查未命中后按序查询（用户确认顺序：lrclib → 网易云 → QQ）；
+	// cnSources 中文歌词源链（网易云/QQ 音乐，匿名接口）：AI 识别成功后
+	// 优先于 lrclib 严格重查按序查询（用户确认顺序：网易云 → QQ → lrclib）；
 	// 命中同样入 LRC 缓存。默认空（需 EnableCNSources 显式启用，测试注入 mock）。
 	cnSources []cnLyricSource
 }
@@ -68,11 +68,12 @@ var aiIdentifyBudget = 25 * time.Second
 //  1. AI 未配置 → 纯确定性匹配（行为与无增强一致）；
 //  2. AI 识别（结果缓存优先 + single-flight，子预算 aiIdentifyBudget）
 //     失败/非歌曲/空标题 → 确定性匹配兜底（Title/Artist 空）；
-//  3. AI 识别成功 → 歌词缓存命中直接返回；否则严格重查 lrclib
-//     （get 优先，search ≤3s）→ 命中入缓存并返回；
-//  4. 严格重查未命中（ErrNotFound）→ 确定性多候选兜底（30s 阈值）
-//     → 命中入缓存（AI title-artist 键）并返回；
-//  5. lrclib 服务端错误（非 ErrNotFound）原样透传，不做兜底。
+//  3. AI 识别成功 → 歌词缓存命中直接返回；否则先查中文歌词源链
+//     （网易云 → QQ，匿名接口）→ 命中入缓存并返回；
+//  4. 中文源未命中 → 严格重查 lrclib（get 优先，search ≤3s）→ 命中
+//     入缓存并返回；服务端错误（非 ErrNotFound）原样透传，不做兜底；
+//  5. 中文源与严格重查均未命中（ErrNotFound）→ 确定性多候选兜底
+//     （30s 阈值）→ 命中入缓存（AI title-artist 键）并返回。
 //
 // AI 识别成功时 FetchResult.Title/Artist 携带清洗后歌名/歌手（展示层
 // 覆盖原始标题），Source 标 ai；纯确定性兜底（2 步）不携带。
@@ -94,6 +95,14 @@ func (e *EnhancedClient) Fetch(ctx context.Context, track model.Track) (FetchRes
 		cached.Source = LyricsSourceAI
 		return FetchResult{Lyrics: cached, Title: res.Title, Artist: res.Artist}, nil
 	}
+	// 中文歌词源链（网易云 → QQ）：匿名接口，优先于 lrclib 严格重查；
+	// 命中入 LRC 缓存；源错误只记日志继续（一个源挂了不影响链）。
+	if ly, ok := e.fetchCN(ctx, res.Title, res.Artist, track.Duration); ok {
+		logger.Debug("歌词: 中文源命中: %s / %s", res.Title, res.Artist)
+		e.lrcCache.Put(res.Title, res.Artist, ly)
+		ly.Source = LyricsSourceAI
+		return FetchResult{Lyrics: ly, Title: res.Title, Artist: res.Artist}, nil
+	}
 	ly, err := e.lrclib.FetchForQuery(ctx, res.Title, res.Artist, track.Duration)
 	if err == nil {
 		logger.Debug("歌词: lrclib 严格重查命中: %s / %s", res.Title, res.Artist)
@@ -104,15 +113,7 @@ func (e *EnhancedClient) Fetch(ctx context.Context, track model.Track) (FetchRes
 	if !errors.Is(err, ErrNotFound) {
 		return FetchResult{}, err // 服务端故障透传，兜底只会再撞一次
 	}
-	// 中文歌词源链（网易云 → QQ）：匿名接口，命中入 LRC 缓存；
-	// 源错误只记日志继续（一个源挂了不影响链）。
-	if ly, ok := e.fetchCN(ctx, res.Title, res.Artist, track.Duration); ok {
-		logger.Debug("歌词: 中文源命中: %s / %s", res.Title, res.Artist)
-		e.lrcCache.Put(res.Title, res.Artist, ly)
-		ly.Source = LyricsSourceAI
-		return FetchResult{Lyrics: ly, Title: res.Title, Artist: res.Artist}, nil
-	}
-	// 严格重查与中文源均未命中 → 确定性多候选兜底（30s 阈值，命中率互补）
+	// 中文源与严格重查均未命中 → 确定性多候选兜底（30s 阈值，命中率互补）
 	det, err := e.lrclib.Fetch(ctx, track)
 	if err != nil {
 		return FetchResult{}, err
