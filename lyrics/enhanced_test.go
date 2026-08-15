@@ -595,7 +595,6 @@ func TestEnhancedDetFallbackCachedForNextPlay(t *testing.T) {
 	var aiCalls *int32
 	var c *EnhancedClient
 	c, aiCalls, lrclibCalls = newEnhancedTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(lrclibCalls, 1)
 		if r.URL.Path == "/api/get" {
 			if isAIQuery(r) {
 				w.WriteHeader(http.StatusNotFound) // 严格重查 get 未命中

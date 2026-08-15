@@ -775,7 +775,8 @@ cache/
        ↓ 已配置
 AI 识别（结果缓存优先 + single-flight；瞬时错误重试 1 次；成功即缓存含负缓存）
   ├─ 失败 / is_song=false / 空 title → 确定性匹配兜底
-  │    （结果不标 AI、展示回落原始标题；负缓存生效不重复调 AI）
+  │    （结果不标 AI、展示回落原始标题；is_song=false/空 title 负缓存生效，
+  │     AI 调用失败不缓存下次重试）
   └─ 识别成功 →
       歌词缓存（清洗后 title-artist）命中 → 返回（Source=ai）
       未命中 → FetchForQuery 严格重查：/api/get 优先（lrclib ±2s）→
@@ -821,7 +822,7 @@ AI 识别（结果缓存优先 + single-flight；瞬时错误重试 1 次；成�
 | client 严格阈值（6 个）+ sync-only（2 个） | FetchForQuery 六项 + 纯文本歌词拒绝（get 命中）、FetchResult 形状（确定性路径 Title/Artist 空） | FetchForQuery：get 命中优先、search 选差距最小、全部 >3s 弃用、3.0s 边界采用 / 3.01s 弃用、空 artist 跳过 get、get 命中超 3s 弃用降级 search |
 | aicache（10 个） | 落盘 roundtrip、负缓存持久化、损坏行跳过 + 文件重写、键空白规范化、并发 Put（-race）、同键不重复、行格式 |
 | lrccache（9 个） | 同步歌词 roundtrip（毫秒误差内）、sync-only（只产出 .lrc、.txt 不识别、旧 .txt 启动清理）、未知名 miss、清洗/截断/控制字符、空歌词不写、文件可 ParseLRC | synced/plain 存取 roundtrip（毫秒误差内）、未知名 miss、不安全字符清洗、超长截断（字节计）、sync/plain 分文件不覆盖、空歌词不写、文件为可 ParseLRC 纯文本 |
-| enhanced（16 个） | AI 优先流程：识别成功严格重查（确定性不跑）；严格未命中确定性兜底（展示信息仍用 AI 标题）；非歌曲/AI 失败/空标题 → 确定性兜底（负缓存生效）；服务端错误透传不兜底；双缓存命中零请求；并发 single-flight；AI 标题携带（live/缓存）；纯文本拒绝；失败路径不携带标题 | 确定性命中不调 AI；无 AI 配置降级；AI 清洗→重查命中（Source 标注）；is_song=false 负缓存（二次不调 AI）；AI 失败降级 + 失败不缓存；全部候选 >3s 弃用；AI 结果缓存 + 歌词缓存命中免 AI/免 lrclib；AI 结果缓存命中仍重查 lrclib；空 title 拒绝；缓存跨重启落盘命中 |
+| enhanced（20 个） | AI 优先流程（含 4 个审查补充）：AI 子预算超时后兜底可跑、兜底命中以 AI 键缓存二次零网络、错误透传后 AI 结果缓存不重调、no-AI 非 NotFound 透传；识别成功严格重查（确定性不跑）；严格未命中确定性兜底（展示信息仍用 AI 标题）；非歌曲/AI 失败/空标题 → 确定性兜底（负缓存生效）；服务端错误透传不兜底；双缓存命中零请求；并发 single-flight；AI 标题携带（live/缓存）；纯文本拒绝；失败路径不携带标题 | 确定性命中不调 AI；无 AI 配置降级；AI 清洗→重查命中（Source 标注）；is_song=false 负缓存（二次不调 AI）；AI 失败降级 + 失败不缓存；全部候选 >3s 弃用；AI 结果缓存 + 歌词缓存命中免 AI/免 lrclib；AI 结果缓存命中仍重查 lrclib；空 title 拒绝；缓存跨重启落盘命中 |
 | config（7 个新增） | openai 缺失禁用、key 存在 model 默认、显式空 key 禁用、显式值、显式空 model 默认、Save roundtrip |
 | ui（6 个新增） | AI 来源歌词显示 `〔AI 匹配〕`、确定性来源不显示、AI 标识行视口高度预留（窄窗口不溢出）、控制栏/状态栏 AI 标题覆盖 + 切歌清空、队列当前项 AI 标题（非当前项保持原始）、MPRIS onTrack 收到清洗后曲目（无 AI 信息不触发） |
 
