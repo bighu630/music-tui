@@ -539,24 +539,17 @@ func (m homeModel) lyricsColumnView() string {
 // 居中（否则短行/提示文本会被推回歌词列中心，回归：暂无歌词偏右）。
 // viewport 填充的行尾空格先剔除，避免宽度计算失真；超宽行保持原样。
 func (m homeModel) centerLyrics(s string) string {
-	colStart := coverW + 2 // 歌词列在中间区的起点（封面列 + gap）
-	midX := m.width / 2    // 屏幕中心（歌词视觉居中基准）
 	lyricsW := m.lyricsColumnWidth()
-	if midX <= colStart {
-		return s
-	}
 	lines := strings.Split(s, "\n")
 	for i, ln := range lines {
 		trimmed := strings.TrimRight(ln, " ")
 		vis := ansi.StringWidth(trimmed)
-		pad := midX - colStart - vis/2
+		// 歌词在封面右侧剩余空间（歌词列）内居中：中心 = 列起点 + 列宽/2。
+		// （回归：曾以屏幕中心为基准，歌词偏左、封面右侧大片空白；
+		//  超宽行 pad 为负时左对齐——列内也放不下时无居中可言。）
+		pad := (lyricsW - vis) / 2
 		if pad < 0 {
-			// 超宽行无法屏幕居中（如 80 宽终端 + 长中文歌词行）：
-			// 退化为歌词列内居中，绝不左对齐（回归：曾 clamp 0 导致左对齐）。
-			pad = (lyricsW - vis) / 2
-			if pad < 0 {
-				pad = 0
-			}
+			pad = 0
 		}
 		tail := lyricsW - pad - vis
 		if tail < 0 {
