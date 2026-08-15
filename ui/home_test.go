@@ -394,6 +394,47 @@ func colOf(line, substr string) int {
 	return ansi.StringWidth(line[:idx])
 }
 
+// TestHomeControlBarCentered 宽窗口下中栏操作键应位于屏幕水平中心：
+// centerStart == (width-centerBarW)/2。
+// （回归：曾在中栏在“左栏右缘~右栏左缘”之间居中——左栏（标题）宽、右栏
+//  （模式）窄时中栏被推到右侧，窗口越宽越明显：用户终端验证 W≈120 时
+//  “|< || >| 顺序 10/25 都到右边去了”。）
+func TestHomeControlBarCentered(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m.home = m.home.setSize(120, 40)
+	m.home = m.home.setQueueInfo(10, 25, queue.Sequential)
+
+	// 宽窗口：中栏起点 = 屏幕中心 - 中栏宽/2
+	lay := m.home.controlBarLayout(120)
+	if want := (120 - centerBarW) / 2; lay.centerStart != want {
+		t.Errorf("宽窗口 centerStart = %d, want %d（屏幕居中）", lay.centerStart, want)
+	}
+	// 渲染与命中一致：|< 渲染在 layout 的 centerStart
+	lines := strings.Split(m.home.view(), "\n")
+	if col := colOf(lines[len(lines)-1], "|<"); col != lay.centerStart {
+		t.Errorf("中栏 |< 渲染列 = %d, want %d", col, lay.centerStart)
+	}
+	// 中栏中心 ≈ 屏幕中心（允许 ±1 列取整误差）
+	if got, want := lay.centerStart+centerBarW/2, 60; got < want-1 || got > want+1 {
+		t.Errorf("中栏中心 = %d, want ≈ %d（屏幕中心）", got, want)
+	}
+
+	// 窄窗口：中栏不越过右栏起点、不贴左（弹性退化仍可用）
+	for _, w := range []int{80, 60, 44, 36} {
+		m.home = m.home.setSize(w, 24)
+		lay = m.home.controlBarLayout(w)
+		if lay.centerStart+centerBarW > lay.rightStart {
+			t.Errorf("W=%d: 中栏右缘 %d 越过右栏起点 %d", w, lay.centerStart+centerBarW, lay.rightStart)
+		}
+		if lay.centerStart < 12 {
+			t.Errorf("W=%d: 中栏起点 %d 贴左（左栏最小宽 10 + 间距 2）", w, lay.centerStart)
+		}
+	}
+}
+
 // TestHomeModeKeyCycles 首页 m 键三态循环切换模式（Sequential→Shuffle→
 // RepeatOne→Sequential）。与队列页 s 键语义一致：模式是全局队列属性，
 // 无曲目时也应能切换（root.cycleMode 不依赖当前播放）。
