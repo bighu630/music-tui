@@ -462,6 +462,10 @@ func (m homeModel) lyricsHeight() int {
 	return lyricViewportHeight(m.middleHeight())
 }
 
+// lyricActiveStyle 当前歌词行高亮样式（首页歌词区与状态栏中间段共用）：
+// 加粗 + 粉色 212。
+var lyricActiveStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+
 // rebuildLyrics 用当前高亮行重渲染歌词内容：内容 = H/2 行空白 + 歌词行
 // + H/2 行空白（padding 模型，配合 scrollLyricsTo 使当前行恒在视口中央；
 // H 变化后必须重调本函数，padding 行数随 H/2 变化）。
@@ -469,14 +473,13 @@ func (m *homeModel) rebuildLyrics() {
 	if m.lyrics == nil {
 		return
 	}
-	active := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	pad := m.lyricView.Height / 2
 	var sb strings.Builder
 	sb.WriteString(strings.Repeat("\n", pad))
 	for i, line := range m.lyrics.Lines {
 		text := line.Text
 		if i == m.currentLine {
-			text = active.Render(text)
+			text = lyricActiveStyle.Render(text)
 		}
 		sb.WriteString(text)
 		sb.WriteString("\n")
