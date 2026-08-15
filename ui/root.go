@@ -242,10 +242,11 @@ type Model struct {
 	state     model.PlaybackState
 	current   page
 	width     int // 窗口宽度（分隔线按此宽度渲染，不写死）
-	hoverTab  int // Tab 栏悬停标签下标（= page 枚举值）；-1 = 无悬停
-	lastError string
-	notice    string // 绿色成功提示（如“已添加到「xxx」”；新按键分发时清除）
-	ended     bool   // 当前歌曲是否已播放结束/出错（空格语义：重播同曲而非 Resume）
+	hoverTab int // Tab 栏悬停标签下标（= page 枚举值）；-1 = 无悬停
+	// toast 活跃 toast（单条覆盖；定时自动消失，不参与布局）。替代旧 lastError/notice 横幅。
+	toast   *toast
+	toastID uint64 // toast 自增 id：过期消息按 id 匹配，防误清被覆盖后的新 toast
+	ended   bool   // 当前歌曲是否已播放结束/出错（空格语义：重播同曲而非 Resume）
 
 	// YT Music 同步状态（登录配置 + 同步中 + 验证失败标记；页面经 setYTSyncStatus 推入）
 	ytLogin   ytm.LoginConfig
@@ -455,8 +456,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if !exists {
-			m.lastError = "播放列表「" + msg.name + "」不存在"
-			return m, nil
+			m, cmd := m.showToast("播放列表「"+msg.name+"」不存在", toastError)
+			return m, cmd
 		}
 		m.queue.ReplaceAll(m.pl.Tracks(msg.name), msg.index)
 		m.retryCount = 0    // 手动播放：全新重试预算
@@ -466,37 +467,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.playQueueTrack()
 
 	case plCreateMsg:
-		m.lastError = ""
 		if _, err := m.pl.Create(msg.name); err != nil {
-			m.lastError = "新建播放列表失败: " + err.Error()
-		} else {
-			m.plPage = m.plPage.exitNaming() // 成功退出命名输入；失败保留输入便于修改
+			m, cmd := m.showToast("新建播放列表失败: "+err.Error(), toastError)
+			m.plPage = m.plPage.setLists(m.pl.Lists())
+			return m, cmd
 		}
+		m.plPage = m.plPage.exitNaming() // 成功退出命名输入；失败保留输入便于修改
 		m.plPage = m.plPage.setLists(m.pl.Lists())
 		return m, nil
 
 	case plRenameMsg:
-		m.lastError = ""
 		if err := m.pl.Rename(msg.oldName, msg.newName); err != nil {
-			m.lastError = "重命名失败: " + err.Error()
-		} else {
-			m.plPage = m.plPage.exitNaming()
+			m, cmd := m.showToast("重命名失败: "+err.Error(), toastError)
+			m.plPage = m.plPage.setLists(m.pl.Lists())
+			return m, cmd
 		}
+		m.plPage = m.plPage.exitNaming()
 		m.plPage = m.plPage.setLists(m.pl.Lists())
 		return m, nil
 
 	case plDeleteMsg:
-		m.lastError = ""
 		if err := m.pl.Delete(msg.name); err != nil {
-			m.lastError = "删除播放列表失败: " + err.Error()
+			m, cmd := m.showToast("删除播放列表失败: "+err.Error(), toastError)
+			m.plPage = m.plPage.setLists(m.pl.Lists())
+			return m, cmd
 		}
 		m.plPage = m.plPage.setLists(m.pl.Lists())
 		return m, nil
 
 	case plRemoveTrackMsg:
-		m.lastError = ""
 		if err := m.pl.RemoveTrack(msg.name, msg.index); err != nil {
-			m.lastError = "移除歌曲失败: " + err.Error()
+			m, cmd := m.showToast("移除歌曲失败: "+err.Error(), toastError)
+			m.plPage = m.plPage.setLists(m.pl.Lists())
+			return m, cmd
 		}
 		m.plPage = m.plPage.setLists(m.pl.Lists())
 		return m, nil
@@ -505,23 +508,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ytLoginMsg:
 		// 浏览器方式登录提交：保存配置 → 异步验证
-		m.lastError = ""
 		if m.yt == nil {
 			return m, nil
 		}
 		if err := m.yt.SetLogin(msg.cfg); err != nil {
-			m.lastError = "保存登录配置失败: " + err.Error()
-			return m, nil
+			m, cmd := m.showToast("保存登录配置失败: "+err.Error(), toastError)
+			return m, cmd
 		}
 		m.ytLogin = m.yt.Login()
 		m.ytInvalid = false // 新配置未验证
 		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
-		m.notice = "已保存登录配置，验证中…"
-		return m, ytVerifyCmd(m.yt)
+		m, cmd := m.showToast("已保存登录配置，验证中…", toastInfo)
+		return m, tea.Batch(cmd, ytVerifyCmd(m.yt))
 
 	case ytLoginFileMsg:
 		// cookies.txt 方式：校验文件可读 → 保存配置 → 异步验证
-		m.lastError = ""
 		if m.yt == nil {
 			return m, nil
 		}
@@ -530,23 +531,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if _, err := os.Stat(path); err != nil {
-			m.lastError = "cookies.txt 不可读: " + err.Error()
-			return m, nil
+			m, cmd := m.showToast("cookies.txt 不可读: "+err.Error(), toastError)
+			return m, cmd
 		}
 		cfg := ytm.LoginConfig{Method: ytm.MethodCookiesFile, CookiesPath: path}
 		if err := m.yt.SetLogin(cfg); err != nil {
-			m.lastError = "保存登录配置失败: " + err.Error()
-			return m, nil
+			m, cmd := m.showToast("保存登录配置失败: "+err.Error(), toastError)
+			return m, cmd
 		}
 		m.ytLogin = m.yt.Login()
 		m.ytInvalid = false // 新配置未验证
 		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
-		m.notice = "已保存登录配置，验证中…"
-		return m, ytVerifyCmd(m.yt)
+		m, cmd := m.showToast("已保存登录配置，验证中…", toastInfo)
+		return m, tea.Batch(cmd, ytVerifyCmd(m.yt))
 
 	case ytLoginPasteMsg:
 		// 粘贴 Cookie 方式：落盘 cookies 文件 + 保存配置 → 异步验证
-		m.lastError = ""
 		if m.yt == nil {
 			return m, nil
 		}
@@ -555,47 +555,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if _, err := m.yt.SetPastedLogin(text); err != nil {
-			m.lastError = "保存登录配置失败: " + err.Error()
-			return m, nil
+			m, cmd := m.showToast("保存登录配置失败: "+err.Error(), toastError)
+			return m, cmd
 		}
 		m.ytLogin = m.yt.Login()
 		m.ytInvalid = false // 新配置未验证
 		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
-		m.notice = "已保存登录配置，验证中…"
-		return m, ytVerifyCmd(m.yt)
+		m, cmd := m.showToast("已保存登录配置，验证中…", toastInfo)
+		return m, tea.Batch(cmd, ytVerifyCmd(m.yt))
 
 	case ytLogoutMsg:
 		// 退出登录：清除配置 + 页面状态复位
-		m.lastError = ""
 		if m.yt == nil {
 			return m, nil
 		}
 		if err := m.yt.ClearLogin(); err != nil {
-			m.lastError = "退出登录失败: " + err.Error()
-			return m, nil
+			m, cmd := m.showToast("退出登录失败: "+err.Error(), toastError)
+			return m, cmd
 		}
 		m.ytLogin = ytm.LoginConfig{}
 		m.ytInvalid = false
 		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
-		m.notice = "已退出 YT Music 登录"
-		return m, nil
+		m, cmd := m.showToast("已退出 YT Music 登录", toastSuccess)
+		return m, cmd
 
 	case ytVerifyDoneMsg:
 		// 验证结果：无论成败刷新页面登录状态；失败时状态区/设置页降级展示
 		if m.yt == nil {
 			return m, nil // 防御：未集成 yt 时丢弃结果
 		}
-		m.notice = ""
-		m.lastError = ""
 		m.ytInvalid = msg.err != nil
+		var cmd tea.Cmd
 		if msg.err != nil {
-			m.lastError = ytVerifyErrorText(msg.err)
+			m, cmd = m.showToast(ytVerifyErrorText(msg.err), toastError)
 		} else {
-			m.notice = "YT Music 登录有效"
+			m, cmd = m.showToast("YT Music 登录有效", toastSuccess)
 		}
 		m.ytLogin = m.yt.Login()
 		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
-		return m, nil
+		return m, cmd
 
 	case ytSyncAllMsg:
 		// 同步全部：同步中忽略重复触发
@@ -614,20 +612,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ytInvalid = ytInvalidAfterSync(m.ytInvalid, msg.err)
 		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, m.ytInvalid)
 		if msg.err != nil {
-			m.notice = ""
-			m.lastError = "同步失败: " + msg.err.Error()
-		} else {
-			m.lastError = ""
-			total := 0
-			for _, r := range msg.results {
-				total += r.TrackCount
-			}
-			m.notice = fmt.Sprintf("已同步 %d 个歌单 · 共 %d 首", len(msg.results), total)
+			m, cmd := m.showToast("同步失败: "+msg.err.Error(), toastError)
+			// 部分失败也刷新（成功项已入库）
+			m.plPage = m.plPage.setLists(m.pl.Lists())
+			m.plPage = m.plPage.setYTSyncs(m.yt.SyncEntries())
+			return m, cmd
 		}
+		total := 0
+		for _, r := range msg.results {
+			total += r.TrackCount
+		}
+		m, cmd := m.showToast(fmt.Sprintf("已同步 %d 个歌单 · 共 %d 首", len(msg.results), total), toastSuccess)
 		// 部分失败也刷新（成功项已入库）
 		m.plPage = m.plPage.setLists(m.pl.Lists())
 		m.plPage = m.plPage.setYTSyncs(m.yt.SyncEntries())
-		return m, nil
+		return m, cmd
 
 	case ytImportMsg:
 		// URL 导入：同步/导入中忽略重复触发；空 URL 忽略
@@ -650,15 +649,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ytInvalid = ytInvalidAfterSync(m.ytInvalid, msg.err)
 		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, m.ytInvalid)
 		if msg.err != nil {
-			m.notice = ""
-			m.lastError = "导入失败: " + msg.err.Error()
-			return m, nil
+			m, cmd := m.showToast("导入失败: "+msg.err.Error(), toastError)
+			return m, cmd
 		}
-		m.lastError = ""
-		m.notice = fmt.Sprintf("已导入「%s」%d 首", msg.res.Remote.Title, msg.res.TrackCount)
+		m, cmd := m.showToast(fmt.Sprintf("已导入「%s」%d 首", msg.res.Remote.Title, msg.res.TrackCount), toastSuccess)
 		m.plPage = m.plPage.setLists(m.pl.Lists())
 		m.plPage = m.plPage.setYTSyncs(m.yt.SyncEntries())
-		return m, nil
+		return m, cmd
 
 	case ytRefreshMsg:
 		// 详情 r：仅 YT 同步列表可刷新；同步中忽略
@@ -675,9 +672,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if !found {
-			m.notice = ""
-			m.lastError = "该列表不是 YT Music 同步列表"
-			return m, nil
+			m, cmd := m.showToast("该列表不是 YT Music 同步列表", toastError)
+			return m, cmd
 		}
 		m.ytSyncing = true
 		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, true, m.ytInvalid)
@@ -691,29 +687,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ytInvalid = ytInvalidAfterSync(m.ytInvalid, msg.err)
 		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, m.ytInvalid)
 		if msg.err != nil {
-			m.notice = ""
-			m.lastError = "刷新失败: " + msg.err.Error()
-			return m, nil
+			m, cmd := m.showToast("刷新失败: "+msg.err.Error(), toastError)
+			return m, cmd
 		}
-		m.lastError = ""
-		m.notice = fmt.Sprintf("已刷新「%s」%d 首", msg.res.ListName, msg.res.TrackCount)
+		m, cmd := m.showToast(fmt.Sprintf("已刷新「%s」%d 首", msg.res.ListName, msg.res.TrackCount), toastSuccess)
 		m.plPage = m.plPage.setLists(m.pl.Lists())
 		m.plPage = m.plPage.setYTSyncs(m.yt.SyncEntries())
-		return m, nil
+		return m, cmd
 
 	case playResultMsg:
 		// 预留分支：若未来把 player.Play 改回异步 cmd，此分支处理其失败结果。
 		// 当前 startPlay 同步调用 Play，本分支不会触发。
 		if msg.err != nil {
-			m.lastError = "播放失败: " + msg.err.Error()
+			m, cmd := m.showToast("播放失败: "+msg.err.Error(), toastError)
 			m.state.Playing = false
 			m.home = m.home.syncState(m.state)
+			return m, cmd
 		}
 		return m, nil
 
 	case playerOpResultMsg:
 		if msg.err != nil {
-			m.lastError = msg.err.Error()
+			m, cmd := m.showToast(msg.err.Error(), toastError)
+			return m, cmd
 		}
 		return m, nil
 
@@ -728,12 +724,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.queueSkip = false
 		if _, ok := m.queue.Current(); !ok {
 			// 重试等待期间队列被清空/删光：无曲可播，停止重试
-			//（避免“正在自动重试”横幅悬挂）。
+			//（避免“正在自动重试”toast 悬挂）。
 			m.ended = true
-			m.lastError = "播放失败：队列已清空，已停止自动重试"
+			m, cmd := m.showToast("播放失败：队列已清空，已停止自动重试", toastError)
 			m.state.Playing = false
 			m.home = m.home.syncState(m.state)
-			return m, waitForPlayerEvents(m.player)
+			return m, tea.Batch(cmd, waitForPlayerEvents(m.player))
 		}
 		m2, cmd := m.playQueueTrack()
 		return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
@@ -750,12 +746,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 无关（坏文件 mpv 会接受 loadfile 后异步报 end-file error）；删除健康
 			// 缓存有害，真实损坏由异步 LoadFailedError 路径处理。
 			m.resuming = false // 恢复上下文作废
-			m.lastError = "恢复播放失败: " + msg.err.Error()
+			m, cmd := m.showToast("恢复播放失败: "+msg.err.Error(), toastError)
 			m.state = model.PlaybackState{}
 			m.home = m.home.syncState(m.state)
 			m.queueSkip = false
 			m.notifyTrack(nil)
-			return m.syncQueueViews(), nil
+			return m.syncQueueViews(), cmd
 		}
 		// 恢复成功：暂停态也加载歌词/封面展示。
 		// 注意：不在成功分支清除 resuming——PlayPaused 的 IPC 成功只代表
@@ -767,11 +763,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// 恢复成功：按当前模式补 SetLoop（beginPlay 有显式 SetLoop，恢复路径
 		// 此前漏设——单曲循环模式下恢复会丢失 mpv loop-file 语义；回归：
-		// TestResumeSuccessSetsLoopPerMode）。失败仅记 lastError 不阻断恢复。
+		// TestResumeSuccessSetsLoopPerMode）。失败仅记 toast 不阻断恢复。
+		var loopCmd tea.Cmd
 		if err := m.player.SetLoop(m.queue.Mode() == queue.RepeatOne); err != nil {
-			m.lastError = "设置循环失败: " + err.Error()
+			m, loopCmd = m.showToast("设置循环失败: "+err.Error(), toastError)
 		}
 		return m, tea.Batch(
+			loopCmd,
 			fetchLyricsCmd(m.lyrics, *m.state.Track),
 			fetchCoverCmd(m.cover, *m.state.Track),
 		)
@@ -800,18 +798,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case deleteEntryMsg:
-		m.lastError = ""
 		if err := m.history.Remove(msg.id, msg.source); err != nil {
-			m.lastError = "删除历史失败: " + err.Error()
+			m, cmd := m.showToast("删除历史失败: "+err.Error(), toastError)
+			return m.refreshHistory(), cmd
 		}
 		return m.refreshHistory(), nil
 
 	case clearHistoryMsg:
-		m.lastError = ""
 		if err := m.history.Clear(); err != nil {
-			m.lastError = "清空历史失败: " + err.Error()
+			m, cmd := m.showToast("清空历史失败: "+err.Error(), toastError)
+			return m.refreshHistory(), cmd
 		}
 		return m.refreshHistory(), nil
+
+	case toastExpireMsg:
+		m.toast = expireToast(m.toast, msg.id)
+		return m, nil
 
 	case tea.BatchMsg:
 		// 同步执行 batch 子命令并回灌结果：仅供测试的 update/execCmds 驱动方式使用。
@@ -838,15 +840,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, spinnerTick
 
 	case tea.WindowSizeMsg:
-		// 顶部 Tab 栏 + 分隔线占 2 行，页面高度相应减 2
+		// 顶部 Tab 栏 + 分隔线占 2 行、底部状态栏占 1 行，页面高度相应减 3
 		m.width = msg.Width
-		m.home = m.home.setSize(msg.Width, msg.Height-2)
-		m.searchPage = m.searchPage.setSize(msg.Width, msg.Height-2)
-		m.historyPage = m.historyPage.setSize(msg.Width, msg.Height-2)
-		m.queuePage = m.queuePage.setSize(msg.Width, msg.Height-2)
-		m.plPage = m.plPage.setSize(msg.Width, msg.Height-2)
+		m.home = m.home.setSize(msg.Width, msg.Height-3)
+		m.searchPage = m.searchPage.setSize(msg.Width, msg.Height-3)
+		m.historyPage = m.historyPage.setSize(msg.Width, msg.Height-3)
+		m.queuePage = m.queuePage.setSize(msg.Width, msg.Height-3)
+		m.plPage = m.plPage.setSize(msg.Width, msg.Height-3)
 		if m.plPicker != nil {
-			picker := m.plPicker.setSize(msg.Width, msg.Height-2)
+			picker := m.plPicker.setSize(msg.Width, msg.Height-3)
 			m.plPicker = &picker
 		}
 		return m, nil
@@ -862,17 +864,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			picker, cmd = m.plPicker.Update(msg)
 			if picker.closed {
 				if picker.notice != "" {
-					m.notice = picker.notice
+					m2, tcmd := m.showToast(picker.notice, toastSuccess)
+					m = m2
+					cmd = tea.Batch(cmd, tcmd) // Batch 跳过 nil
 				}
 				m.plPicker = nil
 				m.plPage = m.plPage.setLists(m.pl.Lists())
 				return m, cmd
 			}
 			m.plPicker = &picker
-			m.notice = "" // 新按键分发前清除提示
 			return m, cmd
 		}
-		m.notice = "" // 新按键分发前清除提示
 		switch msg.String() {
 		case "tab", "ctrl+right":
 			return m.switchPage(msg.String()), nil
@@ -907,8 +909,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			track, ok := m.selectedTrack()
 			if !ok {
-				m.lastError = "当前没有可添加的歌曲（请先在搜索/历史/播放列表页选中歌曲）"
-				return m, nil
+				m, cmd := m.showToast("当前没有可添加的歌曲（请先在搜索/历史/播放列表页选中歌曲）", toastError)
+				return m, cmd
 			}
 			m.hoverTab = -1 // 打开选择器时清除悬停高亮（打开期间鼠标事件被忽略，防残留）
 			m.plPicker = newPlPicker(m.pl, track)
@@ -920,7 +922,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m.delegate(msg)
 }
 
-// View 渲染当前页面（选择器打开时全屏替换），底部附错误/成功横幅。
+// View 渲染当前页面（选择器打开时全屏替换），底部附常驻状态栏；
+// 活跃 toast 覆盖在状态栏上方一行的右端（不参与布局，行数不变）。
 func (m Model) View() string {
 	var body string
 	if m.plPicker != nil {
@@ -939,53 +942,83 @@ func (m Model) View() string {
 			body = m.historyPage.view()
 		}
 	}
-	if m.lastError != "" || m.notice != "" {
-		// 横幅替换中间区末行（倒数第 3 行）而非追加：追加会使 root.View
-		// 超出终端高度，终端滚动把顶部 Tab 栏滚出屏幕并残留旧帧
-		// （回归：播放失败/恢复失败横幅曾导致 Tab 栏消失 + 画面残影）；
-		// 替换末尾行（进度条/按钮行）则错误期间底部控件不可见
-		// （回归：seek 失败横幅曾覆盖按钮行）。
-		// body 行数不足时退化为替换末尾行（仍保证不超屏）。
-		lines := strings.Split(body, "\n")
-		errIdx := len(lines) - 3 // 中间区末行
-		if errIdx < 0 {
-			errIdx = len(lines) - 1
+	out := m.tabBar() + "\n" + body + "\n" + m.statusBarView()
+	return m.overlayToast(out)
+}
+
+// statusBarView 底部常驻状态栏（恒 1 行，布局稳定）：左 = 播放状态 + 模式 +
+// 队列位置；右 = 当前曲目标题（截断）。toast 覆盖在其上方一行的右端。
+func (m Model) statusBarView() string {
+	left := "⏹ 未在播放"
+	if m.state.Track != nil {
+		icon := "⏵"
+		if !m.state.Playing {
+			icon = "⏸"
 		}
-		noticeIdx := errIdx - 1
-		if noticeIdx < 0 {
-			noticeIdx = 0
+		pos := 0
+		if m.queue.CurrentIndex() >= 0 {
+			pos = m.queue.CurrentIndex() + 1
 		}
-		if m.lastError != "" {
-			banner := lipgloss.NewStyle().
-				Foreground(lipgloss.Color("9")).
-				Render("⚠ " + m.lastError)
-			if len(lines) > 0 {
-				// 超宽横幅会在终端折行 → 行数超屏 → Tab 栏被滚出
-				// （与追加横幅同类回归）；按页面宽度截断。
-				if m.width > 0 {
-					banner = ansi.Truncate(banner, m.width, "…")
-				}
-				lines[errIdx] = banner
-			} else {
-				body = banner
-			}
-		}
-		if m.notice != "" {
-			banner := lipgloss.NewStyle().
-				Foreground(lipgloss.Color("10")).
-				Render("✔ " + m.notice)
-			if len(lines) > 0 {
-				if m.width > 0 {
-					banner = ansi.Truncate(banner, m.width, "…")
-				}
-				lines[noticeIdx] = banner
-			}
-		}
-		if len(lines) > 0 {
-			body = strings.Join(lines, "\n")
-		}
+		left = fmt.Sprintf("%s %s · %d/%d", icon, modeName(m.queue.Mode()), pos, m.queue.Len())
 	}
-	return m.tabBar() + "\n" + body
+	right := ""
+	if m.state.Track != nil {
+		right = ansi.Truncate(m.state.Track.Title+" - "+m.state.Track.Artist, m.width/2, "…")
+	}
+	style := lipgloss.NewStyle().Faint(true)
+	if m.width <= 0 {
+		return style.Render(left)
+	}
+	rightW := ansi.StringWidth(style.Render(right))
+	pad := m.width - ansi.StringWidth(style.Render(left)) - rightW
+	if pad < 0 {
+		pad = 0
+	}
+	return style.Render(left) + strings.Repeat(" ", pad) + style.Render(right)
+}
+
+// toastText 按类型渲染 toast 文案（图标 + 颜色，与 lipgloss 主题一致）。
+func (m Model) toastText(t toast) string {
+	switch t.kind {
+	case toastError:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("⚠ " + t.text)
+	case toastWarning:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render("⚠ " + t.text)
+	case toastSuccess:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("✔ " + t.text)
+	default:
+		return lipgloss.NewStyle().Faint(true).Render("ℹ " + t.text)
+	}
+}
+
+// overlayToast 把活跃 toast 覆盖到完整输出（tabBar+body+statusBar）中状态栏
+// 上方一行的右端：行数不变、其余内容不变 → 出现/消失排版零跳动。
+// 无 toast 或行数不足时原样返回。超宽 toast 按窗口宽度截断。
+func (m Model) overlayToast(out string) string {
+	if m.toast == nil || out == "" {
+		return out
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) < 2 {
+		return out
+	}
+	idx := len(lines) - 2 // 状态栏上方一行
+	text := m.toastText(*m.toast)
+	tw := ansi.StringWidth(text)
+	if m.width > 0 && tw > m.width {
+		text = ansi.Truncate(text, m.width, "…")
+		tw = ansi.StringWidth(text)
+	}
+	keep := m.width - tw - 2
+	if keep < 0 {
+		keep = 0
+	}
+	line := ""
+	if keep > 0 {
+		line = ansi.Truncate(lines[idx], keep, "")
+	}
+	lines[idx] = line + "  " + text
+	return strings.Join(lines, "\n")
 }
 
 // onPlayerEvent 更新共享播放状态并同步首页。
@@ -1063,19 +1096,19 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 			// 下次启动重试。
 			if m.resuming {
 				m.resuming = false
-				m.lastError = "恢复播放失败: " + hint
+				m, cmd := m.showToast("恢复播放失败: "+hint, toastError)
 				m.state = model.PlaybackState{}
 				m.home = m.home.syncState(m.state)
 				m.queueSkip = false
 				m.notifyTrack(nil)
-				return m.syncQueueViews(), tea.Batch(cmds...)
+				return m.syncQueueViews(), tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 			}
 			if m.retryCount < maxPlayRetries {
 				m.retryCount++
-				m.lastError = fmt.Sprintf("播放失败：%s，正在自动重试（%d/%d）…", hint, m.retryCount, maxPlayRetries)
+				m, cmd := m.showToast(fmt.Sprintf("播放失败：%s，正在自动重试（%d/%d）…", hint, m.retryCount, maxPlayRetries), toastWarning)
 				m.state.Playing = false
 				m.home = m.home.syncState(m.state)
-				return m, tea.Batch(waitForPlayerEvents(m.player), retryPlayCmd(m.playGen))
+				return m, tea.Batch(cmd, waitForPlayerEvents(m.player), retryPlayCmd(m.playGen))
 			}
 			// 重试耗尽：跳过失败曲目继续连播。注意 Next 现为回绕语义——单曲队列/
 			// 重复 ID 会把失败曲目自身送回，继续播放会陷入“失败→重试→耗尽→
@@ -1096,7 +1129,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 				skip = &tr
 			}
 			if skip != nil && (m.state.Track == nil || skip.ID != m.state.Track.ID) && !m.failedTracks[skip.ID] {
-				// 跳过失败曲目继续连播（横幅保留告知用户哪首失败）。
+				// 跳过失败曲目继续连播（toast 告知用户哪首失败）。
 				// 目标曲目已在本轮失败集合中（队列回绕撞回已失败曲目）：不跳，
 				// 走下方停止路径，避免无限交替重播（回归：TestLoadFailAllTracksFailStopsLoop）。
 				m2, cmd := m.skipFailedTrack(*skip, hint)
@@ -1104,16 +1137,17 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 			}
 			// 单曲重试耗尽：停止播放，等待用户操作（空格重播同曲）
 			m.ended = true
-			m.lastError = fmt.Sprintf("播放失败：%s，已重试 %d 次。请稍后重试或更换歌曲", hint, maxPlayRetries)
+			m, cmd := m.showToast(fmt.Sprintf("播放失败：%s，已重试 %d 次。请稍后重试或更换歌曲", hint, maxPlayRetries), toastError)
 			m.state.Playing = false
 			m.home = m.home.syncState(m.state)
-			return m, tea.Batch(cmds...)
+			return m, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 		}
 		m.retryCount = 0
 		m.ended = true
-		m.lastError = ev.Err.Error()
+		m, cmd := m.showToast(ev.Err.Error(), toastError)
 		m.state.Playing = false
 		m.home = m.home.syncState(m.state)
+		return m, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -1173,8 +1207,8 @@ func (m Model) skipFailedTrack(tr model.Track, hint string) (Model, tea.Cmd) {
 	if failed != nil {
 		failedTitle = failed.Title
 	}
-	m2.lastError = fmt.Sprintf("「%s」播放失败：%s，已重试 %d 次，跳过继续播放", failedTitle, hint, maxPlayRetries)
-	return m2, cmd
+	m2, tcmd := m2.showToast(fmt.Sprintf("「%s」播放失败：%s，已重试 %d 次，跳过继续播放", failedTitle, hint, maxPlayRetries), toastWarning)
+	return m2, tea.Batch(cmd, tcmd)
 }
 
 // stopAfterEnd 播放结束且无下一首：停在当前位置等待用户操作（空格重播同曲）。
@@ -1188,7 +1222,7 @@ func (m Model) stopAfterEnd() (Model, tea.Cmd) {
 // startPlay 手动播放某曲目（替换语义）：清空队列 → 该曲入队为当前 → 播放。
 // 成功时并行触发 歌词 / 封面 / 历史 三个异步 cmd（核心链路 1）；
 // Play 失败时跳过全部异步 cmd（失败播放不进历史、不请求歌词/封面），
-// 状态重置为空回到"未在播放"空态 + 错误横幅。
+// 状态重置为空回到"未在播放"空态 + 错误 toast。
 func (m Model) startPlay(track model.Track) (Model, tea.Cmd) {
 	m.queue.Replace(track)
 	m.retryCount = 0    // 手动播放：全新重试预算
@@ -1209,7 +1243,7 @@ func (m Model) playQueueTrack() (Model, tea.Cmd) {
 // beginPlay 核心播放流程：置播放状态、同步调用 player.Play（
 // root_test 的 TestPlayFlow 在 update 返回后立即断言 playCount，故必须同步）、
 // 刷新队列展示；成功时并行触发 歌词/封面/历史 三个异步 cmd，
-// Play 失败时跳过全部异步 cmd，状态重置为空回到"未在播放"空态 + 错误横幅。
+// Play 失败时跳过全部异步 cmd，状态重置为空回到"未在播放"空态 + 错误 toast。
 // 音频缓存：命中 → 播本地文件（playingFromCache 置位，后续 LoadFailed 时
 // 据此移除损坏条目）；未命中 → 播网络 URL + 后台异步下载（不阻塞播放）。
 // 注意：不重置 retryCount——自动重试也走本路径，重置会让重试预算
@@ -1221,7 +1255,7 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 	m.playGen++ // 播放代际递增：使在途重试消息过期（用户换曲后不再重试旧曲）
 	m.ended = false
 	m.state = model.PlaybackState{Track: &track, Playing: true, Duration: track.Duration}
-	m.lastError = ""
+	m.toast = nil // 新曲目开始 = 新状态：清除活跃 toast
 	m.home = m.home.resetForTrack(&track)
 	target := track.URL
 	if path, ok := m.cache.Lookup(track.ID); ok {
@@ -1232,26 +1266,39 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 		m.cache.CacheAsync(track) // 后台下载，不阻塞播放
 	}
 	if err := m.player.Play(target); err != nil {
-		m.lastError = "播放失败: " + err.Error()
+		m, cmd := m.showToast("播放失败: "+err.Error(), toastError)
 		m.state = model.PlaybackState{}
 		m.home = m.home.syncState(m.state)
 		m.queuePage = m.queuePage.sync(m.queue)
 		m.notifyTrack(nil)
-		return m, nil
+		return m, cmd
 	}
 	m.notifyTrack(&track)
 	// 按模式设置单曲循环（mpv loop-file 是 per-file 属性，新 loadfile 自动重置，
 	// 但 UI 显式设置保证切歌/切模式后循环状态与模式始终同步）。SetLoop 是
-	// 同步调用，失败仅记 lastError 不阻断播放；返回 cmd 结构与原来一致
+	// 同步调用，失败仅记 toast 不阻断播放；返回 cmd 结构与原来一致
 	// （与歌词/封面/历史 fetch cmds 的 tea.Batch 合并）。
+	var loopCmd tea.Cmd
 	if err := m.player.SetLoop(m.queue.Mode() == queue.RepeatOne); err != nil {
-		m.lastError = "设置循环失败: " + err.Error()
+		m, loopCmd = m.showToast("设置循环失败: "+err.Error(), toastError)
 	}
 	return m.syncQueueViews(), tea.Batch(
+		loopCmd,
 		fetchLyricsCmd(m.lyrics, track),
 		fetchCoverCmd(m.cover, track),
 		addHistoryCmd(m.history, track),
 	)
+}
+
+// showToast 显示一条 toast（覆盖语义）：替换旧 toast 并重置消失定时器。
+// 返回的 cmd 产生 toastExpireMsg（时长见 toastDuration）。
+func (m Model) showToast(text string, kind toastKind) (Model, tea.Cmd) {
+	m.toastID++
+	id := m.toastID
+	m.toast = &toast{text: text, kind: kind, id: id}
+	return m, tea.Tick(toastDuration(kind), func(time.Time) tea.Msg {
+		return toastExpireMsg{id: id}
+	})
 }
 
 // notifyTrack 把当前曲目同步给外部消费者（如 MPRIS 服务）。回调在 tea
@@ -1339,7 +1386,7 @@ func addHistoryCmd(h *history.Store, track model.Track) tea.Cmd {
 // 首页模式按钮（toggleModeMsg）与队列页 s 键（queueModeMsg）共用。
 // 切换时同步 mpv 单曲循环状态：切入 RepeatOne → SetLoop(true)（当前文件
 // 开始无缝循环）；切出 → SetLoop(false)（解除正在循环的文件，否则 mpv
-// 不再产生 TrackEnded，UI 无法感知结束）。失败仅记 lastError 不阻断。
+// 不再产生 TrackEnded，UI 无法感知结束）。失败仅记 toast 不阻断。
 func (m Model) cycleMode() (Model, tea.Cmd) {
 	var next queue.Mode
 	switch m.queue.Mode() {
@@ -1352,7 +1399,8 @@ func (m Model) cycleMode() (Model, tea.Cmd) {
 	}
 	m.queue.SetMode(next)
 	if err := m.player.SetLoop(next == queue.RepeatOne); err != nil {
-		m.lastError = "设置循环失败: " + err.Error()
+		m, cmd := m.showToast("设置循环失败: "+err.Error(), toastError)
+		return m.syncQueueViews(), cmd
 	}
 	return m.syncQueueViews(), nil
 }
