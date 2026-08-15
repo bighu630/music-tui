@@ -99,8 +99,8 @@ type Server struct {
 	// ctrl 队列控制注入（main 经 SetController 注入；nil = 未注入）。
 	// atomic.Pointer：SetController（main goroutine）与 D-Bus 回调/方法
 	// goroutine（Next/Previous/LoopStatus/Shuffle 回调、refreshNav）并发读写。
-	// 不用 s.mu 保护：回调在 prop 锁内执行，s.mu 与 prop 锁存在反向获取路径
-	// （handleEvent 先 s.mu 后 prop 锁 vs 回调先 prop 锁后 s.mu），会引入新死锁。
+	// 不用 s.mu 保护：回调在 prop 锁内执行，防止将来 handleEvent 在持 s.mu
+	// 时调 SetMust（prop 锁）引入嵌套持锁；atomic 无锁且语义清晰。
 	ctrl atomic.Pointer[ctrlRef]
 
 	conn     bus
