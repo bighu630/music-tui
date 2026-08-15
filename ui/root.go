@@ -925,7 +925,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View 渲染当前页面（选择器打开时全屏替换），底部附常驻状态栏；
 // 顶部首行留空（布局整体下移一行：空行第 1 行、Tab 栏第 2 行、分隔线第 3 行、
-// 页面自第 4 行起）；活跃 toast 覆盖在状态栏上方一行的右端（不参与布局，行数不变）。
+// 页面自第 4 行起）；活跃 toast 左对齐覆盖在最后一行（状态栏行），报错期间
+// 临时显示、消失后恢复（不参与布局，行数不变）。
 func (m Model) View() string {
 	var body string
 	if m.plPicker != nil {
@@ -951,7 +952,8 @@ func (m Model) View() string {
 // statusBarView 底部常驻状态栏（恒 1 行，布局稳定）：首页自身已展示曲目
 // 信息（控制栏：标题/播放状态/模式/队列位置），状态栏与之重复——首页时
 // 状态栏行留空（行恒存在，布局稳定）；其余页面左 = 歌曲名（截断），
-// 右 = 播放状态 + 模式 + 队列位置。toast 覆盖在其上方一行的右端。
+// 右 = 播放状态 + 模式 + 队列位置。toast 活跃时本行被左对齐临时覆盖
+// （报错期间显示报错消息），消失后恢复。
 func (m Model) statusBarView() string {
 	// 首页控制栏已展示曲目信息，状态栏留空（View 的 "\n" + "" 仍保持行数）
 	if m.current == pageHome {
@@ -986,7 +988,7 @@ func (m Model) statusBarView() string {
 	rightW := ansi.StringWidth(rightRendered)
 	leftMax := m.width - rightW - 1
 	// 极端窄窗口（宽度小于右侧顺序文本）：左侧已无可截断空间，右侧截断兜底，
-	// 保证状态栏恒 1 行不折行（与 overlayToast 的 width≤2 兜底同模式）。
+	// 保证状态栏恒 1 行不折行。
 	if rightW >= m.width {
 		right = ansi.Truncate(right, m.width, "…")
 		rightRendered = style.Render(right)
@@ -1019,59 +1021,30 @@ func (m Model) toastText(t toast) string {
 	}
 }
 
-// overlayToast 把活跃 toast 覆盖到完整输出（tabBar+body+statusBar）中状态栏
-// 上方一行的右端：行数不变、其余内容不变 → 出现/消失排版零跳动。
-// 无 toast 或行数不足时原样返回。超宽 toast 按 m.width-2 截断（预留分隔符
-// 空间），覆盖行恒不超窗口宽度，不会触发终端折行把 Tab 栏滚出屏幕。
+// overlayToast 把活跃 toast 渲染到最后一行（状态栏行）左对齐：报错期间该行
+// 显示报错消息（状态栏内容临时被覆盖），自动消失后状态栏内容恢复——行数
+// 恒不变、其余行逐字不变，报错出现/消失排版零跳动（toast 不参与布局）。
+// 超宽按窗口宽度截断（保头部，尾部省略号）；窗口尺寸未初始化时按原文渲染。
+// 极端窄窗口（m.width=1）下截断结果仅为 "…"（1 格）不折行——真实终端不可达。
 func (m Model) overlayToast(out string) string {
 	if m.toast == nil || out == "" {
 		return out
 	}
 	lines := strings.Split(out, "\n")
-	if len(lines) < 2 {
+	if len(lines) < 1 {
 		return out
 	}
-	idx := len(lines) - 2 // 状态栏上方一行
+	idx := len(lines) - 1 // 最后一行 = 状态栏行
 	text := m.toastText(*m.toast)
-	tw := ansi.StringWidth(text)
-	// 截断基准 m.width-2（预留 "  " 分隔符 2 格）：覆盖行 = 截断 toast + "  "
-	// 恒 ≤ m.width，不折行。截断保留尾部语义——失败原因/后续动作（如
-	// “已重试 N 次，跳过继续播放”）在句尾，头部歌曲名在状态栏/队列已可见。
-	// ⚠/✔/ℹ 图标与消息头部随截断一起被截掉（ANSI 颜色样式保留）——这是有意
-	// 取舍：动作语义在句尾，头部歌曲名在状态栏/队列可见，并非截断丢失。
-	// 注意 ansi.TruncateLeft 的 n 是“从左侧删掉多少格”而非目标宽度
-	// （result = tw - n + prefixW，… 占 1 格）；且跨界字符整簇保留，结果可比
-	// tw - n + 1 再宽 1 格（CJK 宽字符），故 n 多给 1 格余量保证 ≤ m.width-2。
-	if m.width > 2 && tw > m.width-2 {
-		text = ansi.TruncateLeft(text, tw-m.width+4, "…")
-		tw = ansi.StringWidth(text)
+	if m.width > 0 {
+		// 左对齐 + 尾部省略号：保头部（错误类型/消息开头），超宽截断。
+		// 整行替换无样式渗透风险（不截断原行内容）。ansi.Truncate 对
+		// lipgloss 样式安全：截断点后的样式转义（含尾部 \x1b[0m）原样保留，
+		// 样式行内自闭合，尾部省略号正常显示；tail 宽度计入 length，
+		// 结果恒 ≤ m.width 不折行。
+		text = ansi.Truncate(text, m.width, "…")
 	}
-	keep := m.width - tw - 2
-	if keep < 0 {
-		keep = 0
-	}
-	// 截断后追加 reset，防止未闭合样式渗透进 toast（ansi.Truncate 截断 styled
-	// 行时样式 reset 可能落在 keep 点之后）
-	line := ""
-	if keep > 0 {
-		line = ansi.Truncate(lines[idx], keep, "") + "\x1b[0m"
-	}
-	if m.width > 0 && m.width <= 2 {
-		// 极端窄窗口（1-2 列）：分隔符 2 格就占满，原文放不下——按可用宽度
-		// 截断（2 列保留类型图标 + "…"，1 列仅 "…"），覆盖行宽恒 ≤ m.width
-		// 不折行。不用 ansi.Truncate(text, m.width, "…") 的原因：1 列预算下它
-		// 仍会输出首字符整簇（如 "⚠" 1 格 + "…" = 2 格）超宽。
-		if m.width == 2 {
-			lines[idx] = ansi.Truncate(text, 2, "…")
-		} else {
-			lines[idx] = "…"
-		}
-	} else if m.width <= 0 {
-		// 窗口尺寸未初始化（首帧/测试直接 View）：尚无宽度约束，按原文渲染
-		lines[idx] = text
-	} else {
-		lines[idx] = line + "  " + text
-	}
+	lines[idx] = text
 	return strings.Join(lines, "\n")
 }
 
