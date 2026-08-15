@@ -36,12 +36,16 @@ type Manager struct {
 	idx        index
 	inflight   map[string]bool
 	ytdlpPath  string
+	cookieFile string
+	headers    map[string]string
 }
 
 // New 创建 Manager：MkdirAll → 加载索引（缺失=空，损坏=返回错误）→
 // 启动清理（条目文件缺失删条目；超限按 LastPlayed 淘汰最旧并删文件；有变化则持久化）。
 // opts 规范化：MaxEntries<1 → 100；Dir=="" → 错误。
-func New(opts Options, ytdlpPath string) (*Manager, error) {
+// cookieFile/headers 可选：附加到 yt-dlp 下载参数（--cookies/--add-header），
+// 均空时不改变既有行为。
+func New(opts Options, ytdlpPath string, cookieFile string, headers map[string]string) (*Manager, error) {
 	if opts.Dir == "" {
 		return nil, fmt.Errorf("缓存目录为空")
 	}
@@ -55,6 +59,8 @@ func New(opts Options, ytdlpPath string) (*Manager, error) {
 		maxEntries: maxEntries,
 		inflight:   map[string]bool{},
 		ytdlpPath:  ytdlpPath,
+		cookieFile: cookieFile,
+		headers:    headers,
 	}
 	if err := os.MkdirAll(opts.Dir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建缓存目录: %w", err)
@@ -188,7 +194,7 @@ func (m *Manager) download(track model.Track) {
 	var lastErr error
 	for attempt := 0; attempt < MaxDownloadAttempts; attempt++ {
 		attemptCtx, cancelAttempt := context.WithTimeout(ctx, DownloadAttemptTimeout)
-		file, err := realDownload(attemptCtx, m.ytdlpPath, track.URL, destBase)
+		file, err := realDownload(attemptCtx, m.ytdlpPath, track.URL, destBase, m.cookieFile, m.headers)
 		cancelAttempt()
 		if err == nil {
 			if rerr := m.register(track.ID, file); rerr != nil {
