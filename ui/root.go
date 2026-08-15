@@ -1286,7 +1286,10 @@ func (m Model) saveSession() {
 // loadfile 的 start= 选项原子完成，避免加载窗口内 seek 被 mpv 拒绝的竞态，
 // 见 mpv.go PlayPaused）。命中缓存 → 播本地文件（fromCache 标记回填至
 // playingFromCache，异步 LoadFailedError 时据此移除损坏条目）；未命中 →
-// 网络 URL。IPC 层失败（PlayPaused 命令被拒）与缓存文件无关，不删条目。
+// 播网络 URL，并触发后台下载（下载完成即缓存，下次恢复/播放走本地）。
+// IPC 层失败（PlayPaused 命令被拒）与缓存文件无关，不删条目。
+// CacheAsync 在 PlayPaused 之前触发，故 IPC 失败时下载仍会进行（缓存预热
+// 供下次恢复命中，与 beginPlay 一致），并非缺陷。
 func resumeCmd(m Model) tea.Cmd {
 	track := m.resume.track
 	pos := m.resume.pos
@@ -1296,6 +1299,10 @@ func resumeCmd(m Model) tea.Cmd {
 		if path, ok := m.cache.Lookup(track.ID); ok {
 			target = path
 			fromCache = true
+		} else {
+			// 与 beginPlay 对齐：恢复播放的歌曲也后台下载，下载完成即缓存；
+			// 不阻塞恢复加载（CacheAsync 对 Disabled/已存在条目是 no-op 安全）。
+			m.cache.CacheAsync(track)
 		}
 		if err := m.player.PlayPaused(target, pos); err != nil {
 			return resumeResultMsg{err: err, fromCache: fromCache}
