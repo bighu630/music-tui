@@ -698,38 +698,16 @@ func TestQueueCurrentItemShowsAITitle(t *testing.T) {
 	}
 	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly, title: "晴天", artist: "周杰伦"})
-	m.queuePage = m.queuePage.sync(m.queue)
+	// 不手动 sync：AI 结果 handler 已即时重建队列视图（生产路径）
 
 	got = m.queuePage.view()
 	if !strings.Contains(got, "1. 晴天") {
-		t.Errorf("队列当前项应显示 AI 清洗标题, got %q", got)
+		t.Errorf("队列当前项应显示 AI 清洗标题（handler 即时刷新）, got %q", got)
 	}
 	if !strings.Contains(got, "2. 测试歌曲 t2") {
 		t.Errorf("非当前项应保持原始标题, got %q", got)
 	}
 	if strings.Contains(got, "1. 测试歌曲 t1") {
 		t.Errorf("当前项不应再显示原始标题: %q", got)
-	}
-}
-
-// TestQueueCurrentItemAITitleRefreshesImmediately AI 结果到达后队列页
-// 立即刷新当前项（不依赖下一次队列事件）——生产路径不手动 sync。
-func TestQueueCurrentItemAITitleRefreshesImmediately(t *testing.T) {
-	fp := newFakePlayer()
-	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
-	m, cmd := m.startPlay(testTrack("t1"))
-	_ = execCmds(cmd)
-	m.queue.Add(testTrack("t2"))
-	m.queuePage = m.queuePage.sync(m.queue)
-
-	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
-	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly, title: "晴天", artist: "周杰伦"})
-
-	got := m.queuePage.view()
-	if !strings.Contains(got, "1. 晴天") {
-		t.Errorf("AI 结果到达后队列页应立即显示清洗标题（无手动 sync）, got %q", got)
-	}
-	if !strings.Contains(got, "2. 测试歌曲 t2") {
-		t.Errorf("非当前项应保持原始标题, got %q", got)
 	}
 }

@@ -208,3 +208,18 @@ func mustReadDir(t *testing.T, dir string) []os.DirEntry {
 	}
 	return entries
 }
+
+// TestLRCCacheRemovesLegacyTXT 启动时清理旧版残留的纯文本缓存
+// （sync-only 规则前的产物）。
+func TestLRCCacheRemovesLegacyTXT(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "旧歌-歌手.txt"), []byte("text"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newLRCCache(dir); err != nil {
+		t.Fatalf("newLRCCache: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "旧歌-歌手.txt")); !os.IsNotExist(err) {
+		t.Errorf("旧 .txt 未被清理: %v", err)
+	}
+}
