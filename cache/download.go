@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"music-tui/logger"
 )
 
 // maxStderrTail 是错误分支拼入错误消息的 stderr 诊断文本最大长度（与 search 包同款）。
@@ -76,6 +78,13 @@ func realDownload(ctx context.Context, ytdlpPath, url, destBase string, cookieFi
 		}
 	}
 	args = append(args, "-o", destBase+".%(ext)s", url)
+	// 命令摘要日志：header 只打键名不打值（值可能含敏感信息）
+	headerKeys := make([]string, 0, len(headers))
+	for k := range headers {
+		headerKeys = append(headerKeys, k)
+	}
+	sort.Strings(headerKeys)
+	logger.Debug("yt-dlp 下载: %s 目标=%s headers=%v", url, filepath.Base(destBase), headerKeys)
 	cmd := exec.CommandContext(ctx, ytdlpPath, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

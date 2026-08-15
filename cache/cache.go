@@ -3,13 +3,13 @@ package cache
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"music-tui/logger"
 	"music-tui/model"
 )
 
@@ -71,6 +71,7 @@ func New(opts Options, ytdlpPath string, cookieFile string, headers map[string]s
 	if entries, err := os.ReadDir(opts.Dir); err == nil {
 		for _, e := range entries {
 			if strings.HasSuffix(e.Name(), ".part") {
+				logger.Debug("缓存启动清理: 删除 .part 残留 %s", e.Name())
 				os.Remove(filepath.Join(opts.Dir, e.Name())) // 失败忽略：下次启动再试
 			}
 		}
@@ -87,16 +88,19 @@ func New(opts Options, ytdlpPath string, cookieFile string, headers map[string]s
 	kept := make([]Entry, 0, len(m.idx.entries))
 	for _, e := range m.idx.entries {
 		if !validCacheFile(e.File) {
+			logger.Warn("缓存启动清理: 非法文件名，删条目 %q", e.File)
 			changed = true // 非法文件名（含路径分隔符/绝对路径/“.”/“..”）→ 删条目
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(m.dir, e.File)); err != nil {
+			logger.Info("缓存启动清理: 条目文件缺失，删条目 %s (%s)", e.ID, e.File)
 			changed = true // 条目文件缺失 → 删条目
 			continue
 		}
 		// 内容有效性：条目文件被替换为 HTML/截断等非音频 → 删文件 + 删条目
 		//（防损坏文件滞留；changed=true 最后由统一 save 持久化）
 		if ok, err := isAudioFile(filepath.Join(m.dir, e.File)); err != nil || !ok {
+			logger.Warn("缓存启动清理: 条目非音频(损坏)，删文件+条目 %s (%s)", e.ID, e.File)
 			os.Remove(filepath.Join(m.dir, e.File))
 			changed = true
 			continue
@@ -104,10 +108,8 @@ func New(opts Options, ytdlpPath string, cookieFile string, headers map[string]s
 		kept = append(kept, e)
 	}
 	m.idx.entries = kept
-	for m.idx.len() > m.maxEntries {
-		e, _ := m.idx.oldest()
-		os.Remove(filepath.Join(m.dir, e.File))
-		m.idx.remove(e.ID)
+	if m.idx.len() > m.maxEntries {
+		m.evictIfOverLimit()
 		changed = true
 	}
 	if changed {
@@ -150,16 +152,19 @@ func (m *Manager) Lookup(id string) (string, bool) {
 	}
 	full := filepath.Join(m.dir, e.File)
 	if _, err := os.Stat(full); err != nil {
+		logger.Info("缓存条目文件缺失，移除: %s (%s)", id, full)
 		m.idx.remove(id) // 文件缺失移除条目（不持久化）
 		return "", false
 	}
 	// 内容有效性：文件被替换为 HTML/截断等非音频 → 删文件 + 删条目 + miss
 	//（UI 自动回退网络取流，损坏文件不滞留）
 	if ok, err := isAudioFile(full); err != nil || !ok {
+		logger.Warn("缓存校验失败，删除损坏文件: %s (%s)", id, full)
 		os.Remove(full)
 		m.idx.remove(id)
 		return "", false
 	}
+	logger.Debug("缓存命中: %s (%s)", id, full)
 	m.idx.upsert(id, time.Now())
 	m.idx.save(m.indexPath()) // 刷新持久化，忽略错误
 	return full, true
@@ -208,13 +213,16 @@ func (m *Manager) download(track model.Track) {
 	destBase := filepath.Join(m.dir, SafeName(track.ID))
 	var lastErr error
 	for attempt := 0; attempt < MaxDownloadAttempts; attempt++ {
+		logger.Debug("缓存下载开始(%s) 第 %d/%d 次: %s - %s", track.ID, attempt+1, MaxDownloadAttempts, track.Title, track.Artist)
 		attemptCtx, cancelAttempt := context.WithTimeout(ctx, DownloadAttemptTimeout)
 		file, err := realDownload(attemptCtx, m.ytdlpPath, track.URL, destBase, m.cookieFile, m.headers)
 		cancelAttempt()
 		if err == nil {
 			if rerr := m.register(track.ID, file); rerr != nil {
-				log.Printf("缓存下载失败(%s): %v", track.ID, rerr)
+				logger.Warn("缓存下载失败(%s): %v", track.ID, rerr)
 				os.Remove(filepath.Join(m.dir, file)) // 注册失败删除已下载文件，避免孤儿滞留
+			} else {
+				logger.Info("缓存下载完成(%s): %s", track.ID, file)
 			}
 			return
 		}
@@ -223,12 +231,12 @@ func (m *Manager) download(track model.Track) {
 			select {
 			case <-time.After(DownloadRetryBackoff):
 			case <-ctx.Done():
-				log.Printf("缓存下载失败(%s): %v", track.ID, ctx.Err())
+				logger.Warn("缓存下载失败(%s): %v", track.ID, ctx.Err())
 				return
 			}
 		}
 	}
-	log.Printf("缓存下载失败(%s): %v", track.ID, lastErr)
+	logger.Warn("缓存下载失败(%s): %v", track.ID, lastErr)
 }
 
 // Register 把已存在的缓存文件注册进索引（下载完成/测试预置用）：
@@ -248,22 +256,30 @@ func (m *Manager) register(id, file string) error {
 	}
 	ok, err := isAudioFile(filepath.Join(m.dir, file))
 	if err != nil {
+		logger.Warn("缓存注册校验失败: %s (%s): %v", id, file, err)
 		return fmt.Errorf("校验缓存文件: %w", err)
 	}
 	if !ok {
+		logger.Warn("缓存注册校验失败: %s (%s): 内容非音频", id, file)
 		return fmt.Errorf("缓存文件内容非音频（HTML 错误页或截断文件）: %s", file)
 	}
 	m.idx.upsertFile(id, file, time.Now())
+	m.evictIfOverLimit()
+	return m.idx.save(m.indexPath())
+}
+
+// evictIfOverLimit 超限淘汰最旧条目（删文件）；调用方持 m.mu。
+func (m *Manager) evictIfOverLimit() {
 	max := m.maxEntries
 	if max < 1 {
 		max = defaultMaxEntries
 	}
 	for m.idx.len() > max {
 		e, _ := m.idx.oldest()
+		logger.Info("缓存超限淘汰: %s (%s)", e.ID, e.File)
 		os.Remove(filepath.Join(m.dir, e.File))
 		m.idx.remove(e.ID)
 	}
-	return m.idx.save(m.indexPath())
 }
 
 // Remove 删除缓存文件 + 索引条目 + 持久化；不存在返回 nil。
