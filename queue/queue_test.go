@@ -797,3 +797,89 @@ func TestSetModeSameModeIsNoop(t *testing.T) {
 		t.Errorf("同模式调用应 no-op: %v vs %v", got, first)
 	}
 }
+
+// ---- InsertNext ----
+
+func TestInsertNextAfterCurrent(t *testing.T) {
+	q := New()
+	for _, id := range []string{"t1", "t2", "t3"} {
+		q.Add(testTrack(id))
+	}
+	q.JumpTo(1) // 当前 t2
+	q.InsertNext(testTrack("tx"))
+	if got := ids(q.Tracks()); !eq(got, []string{"t1", "t2", "tx", "t3"}) {
+		t.Fatalf("Tracks = %v, want [t1 t2 tx t3]", got)
+	}
+	if q.CurrentIndex() != 1 {
+		t.Errorf("CurrentIndex = %d, want 1", q.CurrentIndex())
+	}
+	if cur, _ := q.Current(); cur.ID != "t2" {
+		t.Errorf("Current = %s, want t2", cur.ID)
+	}
+	if next, ok := q.Next(); !ok || next.ID != "tx" {
+		t.Errorf("Next = %s/%v, want tx/true", next.ID, ok)
+	}
+}
+
+func TestInsertNextWithoutCurrentInsertsAtHead(t *testing.T) {
+	q := New()
+	for _, id := range []string{"t1", "t2", "t3"} {
+		q.Add(testTrack(id))
+	}
+	// currentIdx 仍为 -1（Add 不改变当前曲）
+	q.InsertNext(testTrack("tx"))
+	if got := ids(q.Tracks()); !eq(got, []string{"tx", "t1", "t2", "t3"}) {
+		t.Fatalf("Tracks = %v, want [tx t1 t2 t3]", got)
+	}
+	if q.CurrentIndex() != -1 {
+		t.Errorf("CurrentIndex = %d, want -1", q.CurrentIndex())
+	}
+	if _, ok := q.Current(); ok {
+		t.Error("插入不应改变当前曲目")
+	}
+}
+
+func TestInsertNextEmptyQueue(t *testing.T) {
+	q := New()
+	q.InsertNext(testTrack("t1"))
+	if q.Len() != 1 || q.CurrentIndex() != -1 {
+		t.Errorf("Len/CurrentIndex = %d/%d, want 1/-1", q.Len(), q.CurrentIndex())
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"t1"}) {
+		t.Fatalf("Tracks = %v, want [t1]", got)
+	}
+	if _, ok := q.Current(); ok {
+		t.Error("空队列插入不应有当前曲目")
+	}
+}
+
+func TestInsertNextKeepsPositionInShuffle(t *testing.T) {
+	q := New()
+	for _, id := range []string{"t1", "t2", "t3", "t4"} {
+		q.Add(testTrack(id))
+	}
+	q.JumpTo(0)
+	q.SetMode(Shuffle) // 洗牌 t1 之后
+	q.InsertNext(testTrack("tx"))
+	// InsertNext 不重洗牌：插入位即实际下一首
+	next, ok := q.Next()
+	if !ok || next.ID != "tx" {
+		t.Fatalf("Next = %s/%v, want tx/true", next.ID, ok)
+	}
+}
+
+func TestInsertNextAfterRemoveCurrent(t *testing.T) {
+	q := New()
+	for _, id := range []string{"t1", "t2", "t3"} {
+		q.Add(testTrack(id))
+	}
+	q.JumpTo(0) // 当前 t1
+	q.Remove(0) // 顺延：当前变 t2（index 0）
+	q.InsertNext(testTrack("tx"))
+	if got := ids(q.Tracks()); !eq(got, []string{"t2", "tx", "t3"}) {
+		t.Fatalf("Tracks = %v, want [t2 tx t3]", got)
+	}
+	if next, ok := q.Next(); !ok || next.ID != "tx" {
+		t.Errorf("Next = %s/%v, want tx/true", next.ID, ok)
+	}
+}

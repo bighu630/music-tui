@@ -225,27 +225,27 @@ func TestPlaylistDetailRemoveAndAppend(t *testing.T) {
 		t.Errorf("详情应显示歌曲, got %q", got)
 	}
 
-	// a 弹选择器 → Enter 默认队列项（追加 t1）
+	// a 弹选择器 → Enter 默认项"下一首播放"（插入 t1；空队列无当前曲 → 队首）
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	if m.plPicker == nil {
 		t.Fatal("按 a 应打开选择器")
 	}
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
-	var ta trackAppendMsg
+	var tin trackInsertNextMsg
 	for _, msg := range execCmds(cmd) {
-		if am, ok := msg.(trackAppendMsg); ok {
-			ta = am
+		if im, ok := msg.(trackInsertNextMsg); ok {
+			tin = im
 		}
 	}
-	if ta.track.ID != "t1" {
-		t.Fatalf("trackAppendMsg.track = %s, want t1", ta.track.ID)
+	if tin.track.ID != "t1" {
+		t.Fatalf("trackInsertNextMsg.track = %s, want t1", tin.track.ID)
 	}
-	m, _ = update(m, ta)
+	m, _ = update(m, tin)
 	if m.plPicker != nil {
-		t.Fatal("追加后选择器应关闭")
+		t.Fatal("插入后选择器应关闭")
 	}
 	if m.queue.Len() != 1 || fp.playCount() != 0 {
-		t.Errorf("a 追加应只入队不播放: Len=%d playCount=%d", m.queue.Len(), fp.playCount())
+		t.Errorf("a 插入应只入队不播放: Len=%d playCount=%d", m.queue.Len(), fp.playCount())
 	}
 
 	// d 移除选中歌曲（t1）
@@ -374,10 +374,11 @@ func TestPickTrackFromSearchAddsToPlaylist(t *testing.T) {
 	if m.plPicker.naming {
 		t.Fatal("选择器初始不应在命名输入模式")
 	}
-	// 默认选中首项"当前播放队列"；下移到列表"收藏"再 Enter
-	if _, ok := m.plPicker.list.SelectedItem().(pickerQueueItem); !ok {
-		t.Fatalf("默认选中项 = %+v, want pickerQueueItem", m.plPicker.list.SelectedItem())
+	// 默认选中首项"下一首播放"；下移 2 次到列表"收藏"再 Enter
+	if _, ok := m.plPicker.list.SelectedItem().(pickerQueueNextItem); !ok {
+		t.Fatalf("默认选中项 = %+v, want pickerQueueNextItem", m.plPicker.list.SelectedItem())
 	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	// cmd 为 toast 消失定时器（成功提示走 toast 通道）：执行后仅产生过期消息
@@ -450,7 +451,8 @@ func TestPickerCreateNewListFlow(t *testing.T) {
 	if m.plPicker == nil {
 		t.Fatal("按 a 应打开选择器")
 	}
-	// 无既有列表：首项"当前播放队列"+ 末尾"＋ 新建列表"；下移选中新建项
+	// 无既有列表：首项"下一首播放" + "当前播放队列" + 末尾"＋ 新建列表"；下移 2 次选中新建项
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if m.plPicker == nil || !m.plPicker.naming {
@@ -485,7 +487,8 @@ func TestPickerCreateDuplicateShowsError(t *testing.T) {
 
 	m = searchAndPick(t, m, fa)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 队列项 → 收藏
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 下一首播放 → 当前播放队列
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 当前播放队列 → 收藏
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 收藏 → "＋ 新建列表"
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if m.plPicker == nil || !m.plPicker.naming {
@@ -521,7 +524,8 @@ func TestPickerEscCancels(t *testing.T) {
 	if m.plPicker == nil {
 		t.Fatal("按 a 应打开选择器")
 	}
-	// 下移到"＋ 新建列表"（跳过队列项与"收藏"）→ Enter 进入命名输入
+	// 下移到"＋ 新建列表"（跳过"下一首播放"、"当前播放队列"与"收藏"）→ Enter 进入命名输入
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
@@ -615,7 +619,8 @@ func TestPickTrackFromHistory(t *testing.T) {
 	if m.plPicker == nil {
 		t.Fatal("历史页选中记录按 a 应打开选择器")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 队列项 → "收藏"
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 下一首播放 → 当前播放队列
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 当前播放队列 → "收藏"
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if m.plPicker != nil {
 		t.Fatal("Enter 后选择器应关闭")
@@ -625,8 +630,9 @@ func TestPickTrackFromHistory(t *testing.T) {
 	}
 }
 
-// 选择器首项"当前播放队列"：Enter 追加到队尾（走全局 trackAppendMsg），
-// 不设 notice（无成功 toast）、选择器关闭、不触发播放。
+// 选择器首项"下一首播放"（默认选中）：Enter 插入到当前曲之后（走全局 trackInsertNextMsg）；
+// 第二项"当前播放队列"：Enter 追加到队尾（走全局 trackAppendMsg）。
+// 均不设 notice（无成功 toast）、选择器关闭、不触发播放。
 func TestPickerQueueItemAppendsToQueue(t *testing.T) {
 	fp := newFakePlayer()
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1")}}
@@ -641,10 +647,22 @@ func TestPickerQueueItemAppendsToQueue(t *testing.T) {
 	if m.plPicker == nil {
 		t.Fatal("按 a 应打开选择器")
 	}
-	// 第一项固定为"当前播放队列"且默认选中
+	// 首项"下一首播放"（默认选中）
+	it0, ok := m.plPicker.list.SelectedItem().(pickerQueueNextItem)
+	if !ok {
+		t.Fatalf("默认选中项 = %+v, want pickerQueueNextItem", m.plPicker.list.SelectedItem())
+	}
+	if stripANSI(it0.Title()) != "▶ 下一首播放" {
+		t.Errorf("下一首项 Title = %q, want ▶ 下一首播放", it0.Title())
+	}
+	if it0.Description() != "插入到当前曲之后" {
+		t.Errorf("下一首项 Description = %q, want 插入到当前曲之后", it0.Description())
+	}
+	// 第二项"当前播放队列"（追加到队尾）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
 	it, ok := m.plPicker.list.SelectedItem().(pickerQueueItem)
 	if !ok {
-		t.Fatalf("默认选中项 = %+v, want pickerQueueItem", m.plPicker.list.SelectedItem())
+		t.Fatalf("Down 后选中项 = %+v, want pickerQueueItem", m.plPicker.list.SelectedItem())
 	}
 	if stripANSI(it.Title()) != "▶ 当前播放队列" {
 		t.Errorf("队列项 Title = %q, want ▶ 当前播放队列", it.Title())
@@ -893,7 +911,8 @@ func TestToastNotClearedByKeyDispatch(t *testing.T) {
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 	m = searchAndPick(t, m, fa)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 队列项 → "收藏"
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 下一首播放 → 当前播放队列
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 当前播放队列 → "收藏"
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if activeToastText(m) == "" {
 		t.Fatal("前置失败: 应有成功 toast")

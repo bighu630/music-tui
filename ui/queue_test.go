@@ -33,8 +33,8 @@ func searchAndPick(t *testing.T, m Model, fa *fakeSearchAdapter) Model {
 	return m
 }
 
-// openPickerAndAppendQueue 对当前列表选中项按 a 弹出“添加到”选择器 →
-// Enter 确认默认第一项"当前播放队列"（追加到队尾）→ 回灌 trackAppendMsg。
+// openPickerAndAppendQueue 对当前列表选中项按 a 弹出"添加到"选择器 →
+// Down 选中第二项"当前播放队列"（追加到队尾）→ Enter 回灌 trackAppendMsg。
 // 可复用：搜索/历史/播放列表详情页选中歌曲后的追加流程。
 func openPickerAndAppendQueue(t *testing.T, m Model) Model {
 	t.Helper()
@@ -42,7 +42,8 @@ func openPickerAndAppendQueue(t *testing.T, m Model) Model {
 	if m.plPicker == nil {
 		t.Fatal("按 a 应打开选择器")
 	}
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 默认选中首项“当前播放队列”
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中第二项"当前播放队列"
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	var ta trackAppendMsg
 	for _, msg := range execCmds(cmd) {
 		if am, ok := msg.(trackAppendMsg); ok {
@@ -464,7 +465,8 @@ func TestHistoryAppend(t *testing.T) {
 	if m.plPicker == nil {
 		t.Fatal("历史页按 a 应打开选择器")
 	}
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 默认选中首项“当前播放队列”
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中第二项"当前播放队列"（追加到队尾）
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	var ta trackAppendMsg
 	for _, msg := range execCmds(cmd) {
 		if am, ok := msg.(trackAppendMsg); ok {

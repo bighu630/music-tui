@@ -45,6 +45,19 @@ func (q *Queue) Add(t model.Track) {
 	q.tracks = append(q.tracks, t)
 }
 
+// InsertNext 插入到当前曲目之后（下一首播放）。不改变当前曲目、不自动开播；
+// 无当前曲目（currentIdx=-1，如从未播放/清空后）时插入到队首（index 0）。
+// 随机模式不重洗牌：插入位即实际下一首（"下一首播放"语义优先）。
+func (q *Queue) InsertNext(t model.Track) {
+	pos := 0
+	if q.currentIdx >= 0 {
+		pos = q.currentIdx + 1
+	}
+	q.tracks = append(q.tracks, model.Track{})
+	copy(q.tracks[pos+1:], q.tracks[pos:])
+	q.tracks[pos] = t
+}
+
 // Replace 替换语义：清空队列后把 t 作为唯一曲目并设为当前。
 // 手动播放（搜索/历史/队列页）统一走此语义。
 func (q *Queue) Replace(t model.Track) {
