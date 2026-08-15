@@ -61,7 +61,7 @@ func newCacheTestModel(t *testing.T, st *session.State) (Model, *fakePlayer, *ca
 	}
 	m := NewModel(fp, &fakeSearchAdapter{},
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, pls, cm, nil)
+		cf, hist, sess, pls, cm, nil, nil)
 	return m, fp, cm, cacheDir
 }
 
@@ -263,4 +263,3 @@ func TestResumeCacheRemovedOnAsyncLoadFailed(t *testing.T) {
 		t.Errorf("失败后状态应重置: %+v", m.state)
 	}
 }
-

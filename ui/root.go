@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"music-tui/queue"
 	"music-tui/search"
 	"music-tui/session"
+	"music-tui/ytm"
 )
 
 // page 页面枚举（顺序即 Tab 栏从左到右的顺序）。
@@ -107,6 +109,113 @@ type resumeInfo struct {
 	pos   float64
 }
 
+// ---- YT Music 异步结果消息（root 自身产出；页面消息见 playlists.go） ----
+
+// ytVerifyDoneMsg VerifyLogin 异步结果。
+type ytVerifyDoneMsg struct {
+	err error
+}
+
+// ytSyncDoneMsg SyncAll 异步结果（部分失败时 results 含成功项）。
+type ytSyncDoneMsg struct {
+	results []ytm.SyncResult
+	err     error
+}
+
+// ytImportDoneMsg ImportURL 异步结果。
+type ytImportDoneMsg struct {
+	res ytm.SyncResult
+	err error
+}
+
+// ytRefreshDoneMsg SyncOne 异步结果。
+type ytRefreshDoneMsg struct {
+	res ytm.SyncResult
+	err error
+}
+
+// ytVerifyCmd 异步校验登录（30s 超时）。
+func ytVerifyCmd(c *ytm.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return ytVerifyDoneMsg{err: c.VerifyLogin(ctx)}
+	}
+}
+
+// ytSyncAllCmd 异步同步全部歌单。超时预算按歌单数动态分配：
+// 先枚举歌单数 N（30s 超时），总预算 = 30s 枚举余量 + 30s×N 拉取，上限 10min
+// （审查 m2：原固定 5min 在 >9 个歌单时可能误杀慢速网络下的合法同步）。
+func ytSyncAllCmd(c *ytm.Client, pl *playlists.Store) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		remotes, err := c.ListPlaylists(ctx)
+		cancel()
+		if err != nil {
+			return ytSyncDoneMsg{err: err}
+		}
+		budget := syncAllBudget(len(remotes))
+		ctx, cancel = context.WithTimeout(context.Background(), budget)
+		defer cancel()
+		results, err := c.SyncAll(ctx, pl)
+		return ytSyncDoneMsg{results: results, err: err}
+	}
+}
+
+// syncAllBudget 按歌单数计算同步总预算：30s 枚举余量 + 每歌单 30s，上限 10min。
+func syncAllBudget(n int) time.Duration {
+	budget := 30*time.Second + 30*time.Second*time.Duration(n)
+	if budget > 10*time.Minute {
+		return 10 * time.Minute
+	}
+	return budget
+}
+
+// ytImportCmd 异步导入歌单 URL（2min 超时）。
+func ytImportCmd(c *ytm.Client, pl *playlists.Store, url string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		res, err := c.ImportURL(ctx, pl, url)
+		return ytImportDoneMsg{res: res, err: err}
+	}
+}
+
+// ytRefreshCmd 异步刷新单个同步列表（2min 超时）。
+func ytRefreshCmd(c *ytm.Client, pl *playlists.Store, playlistID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		res, err := c.SyncOne(ctx, pl, playlistID)
+		return ytRefreshDoneMsg{res: res, err: err}
+	}
+}
+
+// ytVerifyErrorText 把登录验证错误映射为可操作的友好文案。
+func ytVerifyErrorText(err error) string {
+	switch {
+	case errors.Is(err, ytm.ErrNotLoggedIn):
+		return "登录无效，请重新导出 cookie"
+	case errors.Is(err, ytm.ErrSessionInvalid):
+		return "登录已失效，请重新导出 cookie"
+	case errors.Is(err, ytm.ErrNoLogin):
+		return "未配置登录"
+	}
+	return err.Error()
+}
+
+// ytInvalidAfterSync 按同步/导入/刷新结果更新验证失败标记：
+// 成功 → 清除；ErrNotLoggedIn/ErrSessionInvalid → 置位；其他错误（网络等）→ 保持。
+func ytInvalidAfterSync(prev bool, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ytm.ErrNotLoggedIn) || errors.Is(err, ytm.ErrSessionInvalid) {
+		return true
+	}
+	return prev
+}
+
 // saveInterval 播放中自动保存会话的节流间隔。
 const saveInterval = 5 * time.Second
 
@@ -125,6 +234,7 @@ type Model struct {
 	queue   *queue.Queue
 	session *session.Store
 	pl      *playlists.Store
+	yt      *ytm.Client // YT Music 同步客户端；nil = 未集成（测试/降级）
 
 	cache            *cache.Manager // 音频缓存（命中优先本地文件；未命中后台下载）
 	playingFromCache bool           // 当前曲目是否播放自缓存文件（LoadFailed 时据此移除损坏条目）
@@ -136,6 +246,13 @@ type Model struct {
 	lastError string
 	notice    string // 绿色成功提示（如“已添加到「xxx」”；新按键分发时清除）
 	ended     bool   // 当前歌曲是否已播放结束/出错（空格语义：重播同曲而非 Resume）
+
+	// YT Music 同步状态（登录配置 + 同步中 + 验证失败标记；页面经 setYTSyncStatus 推入）
+	ytLogin   ytm.LoginConfig
+	ytSyncing bool
+	// ytInvalid 最近一次 VerifyLogin 失败：状态区/设置页降级为「已登录（验证失败）」；
+	// 初始启动未验证过为 false（配置存在即显示已登录，只有验证失败才降级）。
+	ytInvalid bool
 	// queueSkip 标记删除当前曲导致的指针解耦：mpv 仍播放被删曲目，
 	// 但队列指针已顺延。下次 TrackEnded 应播放顺延曲目（不推进），
 	// 避免跳过顺延曲目（回归：TestDeleteCurrentThenTrackEndedPlaysSlidTrack）。
@@ -168,11 +285,13 @@ type Model struct {
 	onTrack func(*model.Track) // 外部消费者（MPRIS）感知当前曲目；nil 安全
 }
 
-// NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h/sess/pl/cm 为具体服务，
+// NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h/sess/pl/cm/yt 为具体服务，
+// cm 为音频缓存管理器（nil = 未集成），yt 为 YT Music 同步客户端（nil = 未集成），
 // onTrack 在播放状态变化时同步回调当前曲目（nil 表示无曲目；可为 nil）。
 // 若 sess 存在已保存会话（队列 + 进度），同步恢复队列与播放状态（暂停态），
 // mpv 的静默加载由 Init 返回的 resumeCmd 完成。
-func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, cm *cache.Manager, onTrack func(*model.Track)) Model {
+func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, cm *cache.Manager, yt *ytm.Client, onTrack func(*model.Track)) Model {
+
 	m := Model{
 		player:       p,
 		lyrics:       l,
@@ -182,6 +301,7 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 		session:      sess,
 		pl:           pl,
 		cache:        cm,
+		yt:           yt,
 		onTrack:      onTrack,
 		current:      pageHome,
 		hoverTab:     -1,
@@ -233,6 +353,11 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 	m = m.syncQueueViews()
 	m.historyPage = m.historyPage.setEntries(h.Entries())
 	m.plPage = m.plPage.setLists(pl.Lists())
+	if yt != nil {
+		// 初始 YT 状态：登录配置 + 既有同步映射（详情 r 刷新提示）
+		m.ytLogin = yt.Login()
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, false).setYTSyncs(yt.SyncEntries())
+	}
 	return m
 }
 
@@ -374,6 +499,206 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastError = "移除歌曲失败: " + err.Error()
 		}
 		m.plPage = m.plPage.setLists(m.pl.Lists())
+		return m, nil
+
+	// ---- YT Music 同步编排 ----
+
+	case ytLoginMsg:
+		// 浏览器方式登录提交：保存配置 → 异步验证
+		m.lastError = ""
+		if m.yt == nil {
+			return m, nil
+		}
+		if err := m.yt.SetLogin(msg.cfg); err != nil {
+			m.lastError = "保存登录配置失败: " + err.Error()
+			return m, nil
+		}
+		m.ytLogin = m.yt.Login()
+		m.ytInvalid = false // 新配置未验证
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
+		m.notice = "已保存登录配置，验证中…"
+		return m, ytVerifyCmd(m.yt)
+
+	case ytLoginFileMsg:
+		// cookies.txt 方式：校验文件可读 → 保存配置 → 异步验证
+		m.lastError = ""
+		if m.yt == nil {
+			return m, nil
+		}
+		path := strings.TrimSpace(msg.path)
+		if path == "" {
+			return m, nil
+		}
+		if _, err := os.Stat(path); err != nil {
+			m.lastError = "cookies.txt 不可读: " + err.Error()
+			return m, nil
+		}
+		cfg := ytm.LoginConfig{Method: ytm.MethodCookiesFile, CookiesPath: path}
+		if err := m.yt.SetLogin(cfg); err != nil {
+			m.lastError = "保存登录配置失败: " + err.Error()
+			return m, nil
+		}
+		m.ytLogin = m.yt.Login()
+		m.ytInvalid = false // 新配置未验证
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
+		m.notice = "已保存登录配置，验证中…"
+		return m, ytVerifyCmd(m.yt)
+
+	case ytLoginPasteMsg:
+		// 粘贴 Cookie 方式：落盘 cookies 文件 + 保存配置 → 异步验证
+		m.lastError = ""
+		if m.yt == nil {
+			return m, nil
+		}
+		text := strings.TrimSpace(msg.text)
+		if text == "" {
+			return m, nil
+		}
+		if _, err := m.yt.SetPastedLogin(text); err != nil {
+			m.lastError = "保存登录配置失败: " + err.Error()
+			return m, nil
+		}
+		m.ytLogin = m.yt.Login()
+		m.ytInvalid = false // 新配置未验证
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
+		m.notice = "已保存登录配置，验证中…"
+		return m, ytVerifyCmd(m.yt)
+
+	case ytLogoutMsg:
+		// 退出登录：清除配置 + 页面状态复位
+		m.lastError = ""
+		if m.yt == nil {
+			return m, nil
+		}
+		if err := m.yt.ClearLogin(); err != nil {
+			m.lastError = "退出登录失败: " + err.Error()
+			return m, nil
+		}
+		m.ytLogin = ytm.LoginConfig{}
+		m.ytInvalid = false
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
+		m.notice = "已退出 YT Music 登录"
+		return m, nil
+
+	case ytVerifyDoneMsg:
+		// 验证结果：无论成败刷新页面登录状态；失败时状态区/设置页降级展示
+		if m.yt == nil {
+			return m, nil // 防御：未集成 yt 时丢弃结果
+		}
+		m.notice = ""
+		m.lastError = ""
+		m.ytInvalid = msg.err != nil
+		if msg.err != nil {
+			m.lastError = ytVerifyErrorText(msg.err)
+		} else {
+			m.notice = "YT Music 登录有效"
+		}
+		m.ytLogin = m.yt.Login()
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
+		return m, nil
+
+	case ytSyncAllMsg:
+		// 同步全部：同步中忽略重复触发
+		if m.yt == nil || m.ytSyncing {
+			return m, nil
+		}
+		m.ytSyncing = true
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, true, m.ytInvalid)
+		return m, ytSyncAllCmd(m.yt, m.pl)
+
+	case ytSyncDoneMsg:
+		if m.yt == nil {
+			return m, nil // 防御：未集成 yt 时丢弃结果
+		}
+		m.ytSyncing = false
+		m.ytInvalid = ytInvalidAfterSync(m.ytInvalid, msg.err)
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, m.ytInvalid)
+		if msg.err != nil {
+			m.notice = ""
+			m.lastError = "同步失败: " + msg.err.Error()
+		} else {
+			m.lastError = ""
+			total := 0
+			for _, r := range msg.results {
+				total += r.TrackCount
+			}
+			m.notice = fmt.Sprintf("已同步 %d 个歌单 · 共 %d 首", len(msg.results), total)
+		}
+		// 部分失败也刷新（成功项已入库）
+		m.plPage = m.plPage.setLists(m.pl.Lists())
+		m.plPage = m.plPage.setYTSyncs(m.yt.SyncEntries())
+		return m, nil
+
+	case ytImportMsg:
+		// URL 导入：同步/导入中忽略重复触发；空 URL 忽略
+		if m.yt == nil || m.ytSyncing {
+			return m, nil
+		}
+		url := strings.TrimSpace(msg.url)
+		if url == "" {
+			return m, nil
+		}
+		m.ytSyncing = true
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, true, m.ytInvalid)
+		return m, ytImportCmd(m.yt, m.pl, url)
+
+	case ytImportDoneMsg:
+		if m.yt == nil {
+			return m, nil // 防御：未集成 yt 时丢弃结果
+		}
+		m.ytSyncing = false
+		m.ytInvalid = ytInvalidAfterSync(m.ytInvalid, msg.err)
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, m.ytInvalid)
+		if msg.err != nil {
+			m.notice = ""
+			m.lastError = "导入失败: " + msg.err.Error()
+			return m, nil
+		}
+		m.lastError = ""
+		m.notice = fmt.Sprintf("已导入「%s」%d 首", msg.res.Remote.Title, msg.res.TrackCount)
+		m.plPage = m.plPage.setLists(m.pl.Lists())
+		m.plPage = m.plPage.setYTSyncs(m.yt.SyncEntries())
+		return m, nil
+
+	case ytRefreshMsg:
+		// 详情 r：仅 YT 同步列表可刷新；同步中忽略
+		if m.yt == nil || m.ytSyncing {
+			return m, nil
+		}
+		playlistID := ""
+		found := false
+		for _, e := range m.yt.SyncEntries() {
+			if e.ListName == msg.listName {
+				playlistID = e.PlaylistID
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.notice = ""
+			m.lastError = "该列表不是 YT Music 同步列表"
+			return m, nil
+		}
+		m.ytSyncing = true
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, true, m.ytInvalid)
+		return m, ytRefreshCmd(m.yt, m.pl, playlistID)
+
+	case ytRefreshDoneMsg:
+		if m.yt == nil {
+			return m, nil // 防御：未集成 yt 时丢弃结果
+		}
+		m.ytSyncing = false
+		m.ytInvalid = ytInvalidAfterSync(m.ytInvalid, msg.err)
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, m.ytInvalid)
+		if msg.err != nil {
+			m.notice = ""
+			m.lastError = "刷新失败: " + msg.err.Error()
+			return m, nil
+		}
+		m.lastError = ""
+		m.notice = fmt.Sprintf("已刷新「%s」%d 首", msg.res.ListName, msg.res.TrackCount)
+		m.plPage = m.plPage.setLists(m.pl.Lists())
+		m.plPage = m.plPage.setYTSyncs(m.yt.SyncEntries())
 		return m, nil
 
 	case playResultMsg:

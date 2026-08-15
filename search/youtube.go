@@ -17,6 +17,8 @@ import (
 const (
 	// searchTimeout 是单次搜索的总超时（覆盖 yt-dlp 子进程执行时间）。
 	searchTimeout = 10 * time.Second
+	// playlistTimeout 是歌单拉取的总超时：歌单条目数远多于单次搜索，单独给 30s。
+	playlistTimeout = 30 * time.Second
 	// searchLimit 是 ytsearch 返回的最大结果数。
 	searchLimit = 20
 	// maxStderrTail 是错误分支拼入错误消息的 stderr 诊断文本最大长度。
@@ -24,11 +26,14 @@ const (
 )
 
 // ytdlpEntry 对应 yt-dlp --dump-json 输出中单条结果的字段。
+// -J（--dump-single-json）模式下 entries 数组的元素结构与此一致：
+// id/title/channel/duration/url/webpage_url/thumbnails 均同 flat 逐行模式。
 type ytdlpEntry struct {
 	ID         string  `json:"id"`
 	Title      string  `json:"title"`
 	Channel    string  `json:"channel"`
 	Duration   float64 `json:"duration"`
+	URL        string  `json:"url"`
 	WebpageURL string  `json:"webpage_url"`
 	Thumbnail  string  `json:"thumbnail"`
 	// Thumbnails 是 --flat-playlist 模式下的缩略图数组：
@@ -36,6 +41,14 @@ type ytdlpEntry struct {
 	Thumbnails []struct {
 		URL string `json:"url"`
 	} `json:"thumbnails"`
+}
+
+// ytdlpPlaylist 对应 yt-dlp --flat-playlist -J 输出的顶层歌单 JSON。
+type ytdlpPlaylist struct {
+	Type    string       `json:"_type"`
+	ID      string       `json:"id"`
+	Title   string       `json:"title"`
+	Entries []ytdlpEntry `json:"entries"`
 }
 
 // YouTubeAdapter 通过 yt-dlp 子进程搜索 YouTube（ytsearch: 前缀）。
@@ -47,6 +60,7 @@ type ytdlpEntry struct {
 type YouTubeAdapter struct {
 	ytdlpPath string
 	timeout   time.Duration
+	plTimeout time.Duration
 	limit     int
 }
 
@@ -55,6 +69,7 @@ func NewYouTubeAdapter(ytdlpPath string) *YouTubeAdapter {
 	return &YouTubeAdapter{
 		ytdlpPath: ytdlpPath,
 		timeout:   searchTimeout,
+		plTimeout: playlistTimeout,
 		limit:     searchLimit,
 	}
 }
@@ -99,6 +114,74 @@ func tail(s string, max int) string {
 	return s[len(s)-max:]
 }
 
+// FetchPlaylist 用 yt-dlp --flat-playlist -J 拉取歌单标题与条目元数据。
+// cookies 参数可空：File 非空时加 --cookies <file>；否则 FromBrowser 非空时加
+// --cookies-from-browser <browser>；两者都空则不加 cookie 参数。
+// 错误分支与 Search 一致：超时（DeadlineExceeded）与父 ctx 取消（Canceled）
+// 分别给出不同消息；非超时失败携带截断的 stderr 诊断文本。
+func (a *YouTubeAdapter) FetchPlaylist(ctx context.Context, playlistURL string, cookies CookieArgs) (model.Playlist, error) {
+	ctx, cancel := context.WithTimeout(ctx, a.plTimeout)
+	defer cancel()
+	args := []string{"--flat-playlist", "-J", "--no-warnings"}
+	switch {
+	case cookies.File != "":
+		args = append(args, "--cookies", cookies.File)
+	case cookies.FromBrowser != "":
+		args = append(args, "--cookies-from-browser", cookies.FromBrowser)
+	}
+	args = append(args, playlistURL)
+	cmd := exec.CommandContext(ctx, a.ytdlpPath, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		// 先查 ctx.Err()：超时/取消时 Output 返回的 err 可能是
+		// *ExitError（非零退出）或 signal: killed，须以 ctx 状态为准。
+		if ctx.Err() != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return model.Playlist{}, fmt.Errorf("歌单拉取超时（%s）: %w", a.plTimeout, ctx.Err())
+			}
+			return model.Playlist{}, fmt.Errorf("歌单拉取已取消: %w", ctx.Err())
+		}
+		msg := tail(stderr.String(), maxStderrTail)
+		if msg == "" {
+			msg = "<无输出>"
+		}
+		return model.Playlist{}, fmt.Errorf("yt-dlp 歌单拉取失败: %w（stderr: %s）", err, msg)
+	}
+	return parseYTDLPPlaylist(out)
+}
+
+// entryToTrack 将 yt-dlp 单条条目映射为 Track；ID 为空返回 ok=false。
+// CoverURL 以 thumbnail 优先、thumbnails[0].url 兜底（flat 模式无 singular
+// thumbnail 字段）；URL 以 url 优先、webpage_url 次之，最后用 videoId 构造
+// music.youtube.com 地址兜底。
+func entryToTrack(e ytdlpEntry) (model.Track, bool) {
+	if e.ID == "" {
+		return model.Track{}, false
+	}
+	cover := e.Thumbnail
+	if cover == "" && len(e.Thumbnails) > 0 {
+		cover = e.Thumbnails[0].URL
+	}
+	u := e.URL
+	if u == "" {
+		u = e.WebpageURL
+	}
+	if u == "" {
+		u = "https://music.youtube.com/watch?v=" + e.ID
+	}
+	return model.Track{
+		ID:       e.ID,
+		Title:    e.Title,
+		Artist:   e.Channel,
+		Duration: e.Duration,
+		URL:      u,
+		Source:   "youtube",
+		CoverURL: cover,
+	}, true
+}
+
 // parseYTDLPOutput 将 yt-dlp 的逐行 JSON 输出解析为歌曲列表；
 // 非 JSON 行（警告等）与空 ID 条目跳过；空输出（或无有效行）
 // 返回空列表，不是错误。与子进程解耦，可独立单测。
@@ -117,25 +200,32 @@ func parseYTDLPOutput(out []byte) ([]model.Track, error) {
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			continue
 		}
-		if e.ID == "" {
-			continue
+		if t, ok := entryToTrack(e); ok {
+			tracks = append(tracks, t)
 		}
-		cover := e.Thumbnail
-		if cover == "" && len(e.Thumbnails) > 0 {
-			cover = e.Thumbnails[0].URL
-		}
-		tracks = append(tracks, model.Track{
-			ID:       e.ID,
-			Title:    e.Title,
-			Artist:   e.Channel,
-			Duration: e.Duration,
-			URL:      e.WebpageURL,
-			Source:   "youtube",
-			CoverURL: cover,
-		})
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
 	return tracks, nil
+}
+
+// parseYTDLPPlaylist 解析 yt-dlp --flat-playlist -J 输出的顶层歌单 JSON。
+// 顶层非法 JSON（或非 playlist 类型输出，如误传单曲 URL）返回错误；
+// 合法歌单 JSON 但无条目返回空 Tracks（不是错误）。与子进程解耦，可独立单测。
+func parseYTDLPPlaylist(out []byte) (model.Playlist, error) {
+	var pl ytdlpPlaylist
+	if err := json.Unmarshal(out, &pl); err != nil {
+		return model.Playlist{}, fmt.Errorf("解析歌单 JSON 失败: %w", err)
+	}
+	if pl.Type != "" && pl.Type != "playlist" {
+		return model.Playlist{}, fmt.Errorf("yt-dlp 输出类型 %q，期望 playlist（URL 可能不是歌单链接）", pl.Type)
+	}
+	p := model.Playlist{ID: pl.ID, Title: pl.Title}
+	for _, e := range pl.Entries {
+		if t, ok := entryToTrack(e); ok {
+			p.Tracks = append(p.Tracks, t)
+		}
+	}
+	return p, nil
 }

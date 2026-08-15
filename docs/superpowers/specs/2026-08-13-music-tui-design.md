@@ -629,3 +629,111 @@ cache/
 ### 17.6 已知限制
 - **LoadFailed 陈旧事件可能误删新曲目的有效缓存**：**主场景已修复，残留亚毫秒级窗口**——player 层按 playlist_entry_id 归属过滤陈旧 end-file error（mpv ≥0.33 的 end-file 事件与 loadfile 命令响应均携带 playlist_entry_id，且响应先于事件到达）：事件 id 与最近一次成功 loadfile 的 id 不一致 = 旧曲取流失败晚到，丢弃防 UI 按“当前曲目”误删健康缓存；旧版 mpv 无该字段时过滤禁用、保守放行（loadfile 响应无 id 同样保守放行）。**残差**：旧曲取流失败事件恰在切歌的 loadfile 命令处理前写出（亚毫秒级窗口）时仍可能被归属为当前曲，后果为缓存条目被删后可重新下载自愈；UI 层无法区分同代际事件，接受该残差。UI 层同步区分：IPC 层恢复失败不再删缓存（与缓存文件无关），真实损坏由异步 LoadFailedError 路径移除条目，提示区分“缓存文件损坏”与网络取流失败
 - **多实例共享缓存目录**：与 index.json/session.json 同款单实例假设，多实例并发写索引的互相覆盖问题仍为已知限制
+## 18. YouTube Music 播放列表同步（追加需求）
+
+### 18.1 概述
+- 目标：把 YouTube Music（YTM）账号下**全部歌单**同步为本地播放列表——本地是远端歌单的**快照**，离线可播（复用第 16 章 playlists.Store 的 Create/AddTrack/RemoveTrack，不新增存储）
+- 登录：三种 cookie 登录方式（浏览器自动导出 / cookies.txt 文件 / 粘贴 Cookie 字符串），无需 OAuth
+- 导入：任意歌单 URL 可导入（公开歌单无需登录；私有歌单需已登录 cookie）
+- 同步语义：命名前缀 `YT: `、按 videoId 歌单内去重、刷新 = 整列表替换（保留 CreatedAt）、命名冲突自动加 ` (2)` 后缀、SyncAll 单歌单失败不中断（errors.Join 汇总）
+- 代码：`ytm/` 包（登录配置 + cookie 导出解密 + InnerTube browse 客户端 + 同步编排）+ search.FetchPlaylist（yt-dlp 拉取）+ ui 集成；实现 commit 5464c73 / 0539eb8 / 77a1d27
+
+### 18.2 cookie 登录
+- 三种方式（LoginMethod）：
+  - `MethodBrowser` 浏览器自动导出：从 Chromium 系浏览器配置目录解密导出 YouTube 域 cookie（懒导出——每次同步前重新导出，覆盖式更新 CookiesPath）
+  - `MethodCookiesFile`：用户指定 cookies.txt 完整路径（保存时校验文件可读）
+  - `MethodPasted`：粘贴 Cookie header 字符串（`name=value; ...`）→ 校验转换后落盘 ytm-cookies.txt（0600）；**先校验后落盘**：非法文本（无 name=value 结构）报错且不写文件、不改配置（不破坏既有登录）
+- 存储：`~/.config/music-tui/ytm.json`（权限 0600，.tmp+rename 原子写；损坏由 main 备份重建，与 playlists 降级同款）+ cookie 文件 `~/.config/music-tui/ytm-cookies.txt`（0600）；`LoginConfig{Method, Browser, CookiesPath, UpdatedAt}`
+- 浏览器支持矩阵：
+  - chrome / chromium / brave / edge / vivaldi / opera：**Linux + macOS** 支持（自研解密）；**Windows 不支持**（v20 app-bound 加密），返回 ErrUnsupportedOS，UI 提示改用 cookies.txt 方式
+  - firefox / safari：不提供浏览器选项（UI 提示用 cookies.txt 导出）
+- 失效处理：YouTube 登录 cookie 有效期约 6 个月；失效后 browse 请求 HTTP≥400 → 返回 ErrSessionInvalid（"登录已失效，请重新导出 cookie"）；是否有效由 VerifyLogin（= ListPlaylists 走完整登录判定）异步校验，UI 显示验证结果
+- 退出登录：ClearLogin 清除登录配置（保留已落盘 cookie 文件与 SyncEntry 映射），UI notice "已退出 YT Music 登录"
+
+### 18.3 InnerTube browse
+- 端点：`https://music.youtube.com/youtubei/v1/browse?prettyPrint=false`，**无需 API key**（实测无 key 参数 200）
+- browseId：**`FEmusic_liked_playlists`**（用户方案原写的 `FEmusic_library_playlists` 实测已废弃返回 400；ytmusicapi/yutemal 均用 liked_playlists，实测 200）——语义为"库中歌单"（Music Library 的歌单 tab）
+- clientVersion 动态日期：`"1." + time.Now().UTC().Format("20060102") + ".01.00"`（ytmusicapi 同款，实测有效）
+- 请求头：`Cookie`（完整 header）、`Authorization: SAPISIDHASH <ts>_<hex>`、`Origin`/`X-Origin: https://music.youtube.com`、`X-Goog-AuthUser: 0`、`Referer: https://music.youtube.com/`、Chrome 桌面 UA、`Content-Type: application/json`
+- SAPISIDHASH 签名：`{unix_ts}_{hex(sha1(ts + " " + sapisid + " " + "https://music.youtube.com"))}`；sapisid 从 Cookie header 提取，**优先 `__Secure-3PAPISID` 再 `SAPISID`**（ytmusicapi 用 3PAPISID、yutemal 用 SAPISID，两者兼容）；cookie 中两者皆缺 → 未登录错误（"cookie 缺少 SAPISID"）
+- 登录判定（实测）：
+  - HTTP ≥ 400 → 参数错/风控/失效 → `ErrSessionInvalid`（带状态码）
+  - 200 但 `serviceTrackingParams` 中 `logged_in: "0"` **或**解析无歌单条目 → 未登录 `ErrNotLoggedIn`
+  - 网络失败 → 透传包装错误
+- 响应解析：容错**递归扫描**全部 `musicTwoRowItemRenderer`（不依赖固定 JSON 路径，参考 yutemal extractor.go fromJSON 思路）；title = `title.runs[0].text`（simpleText 兜底）；count = subtitle runs 中首个连续数字段（"5 首"→5，无则 0）；browseId 去重保序（键排序保证发现顺序稳定）
+- **分页（continuation）**：歌单库首页 `sectionListRenderer.contents[]` 末尾可能出现 `continuationItemRenderer`，令牌在 `continuationEndpoint.continuationCommand.token`（兼容直存 `continuation` 与 commandExecutorCommand 嵌套，参考 ytmusicapi continuations.py）；分页请求 body 加 `"continuation": "<token>"`（context 不变，**无 browseId**），响应条目在 `onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems`；循环拉取直至无令牌（安全上限 100 页防死循环），跨页按 playlistId 去重——**>25 个歌单不漏同步**
+
+### 18.4 Chrome cookie 解密
+- **v10**（Linux/macOS 现行格式）：值 = `"v10"` + AES-128-CBC 密文；
+  - key = PBKDF2-HMAC-SHA1(password, salt=`"saltysalt"`, iterations, keylen=16)，手写 PBKDF2（对照 RFC 6070 类向量单测）；Linux iterations=1，password 固定 `"peanuts"`（v10）+ `""`（empty 兜底）；**Linux 不读 Local State 的 `os_crypt.encrypted_key`**——该字段仅 Windows/DPAPI 使用，yt-dlp Linux 分支同样只用 peanuts/keyring（旧实现读取它会挤掉正确密钥导致解密失败，审查 M3 修复）
+  - IV = 16 个空格字节 `b' ' * 16`；PKCS7 填充校验 + UTF-8 校验
+  - **meta_version ≥ 24 时明文前 32 字节为 SHA256 前缀，须剥离**（meta_version 读 Cookies DB `meta` 表 `version` 字段；本机 Chrome 144 实测 = 24）
+- **v11**（Linux keyring）：password 存 Secret Service（D-Bus schema `chrome_libsecret_os_crypt_password_v1`，item 属性 application = `<浏览器> Safe Storage`），经 godbus/dbus v5 读取；**实现但标注未实测**（本机无 v11 cookie），任何失败返回 nil 降级 empty key
+- **macOS**：`security find-generic-password -w -a <account> -s "<account> Safe Storage"` 取钥匙串密码 → PBKDF2-HMAC-SHA1(password, "saltysalt", **iterations=1003**, 16) → 同 CBC 解密；**无版本前缀的旧明文 cookie 原样返回**（yt-dlp MacChromeCookieDecryptor 同款：other 前缀视为旧数据）
+- SQLite 读取：**modernc.org/sqlite**（纯 Go 无 cgo、支持 WAL）；浏览器运行中只读直开失败时复制 DB + `-wal` + `-shm` 到临时目录再打开（同 yt-dlp 策略）；secure/httponly 列名兼容新旧版本（is_secure/is_httponly vs secure/httponly）
+- 导出只取 youtube 域 cookie（youtube.com / .youtube.com / www / music 子域），写 Netscape 格式（0600，原子写）；错误可区分：浏览器未安装/未找到配置、解密失败（N 条失败计数）、无 YouTube 登录 cookie
+- 验证：Linux 路径已用本机真实 cookie 对照 yt-dlp 解密结果验证通过
+
+### 18.5 同步语义
+- 命名：本地列表名 = `"YT: " + 歌单标题`；SyncEntry 映射（playlistId → ListName，upsert 按 PlaylistID）持久化在 ytm.json
+- 去重：**按 videoId，同一歌单内**去重（保留首次出现顺序，空 ID 条目跳过）；不跨歌单去重
+- 刷新 = 整列表替换：从尾到头逐个 RemoveTrack 清空再写入去重后曲目，**保留列表 CreatedAt**（通过 SyncEntry 映射识别刷新目标；映射存在但本地列表被删过 → 重建新建）
+- 命名冲突：本地已存在同名列表且 SyncEntry 映射到本歌单 → 刷新该列表；否则追加 ` (2)`/` (3)` 递增
+- SyncAll：枚举全部歌单（browse，含 continuation 分页）→ 逐个拉取去重入库；**单个失败记录错误继续**，返回成功 results + `errors.Join` 汇总错误；全部完成后 upsert 全部 SyncEntry
+- SyncOne：按 playlistID 刷新单个同步列表（详情页 r）——**经 SyncEntry 映射直接构造歌单 URL 拉取（不走枚举）**，URL 导入的共享歌单（不在库中）也能刷新；映射不存在（本地手工改名/从未同步过）报「该列表不是 YT Music 同步列表」；刷新后 upsert 且 **ListName 保持原名**（远端标题变更不重建列表）；ImportURL：任意歌单 URL（公开无需登录；已登录时携带 cookie 文件）
+- 超时：VerifyLogin 30s / **SyncAll 动态预算 = 30s 枚举余量 + 30s×歌单数（上限 10min，先枚举计数再拉取）** / 导入与刷新各 2min（root 异步 cmd）；yt-dlp 歌单拉取本身 30s（playlistTimeout）
+- Track 映射见 18.6；与第 16 章关系：快照直接复用 playlists.Store，普通列表与 YT 同步列表共存，删除/重命名等既有操作不受影响
+
+### 18.6 URL 导入
+- 实现：`yt-dlp --flat-playlist -J --no-warnings [--cookies <file>] <url>`，输出**顶层 playlist JSON**：`{_type:"playlist", id, title, entries:[...]}`（实测；YTM 歌单会被 yt-dlp 按 youtube.com 处理属正常现象）
+- 无 cookie 时**不加 cookie 参数**即可导入公开歌单；已登录时传 cookies 文件（File 优先，FromBrowser 保留备用）；**已配置登录但 cookie 不可用（浏览器导出失败/文件缺失）时上抛错误**（仅未配置登录才静默降级）
+- Track 映射（flat 条目）：ID=videoId、Title、Artist=channel、Duration=duration、URL=`music.youtube.com/watch?v={videoId}`、CoverURL=thumbnails[0].url（flat 无 singular thumbnail 字段）、Source="youtube"
+- 映射键：URL 的 `list` 参数作 PlaylistID；无 list 参数时用 `url:<URL>` 作映射键
+- 错误分支与 Search 一致：超时/取消/非零退出（携带截断 stderr 诊断）分别给出不同消息
+
+### 18.7 UI 与键位
+- 播放列表页概览**顶部状态区**（列表上方，空列表时也显示）：
+  - 未登录：`YT Music · 未登录`（faint：`s 登录设置 · u 导入歌单链接`）
+  - 已登录：`YT Music · 已登录`（faint：`y 同步全部 · s 设置 · u 导入`）
+  - **验证失败：`YT Music · 已登录（验证失败）`**（VerifyLogin 失败后降级展示，设置页当前状态行同步为「已登录（验证失败） · …」；初始启动未验证/验证成功维持「已登录」）
+  - 同步中：`YT Music · 同步中…`（无提示行）
+- 键位：
+
+| 作用域 | 键 | 动作 |
+|---|---|---|
+| 播放列表概览 | `s` | 登录设置（三种方式 + 退出登录） |
+| 播放列表概览 | `y` | 同步全部歌单（异步 SyncAll） |
+| 播放列表概览 | `u` | URL 导入输入框 |
+| 播放列表详情 | `r` | 刷新当前列表（仅 YT 同步列表；非同步列表红字提示"该列表不是 YT Music 同步列表"） |
+
+- 登录设置（plSyncSetup，列表视图）：主菜单四项——`浏览器读取`（→ 二级浏览器列表：Google Chrome/Chromium/Brave/Microsoft Edge/Vivaldi/Opera，说明行"自动导出浏览器 cookie（Windows 请改用 cookies.txt）"）、`cookies.txt 文件路径`（输入框，Enter 校验可读 → 保存配置）、`粘贴 Cookie 字符串`（输入框，Enter 落盘 → 保存配置）、`退出登录`；当前状态行 `已登录 · <方式> · MM-DD HH:MM`
+- 流程：浏览器/cookies/粘贴保存成功 → 回概览 + notice「已保存登录配置，验证中…」→ 异步 VerifyLogin → notice「YT Music 登录有效」或 lastError「登录无效/失效：请重新导出 cookie」（ytVerifyErrorText 映射）
+- URL 导入：输入框（占位"粘贴 YouTube Music 歌单链接，Enter 导入"）→ 异步 ImportURL → notice「已导入「标题」N 首」/ lastError「导入失败: …」；**失败后输入不保留，需重新按 `u` 再试**（提交即退出输入模式）
+- 同步全部：异步 SyncAll → notice「已同步 N 个歌单 · 共 M 首」/ lastError「同步失败: …」；单歌单失败不中断（errors.Join 汇总各失败原因，成功歌单照常入库并刷新列表视图 + 同步映射）
+- 同步/导入/刷新期间 `m.ytSyncing = true` 禁用重复触发；消息：ytVerifyDoneMsg / ytSyncDoneMsg / ytImportDoneMsg / ytRefreshDoneMsg（root 产出），页面 emit ytLoginMsg / ytLoginFileMsg / ytLoginPasteMsg / ytLogoutMsg / ytSyncAllMsg / ytImportMsg / ytRefreshMsg
+- main.go：loadYTM 加载 ytm.json（损坏 .corrupt-<纳秒> 备份重建，与 loadPlaylists 同款）→ `ytm.NewClient(store, searchAdapter)` → NewModel 追加 `yt *ytm.Client` 参数（nil = 未集成/测试降级）
+
+### 18.8 测试策略
+| 模块 | 策略 |
+|---|---|
+| ytm/crypt（9 个） | PBKDF2 两档迭代（对照已知向量）、v10 解密（Go 加密构造密文）、meta≥24 去前缀、empty key 兜底、坏数据不 panic、PKCS7 校验 |
+| ytm/sapisid（9 个） | 3PAPISID 优先/SAPISID 兜底/缺失报错、签名确定性（固定 ts 期望 hex）、timestamp 格式 |
+| ytm/cookies（14 个） | Netscape 解析（注释/HTTPONLY/空行/制表符）、写出 0600、浏览器探测错误路径、域过滤（只导出 youtube 域）、Local State 密钥读取 |
+| ytm/browse（9 个） | httptest mock：请求头（Cookie/Authorization 前缀/Origin/UA）、body browseId 与 clientVersion 格式；响应解析（构造 gridRenderer JSON）；logged_in=0 → 未登录；HTTP 403/400 → 失效；网络错误 |
+| ytm/config（14 个） | 存取 roundtrip、0600 权限、损坏文件报错、SyncEntry upsert/remove/find、原子写、粘贴登录落盘与 Netscape 转换 |
+| ytm/sync（14 个） | fake Fetcher：新建/刷新（同名映射）/命名冲突加后缀/去重保序/部分失败继续（errors.Join）/ImportURL 无 cookie 路径/URL 映射键 |
+| ytm/ytm（5 个） | Client 组装、SupportedBrowsers 矩阵、登录门面方法 |
+| search（10 个） | FetchPlaylist：-J 顶层 playlist JSON 解析（含 URL 兜底/空条目/坏 JSON）、cookie 参数透传（假 yt-dlp 子进程）、超时/取消/stderr 诊断 |
+| ui（19 个，playlists_ui_test.go 的 TestYT*） | 状态区三态渲染、登录设置全流程（浏览器选择→保存→验证消息、cookies.txt 可读校验、粘贴登录、失败映射）、退出登录、URL 导入（成功/空忽略/失败保留输入）、同步全部（成功/未登录）、详情 r 刷新（同步列表/非同步提示）、键位作用域与输入框吞键 |
+| main（2 个） | ytm store 缺失、损坏备份重建（.corrupt 时间戳） |
+
+### 18.9 已知限制
+- **v11 keyring 路径未实测**（本机无 v11 cookie）：实现经 godbus/dbus v5 读 Secret Service（schema chrome_libsecret_os_crypt_password_v1），任何失败降级 empty key；遇真实 v11 环境需验证
+- **零歌单账号显示"未登录"**：browse 无任何歌单条目时按契约判定为未登录（ErrNotLoggedIn），UI 显示"未登录"——空账号用户会被误导；属登录判定与空库无法区分的固有限制
+- **分页已支持**：browse 歌单库经 continuation 循环拉取直至耗尽（跨页去重，安全上限 100 页），>25 个歌单不漏同步
+- **Windows 不支持**浏览器自动导出（v20 app-bound 加密），UI 明确提示改用 cookies.txt 方式
+- 运行中浏览器的 cookie 读取依赖 SQLite WAL 可读性：直开失败时复制 DB + WAL/SHM 到临时目录，极端情况（如 WAL 未落盘）可能读到旧数据或失败，失败会提示重试
+- browseId 语义为**"库中歌单"**（FEmusic_liked_playlists 历史命名沿袭，实际对应 Music Library 的歌单列表），非"我喜欢的音乐"；如 YTM 结构调整可能需跟随 ytmusicapi/yutemal 更新
+- 同步为**单向快照**：本地列表是远端快照，本地手工增删会被下次刷新整列表覆盖（Create/重命名仍可用，重命名后同步映射失效会重建新列表）
+- 退出登录仅清除配置，已落盘 cookie 文件（ytm-cookies.txt）保留在磁盘（0600），需要时可手动删除
+- 播放列表拉取经 yt-dlp（flat 模式），条目含时长/频道/封面元数据，但不含歌词等附加信息；YTM 歌单按 youtube.com 处理属 yt-dlp 正常行为

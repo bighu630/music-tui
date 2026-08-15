@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -21,7 +22,9 @@ import (
 	"music-tui/player"
 	"music-tui/playlists"
 	"music-tui/queue"
+	"music-tui/search"
 	"music-tui/session"
+	"music-tui/ytm"
 )
 
 // ---- fakes ----
@@ -179,6 +182,11 @@ func (f *fakeSearchAdapter) Search(ctx context.Context, query string) ([]model.T
 	return f.tracks, nil
 }
 
+// FetchPlaylist 是最小实现（接口扩展兼容）：返回空歌单，不参与 UI 测试逻辑。
+func (f *fakeSearchAdapter) FetchPlaylist(ctx context.Context, playlistURL string, cookies search.CookieArgs) (model.Playlist, error) {
+	return model.Playlist{}, nil
+}
+
 // ---- 测试工具 ----
 
 func testTrack(id string) model.Track {
@@ -195,8 +203,40 @@ func testTrack(id string) model.Track {
 
 // newTestModel 组装真实服务（历史/封面用临时目录，歌词指向 404 的假服务器，
 // 缓存指向临时目录 + 不存在的 yt-dlp（CacheAsync 后台下载立即失败退出，
-// 无网络无泄漏））。onTrack 透传给 NewModel（MPRIS 曲目回调；测试可传 nil 或自定收集）。
+// 无网络无泄漏））。附带未登录的 yt 客户端（临时 store + fake fetcher + 离线 browse 响应），
+// 保证全程无网络副作用。onTrack 透传给 NewModel（MPRIS 曲目回调；测试可传 nil 或自定收集）。
 func newTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, onTrack func(*model.Track)) Model {
+	return newYTTestModel(t, fp, fa, onTrack).m
+}
+
+// ytTestEnv 是 YT Music 同步 UI 测试环境：store/client/fetcher 均可直接注入。
+// browse 请求由离线 RoundTripper 固定响应（默认 logged_in=1 含两个歌单），
+// 需要失败场景时用 env.client.SetHTTPClient 替换传输。
+type ytTestEnv struct {
+	store   *ytm.Store
+	client  *ytm.Client
+	fetcher *fakeYTFetcher
+	m       Model
+}
+
+// newYTTestModel 构造带完整 yt 测试环境的模型（供 YT 同步流程测试）。
+func newYTTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, onTrack func(*model.Track)) *ytTestEnv {
+	t.Helper()
+	env := &ytTestEnv{}
+	store, err := ytm.NewStore(filepath.Join(t.TempDir(), "ytm.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.store = store
+	env.fetcher = &fakeYTFetcher{playlists: map[string]model.Playlist{}}
+	env.client = ytm.NewClient(store, env.fetcher)
+	env.client.SetHTTPClient(&http.Client{Transport: ytRoundTripper{code: 200, body: ytBrowseOK}})
+	env.m = newTestModelBase(t, fp, fa, env.client, onTrack)
+	return env
+}
+
+// newTestModelBase 组装除 yt 外的全部服务与模型（newTestModel/newYTTestModel 共用）。
+func newTestModelBase(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, yt *ytm.Client, onTrack func(*model.Track)) Model {
 	t.Helper()
 	lyricServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -225,7 +265,118 @@ func newTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, onTrack f
 	}
 	return NewModel(fp, fa,
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, pls, cm, onTrack)
+		cf, hist, sess, pls, cm, yt, onTrack)
+}
+
+// refreshYTStatus 把 store 的登录状态同步进模型与页面（直接 seed store 后调用）。
+func (env *ytTestEnv) refreshYTStatus() {
+	env.m.ytLogin = env.client.Login()
+	env.m.plPage = env.m.plPage.setYTSyncStatus(env.m.ytLogin, env.m.ytSyncing, env.m.ytInvalid)
+}
+
+// fakeYTFetcher 按 URL 返回预置歌单（ytm.Fetcher 的 UI 测试实现）。
+type fakeYTFetcher struct {
+	mu        sync.Mutex
+	playlists map[string]model.Playlist
+	err       error
+	urls      []string
+}
+
+func (f *fakeYTFetcher) FetchPlaylist(ctx context.Context, playlistURL string, cookies search.CookieArgs) (model.Playlist, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.urls = append(f.urls, playlistURL)
+	if f.err != nil {
+		return model.Playlist{}, f.err
+	}
+	if p, ok := f.playlists[playlistURL]; ok {
+		return p, nil
+	}
+	return model.Playlist{}, errors.New("未预置歌单 " + playlistURL)
+}
+
+// ytRoundTripper 固定返回 browse 响应的离线传输（VerifyLogin/同步不触网）。
+type ytRoundTripper struct {
+	code int
+	body string
+}
+
+func (rt ytRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: rt.code,
+		Body:       io.NopCloser(strings.NewReader(rt.body)),
+		Header:     make(http.Header),
+		Request:    r,
+	}, nil
+}
+
+// ytBrowseOK 是 browse 有效登录响应（logged_in=1，两个歌单：PLAAA/PLBBB）。
+const ytBrowseOK = `{
+  "contents": {
+    "singleColumnBrowseResultsRenderer": {
+      "tabs": [{
+        "tabRenderer": {
+          "selected": true,
+          "content": {
+            "sectionListRenderer": {
+              "contents": [{
+                "itemSectionRenderer": {
+                  "contents": [{
+                    "gridRenderer": {
+                      "items": [
+                        {"musicTwoRowItemRenderer": {
+                          "title": {"runs": [{"text": "我的最爱"}]},
+                          "subtitle": {"runs": [{"text": "5 首"}]},
+                          "navigationEndpoint": {"browseEndpoint": {"browseId": "PLAAA"}}
+                        }},
+                        {"musicTwoRowItemRenderer": {
+                          "title": {"runs": [{"text": "通勤歌单"}]},
+                          "subtitle": {"runs": [{"text": "12 首"}]},
+                          "navigationEndpoint": {"browseEndpoint": {"browseId": "PLBBB"}}
+                        }}
+                      ]
+                    }
+                  }]
+                }
+              }]
+            }
+          }
+        }
+      }]
+    }
+  },
+  "serviceTrackingParams": [{"service": "GFEEDBACK", "params": [{"key": "logged_in", "value": "1"}]}]
+}`
+
+// ytBrowseLoggedOut 是 browse 未登录响应（logged_in=0，无条目）。
+const ytBrowseLoggedOut = `{
+  "contents": {"singleColumnBrowseResultsRenderer": {"tabs": []}},
+  "serviceTrackingParams": [{"service": "GFEEDBACK", "params": [{"key": "logged_in", "value": "0"}]}]
+}`
+
+// ytTrackURL 生成与 RemotePlaylist.URL() 一致的歌单 URL。
+func ytTrackURL(id string) string {
+	return "https://music.youtube.com/playlist?list=" + id
+}
+
+// m2：SyncAll 动态超时预算 = 30s 枚举余量 + 30s×歌单数，上限 10min。
+func TestSyncAllBudget(t *testing.T) {
+	cases := []struct {
+		n    int
+		want time.Duration
+	}{
+		{0, 30 * time.Second},
+		{1, 60 * time.Second},
+		{9, 5 * time.Minute},   // 原固定 5min 恰好覆盖 9 个歌单
+		{19, 10 * time.Minute}, // 30s + 30s×19 = 600s = 上限
+		{20, 10 * time.Minute}, // 超过上限截断
+		{100, 10 * time.Minute},
+	}
+	for _, tc := range cases {
+		if got := syncAllBudget(tc.n); got != tc.want {
+			t.Errorf("syncAllBudget(%d) = %v, want %v", tc.n, got, tc.want)
+		}
+	}
 }
 
 // execCmds 同步执行 tea.Cmd 并收集返回的非 nil 消息（测试用）。
