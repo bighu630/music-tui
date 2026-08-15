@@ -3329,7 +3329,7 @@ func TestResumeLocalTrackSkipsCacheLookup(t *testing.T) {
 	}
 }
 
-// ---- 播放列表本地路径导入（root 编排：plLocalAddMsg → 目录校验 → Create → Scan → AddTracks） ----
+// ---- 播放列表本地路径导入（root 编排：plLocalAddMsg → 目录校验 → 根路径防护 → Scan → Create → AddTracks） ----
 
 // 本地目录导入成功：输入目录 → 自动新建「本地-<目录名>」列表 + 歌曲入库 +
 // 成功 toast + 退出输入 + 概览出现新列表（不再依赖选中列表）。
@@ -3409,6 +3409,28 @@ func TestPlaylistLocalAddMsgFailure(t *testing.T) {
 	}
 	if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
 		t.Errorf("失败应留在输入框可重试: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+}
+
+// 本地目录导入根路径：输入 "/"（或 "."）→ 根路径退化，无目录名可取 →
+// toastError 含「无法从该路径生成列表名」、不新建列表、留在输入框可重试。
+// 防护必须先于 local.Scan 触发：否则 "/" 会先递归扫描整个文件系统
+// （本测试快速安全正依赖此顺序）。
+func TestPlaylistLocalAddMsgRootPath(t *testing.T) {
+	for _, p := range []string{string(os.PathSeparator), "."} {
+		m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+		m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+		m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+		m, _ = update(m, plLocalAddMsg{path: p})
+		if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "无法从该路径生成列表名") {
+			t.Errorf("path=%q: toast = %+v, want toastError 且含「无法从该路径生成列表名」", p, m.toast)
+		}
+		if len(m.pl.Lists()) != 0 {
+			t.Errorf("path=%q: 根路径被拒绝不应新建列表: %+v", p, m.pl.Lists())
+		}
+		if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
+			t.Errorf("path=%q: 失败应留在输入框可重试: mode=%v typing=%v", p, m.plPage.mode, m.plPage.typing())
+		}
 	}
 }
 

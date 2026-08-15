@@ -660,17 +660,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m, cmd := m.showToast(fmt.Sprintf("仅支持目录路径: %s", path), toastError)
 			return m, cmd
 		}
-		tracks, err := local.Scan(path)
-		if err != nil {
-			m, cmd := m.showToast(err.Error(), toastError)
-			return m, cmd
-		}
 		// Clean 先处理尾部斜杠（如 "/a/b/" → base="b"）；根/当前目录退化时
 		// Base 为 "/"、"."、".."，无目录名可取 → 报错留在输入框，
-		// 避免生成「本地-/」类怪名
+		// 避免生成「本地-/」类怪名。防护先于 Scan：根路径退化（/、.、..）
+		// 不应触发全盘递归扫描（输入 "/" 会遍历整个文件系统，同步冻结 UI），
+		// 纯字符串操作零 I/O。
 		base := filepath.Base(filepath.Clean(path))
 		if base == "/" || base == "." || base == ".." {
 			m, cmd := m.showToast(fmt.Sprintf("无法从该路径生成列表名: %s", path), toastError)
+			return m, cmd
+		}
+		tracks, err := local.Scan(path)
+		if err != nil {
+			m, cmd := m.showToast(err.Error(), toastError)
 			return m, cmd
 		}
 		listName := "本地-" + base
