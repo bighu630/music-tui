@@ -331,6 +331,29 @@ func TestLookupInvalidAudioReturnsMissAndCleans(t *testing.T) {
 	}
 }
 
+// register 写入前内容校验：待注册文件内容为 HTML（非音频，魔数不匹配且
+// ≥MinAudioSize）→ Register 返回错误、不产生索引条目（后续 Lookup miss），
+// 损坏产物不入库。
+func TestRegisterRejectsHtmlContent(t *testing.T) {
+	dir := t.TempDir()
+	cm := newTestManager(t, Options{Enabled: true, MaxEntries: 100, Dir: dir})
+	id := "html-reg-1234"
+	writeHTMLCacheFile(t, dir, SafeName(id))
+	err := cm.Register(id)
+	if err == nil {
+		t.Fatal("Register HTML 内容文件 = nil error, want error")
+	}
+	if !strings.Contains(err.Error(), "非音频") {
+		t.Errorf("错误 = %v, want 非音频内容拒绝（而非文件缺失等其他错误）", err)
+	}
+	if _, ok := cm.idx.get(id); ok {
+		t.Error("HTML 内容条目被注册进索引")
+	}
+	if _, ok := cm.Lookup(id); ok {
+		t.Error("Lookup HTML 内容 = hit, want miss")
+	}
+}
+
 func TestRegisterEvictsOldest(t *testing.T) {
 	dir := t.TempDir()
 	cm := newTestManager(t, Options{Enabled: true, MaxEntries: 2, Dir: dir})

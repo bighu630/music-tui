@@ -41,7 +41,8 @@ type Manager struct {
 }
 
 // New 创建 Manager：MkdirAll → 加载索引（缺失=空，损坏=返回错误）→
-// 启动清理（条目文件缺失删条目；超限按 LastPlayed 淘汰最旧并删文件；有变化则持久化）。
+// 启动清理（条目文件缺失删条目；内容有效性校验：非音频（HTML/截断）删文件+删条目；
+// 超限按 LastPlayed 淘汰最旧并删文件；有变化则持久化）。
 // opts 规范化：MaxEntries<1 → 100；Dir=="" → 错误。
 // cookieFile/headers 可选：附加到 yt-dlp 下载参数（--cookies/--add-header），
 // 均空时不改变既有行为。
