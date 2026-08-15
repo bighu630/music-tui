@@ -183,6 +183,13 @@ func (m *Manager) CacheAsync(track model.Track) <-chan struct{} {
 		m.mu.Unlock()
 		return nil
 	}
+	// 本地曲目不参与缓存下载：文件已在本地，网络缓存/下载无意义（下载只会把
+	// 本地路径交给 yt-dlp 无谓失败）。cache 层防御：即使未来调用点误把本地
+	// 曲目交给 CacheAsync 也不得启动下载（root 播放链路另有 Source 判断跳过）。
+	if track.Source == model.SourceLocal {
+		m.mu.Unlock()
+		return nil
+	}
 	if m.inflight[track.ID] != nil {
 		m.mu.Unlock()
 		return nil

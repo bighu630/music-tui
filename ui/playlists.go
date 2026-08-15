@@ -27,6 +27,11 @@ type plLoadMsg struct {
 // plCreateMsg 命名输入 Enter（新建）。
 type plCreateMsg struct{ name string }
 
+// plLocalAddMsg 本地路径输入 Enter（root 扫描路径并加入选中列表）。
+type plLocalAddMsg struct {
+	path string
+}
+
 // plRenameMsg 命名输入 Enter（重命名）。
 type plRenameMsg struct{ oldName, newName string }
 
@@ -45,6 +50,10 @@ func emitPlLoad(name string, index int) tea.Cmd {
 
 func emitPlCreate(name string) tea.Cmd {
 	return func() tea.Msg { return plCreateMsg{name: name} }
+}
+
+func emitPlLocalAdd(path string) tea.Cmd {
+	return func() tea.Msg { return plLocalAddMsg{path: path} }
 }
 
 func emitPlRename(oldName, newName string) tea.Cmd {
@@ -160,6 +169,7 @@ const (
 	plNaming                  // 命名输入（新建/重命名）
 	plSyncSetup               // YT Music 登录设置（含二级浏览器选择与输入子层）
 	plURLImport               // YT Music URL 导入输入框
+	plLocalAdd                // 本地路径导入输入框（l 键）
 )
 
 // setupSub 是登录设置视图的子状态。
@@ -275,6 +285,10 @@ func newPlaylistModel() playlistModel {
 //
 // 命名输入：Enter 提交、Esc 取消（字符键含 a/p 均让位输入框）；
 // URL 导入：Enter 提交（空值忽略）、Esc 返回概览；
+// 本地路径导入：Enter 提交（空值忽略，提交后留在输入框——失败由 root toast
+//
+//	提示可改路径重试，成功由 root 退出输入）、Esc 返回概览；
+//
 // 登录设置：主菜单/浏览器二级列表 Enter 确认、Esc 返回上一层，
 //
 //	输入子层 Enter 提交、Esc 返回菜单；
@@ -352,6 +366,19 @@ func (p playlistModel) Update(msg tea.Msg) (playlistModel, tea.Cmd) {
 			case "esc":
 				return p.exitURLImport(), nil
 			}
+		case plLocalAdd:
+			switch msg.String() {
+			case "enter":
+				path := strings.TrimSpace(p.input.Value())
+				if path == "" {
+					return p, nil // 空值忽略（留在输入框）
+				}
+				// 提交后留在输入框：失败（root toastError）可直接改路径重试；
+				// 成功由 root 的 plLocalAddMsg 分支调用 exitLocalAdd 退出。
+				return p, emitPlLocalAdd(path)
+			case "esc":
+				return p.exitLocalAdd(), nil
+			}
 		case plDetail:
 			switch msg.String() {
 			case "enter", "p":
@@ -403,12 +430,14 @@ func (p playlistModel) Update(msg tea.Msg) (playlistModel, tea.Cmd) {
 				return p, emitYtSyncAll()
 			case "u":
 				return p.enterURLImport(), nil
+			case "l":
+				return p.beginLocalAdd(), nil
 			}
 		}
 	}
 	var cmd tea.Cmd
 	switch p.mode {
-	case plNaming, plURLImport:
+	case plNaming, plURLImport, plLocalAdd:
 		p.input, cmd = p.input.Update(msg)
 	case plSyncSetup:
 		if p.setupSub == setupCookiesInput || p.setupSub == setupPasteInput {
@@ -610,6 +639,25 @@ func (p playlistModel) exitURLImport() playlistModel {
 	return p
 }
 
+// beginLocalAdd 进入本地路径导入输入框（l 键）。
+func (p playlistModel) beginLocalAdd() playlistModel {
+	p.mode = plLocalAdd
+	p.input.SetValue("")
+	p.input.Placeholder = "输入本地路径（音频文件或目录），Enter 扫描"
+	p.input.CursorEnd()
+	p.input.Focus()
+	return p
+}
+
+// exitLocalAdd 退出本地路径导入回概览。
+func (p playlistModel) exitLocalAdd() playlistModel {
+	if p.mode == plLocalAdd {
+		p.mode = plOverview
+		p.input.Blur()
+	}
+	return p
+}
+
 // submitNaming 提交命名输入：新建（namingOld 为空）或重命名。
 func (p playlistModel) submitNaming() tea.Cmd {
 	name := strings.TrimSpace(p.input.Value())
@@ -620,10 +668,10 @@ func (p playlistModel) submitNaming() tea.Cmd {
 }
 
 // typing 返回是否有输入框聚焦（root 让字符类全局键 p/空格/q 让位）。
-// 命名输入、URL 导入、登录设置的 cookies/粘贴输入子层均算聚焦。
+// 命名输入、URL 导入、本地路径导入、登录设置的 cookies/粘贴输入子层均算聚焦。
 func (p playlistModel) typing() bool {
 	switch p.mode {
-	case plNaming, plURLImport:
+	case plNaming, plURLImport, plLocalAdd:
 		return true
 	case plSyncSetup:
 		return p.setupSub == setupCookiesInput || p.setupSub == setupPasteInput
@@ -673,7 +721,7 @@ func (p playlistModel) setSize(width, height int) playlistModel {
 	return p
 }
 
-// view 渲染播放列表页（概览/详情/命名输入/登录设置/URL 导入五态，
+// view 渲染播放列表页（概览/详情/命名输入/登录设置/URL 导入/本地路径导入六态，
 // 底部快捷键提示 faint；概览顶部渲染 YT Music 状态区，空列表时也显示）。
 func (p playlistModel) view() string {
 	switch p.mode {
@@ -682,6 +730,9 @@ func (p playlistModel) view() string {
 	case plURLImport:
 		return p.overview.View() + "\n\n" + p.input.View() + "\n" +
 			lipgloss.NewStyle().Faint(true).Render("Enter 导入 · Esc 返回")
+	case plLocalAdd:
+		return p.overview.View() + "\n\n" + p.input.View() + "\n" +
+			lipgloss.NewStyle().Faint(true).Render("Enter 扫描 · Esc 返回")
 	case plSyncSetup:
 		return p.setupView()
 	case plDetail:
@@ -698,7 +749,7 @@ func (p playlistModel) view() string {
 		}
 		return bottomHint(p.height, p.detail.View(), hint)
 	default:
-		hint := "Enter 查看 · p 播放 · n 新建 · r 重命名 · d 删除 · s 登录设置 · y 同步全部 · u 导入"
+		hint := "Enter 查看 · p 播放 · n 新建 · r 重命名 · d 删除 · s 登录设置 · y 同步全部 · u 导入 · l 本地"
 		content := p.ytStatusBlock()
 		if len(p.lists) == 0 {
 			content += "\n" + lipgloss.NewStyle().

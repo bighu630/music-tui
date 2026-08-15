@@ -3192,3 +3192,283 @@ func TestCacheFallbackPauseCancelRefreshesPreload(t *testing.T) {
 		t.Errorf("取消兜底后预加载目标应清空: got %+v, want nil", m.preloader.Target())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 本地曲目（Source=local）播放链路完全绕过网络缓存
+// ---------------------------------------------------------------------------
+// 本地文件已在磁盘，缓存命中/下载/兜底对本地曲目无意义：beginPlay 不查
+// Lookup、不注册 WaitDone 兜底监听；TrackStarted 不预热；预加载不预载本地
+// 下一首；续播恢复不查 Lookup。cache 层 CacheAsync 另有 Source=local no-op
+// 防御（cache/cache_test.go TestCacheAsyncLocalTrackNoOp）。
+
+// localTestTrack 构造本地曲目：ID/URL 均为绝对路径（与 local 包扫描产物
+// 同构），播放链路应直接交给 mpv 播放、完全不触碰网络缓存。
+func localTestTrack() model.Track {
+	return model.Track{
+		ID:       "/data/music/测试本地歌曲.mp3",
+		Title:    "测试本地歌曲",
+		Artist:   "测试歌手",
+		Duration: 200,
+		URL:      "/data/music/测试本地歌曲.mp3",
+		Source:   model.SourceLocal,
+		CoverURL: "",
+	}
+}
+
+// beginPlay 本地曲目：不查 Lookup（playingFromCache 恒 false，mpv 直接播放
+// 本地绝对路径）、不注册 WaitDone 兜底监听。验证手法：预置同名 ID 的在途下载
+// （假 yt-dlp 50ms 后落盘成功）——若 beginPlay 误注册 WaitDone 监听，下载完成
+// 信号到达后缓存兜底分支会命中缓存并重播本地文件（playCount=2 + “已改用缓存
+// 文件” toast）；正确实现则无监听、无重播（防未来调用点对本地曲目启动下载的
+// 极端场景）。
+func TestBeginPlayLocalTrackSkipsCache(t *testing.T) {
+	m, fp, cm, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpOK(t))
+	tr := localTestTrack()
+
+	// 伪造同名 ID 的在途下载（Source=youtube，仅 ID 与本地曲目相同）：
+	// beginPlay 若误查 WaitDone 会拿到该信号并注册兜底监听
+	done := cm.CacheAsync(model.Track{ID: tr.ID, URL: "https://youtube.com/watch?v=x"})
+	if done == nil {
+		t.Fatal("前置：应在途下载")
+	}
+	if cm.WaitDone(tr.ID) == nil {
+		t.Fatal("前置：inflight 应已注册")
+	}
+
+	m, cmd := m.startPlay(tr)
+	// 展开 batch 并回灌结果（测试驱动方式，与既有缓存测试一致）：
+	// 若本地曲目误注册了 WaitDone 监听，这里会等到下载完成并触发缓存兜底重播
+	m, _ = update(m, cmd().(tea.BatchMsg))
+	if fp.playCount() != 1 || fp.lastPlayed() != tr.URL {
+		t.Fatalf("本地曲目应直接播放本地绝对路径且不触发缓存兜底重播: playCount=%d lastPlayed=%q, want 1/%q", fp.playCount(), fp.lastPlayed(), tr.URL)
+	}
+	if m.playingFromCache {
+		t.Error("本地曲目 playingFromCache 应为 false（跳过 Lookup）")
+	}
+	if strings.Contains(activeToastText(m), "已改用缓存文件") {
+		t.Errorf("本地曲目不应注册 WaitDone 兜底监听: toast = %q", activeToastText(m))
+	}
+}
+
+// TrackStartedEvent 预热：本地曲目不触发 CacheAsync（网络缓存对本地文件无意义）。
+// 假 yt-dlp 脚本记录调用：播放本地曲目 + TrackStarted 后不得有任何下载调用，
+// 也不得产生 inflight 条目。
+func TestTrackStartedLocalSkipsCacheWarmup(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	logPath := filepath.Join(t.TempDir(), "ytdlp.log")
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, writeFakeYtDlpScript(t, logPath), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newTestModelBaseWithCache(t, fp, fa, nil, nil, cm)
+	tr := localTestTrack()
+
+	m, cmd := m.startPlay(tr)
+	_ = execCmds(cmd)
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	time.Sleep(200 * time.Millisecond) // 若误触发下载，假脚本会立即执行
+	if got := ytDlpCallCount(logPath); got != 0 {
+		t.Fatalf("本地曲目 TrackStarted 后不应触发缓存预热下载, calls = %d", got)
+	}
+	if done := cm.WaitDone(tr.ID); done != nil {
+		t.Fatalf("本地曲目不应产生 inflight 下载条目")
+	}
+}
+
+// refreshPreload：队列下一首是本地曲目时不 SetTarget——本地文件无需预下载
+// （预载目标保持空，不跳过本地曲目向后找下一首网络曲目）。
+func TestPreloadLocalNextSkipsTarget(t *testing.T) {
+	fp := newFakePlayer()
+	m := preloadTestModel(t, fp)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	// 追加本地曲目为下一首 + TrackStarted：PeekNext 命中本地曲目 → 不设目标
+	m, _ = update(m, trackAppendMsg{track: localTestTrack()})
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	if got := targetID(m); got != "" {
+		t.Fatalf("本地下一首不应设置预加载目标, got %q, want 空", got)
+	}
+	// 再追加一首网络曲目：下一首仍为本地曲目 → 目标保持空（不跳过本地向后找）
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
+	if got := targetID(m); got != "" {
+		t.Fatalf("下一首为本地曲目时预加载目标应保持空, got %q", got)
+	}
+}
+
+// 续播恢复：本地曲目跳过缓存 Lookup（fromCache 恒 false，直接 PlayPaused
+// 本地绝对路径）——即使缓存中预置了同名条目也不得命中（本地文件不参与缓存，
+// 命中会错误地把播放目标替换成缓存文件路径）。
+func TestResumeLocalTrackSkipsCacheLookup(t *testing.T) {
+	tr := localTestTrack()
+	q := queue.New()
+	q.Replace(tr)
+	q.Add(testTrack("c")) // 下一首：保证队列非空，恢复路径正常建立
+	st := &session.State{Queue: q.Snapshot(), Position: 10, Ended: false}
+	m, fp, cm, dir := newCacheTestModelWithYtdlp(t, st, "/nonexistent/yt-dlp")
+
+	// 预置同名缓存条目：若 resumeCmd 误查 Lookup 会命中并播放缓存文件
+	presetCache(t, cm, dir, tr.ID)
+
+	msgs := execCmds(resumeCmd(m))
+	var res resumeResultMsg
+	for _, msg := range msgs {
+		if r, ok := msg.(resumeResultMsg); ok {
+			res = r
+		}
+	}
+	if res.fromCache {
+		t.Fatal("本地曲目恢复 fromCache 应为 false（跳过 Lookup）")
+	}
+	if fp.pausedCount() != 1 || fp.lastPaused() != tr.URL {
+		t.Fatalf("恢复应 PlayPaused 本地绝对路径: paused=%d last=%q, want %q", fp.pausedCount(), fp.lastPaused(), tr.URL)
+	}
+	m, _ = update(m, msgs[0])
+	if m.playingFromCache {
+		t.Error("本地曲目恢复后 playingFromCache 应为 false")
+	}
+}
+
+// ---- 播放列表本地路径导入（root 编排：plLocalAddMsg → local.Scan → AddTracks） ----
+
+// 本地路径导入成功：扫描目录 → 歌曲加入选中列表 → 成功 toast + 列表页刷新 + 退出输入。
+func TestPlaylistLocalAddMsgSuccess(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := m.pl.Create("本地歌单"); err != nil {
+		t.Fatal(err)
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+
+	dir := t.TempDir()
+	for _, f := range []string{"a.mp3", "b.flac", "c.mp3"} {
+		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 无关扩展名被 local.Scan 过滤
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟真实流程：先按 l 进入输入模式（成功后退出输入由 root 完成）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if m.plPage.mode != plLocalAdd {
+		t.Fatal("l 后应进入本地路径输入模式")
+	}
+	m, _ = update(m, plLocalAddMsg{path: dir}) // toast 过期 tick cmd 忽略（同既有测试）
+	if got := activeToastText(m); got != fmt.Sprintf("已从 %s 添加 3 首到「本地歌单」", dir) {
+		t.Errorf("toast = %q, want 已从 %s 添加 3 首到「本地歌单」", got, dir)
+	}
+	trs := m.pl.Tracks("本地歌单")
+	if len(trs) != 3 || trs[0].Source != model.SourceLocal {
+		t.Fatalf("添加后歌曲 = %+v, want 3 首本地来源", trs)
+	}
+	if m.plPage.mode != plOverview || m.plPage.typing() {
+		t.Errorf("成功后应退出输入回概览: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+	// 概览计数刷新
+	if !strings.Contains(stripANSI(m.plPage.view()), "3 首") {
+		t.Errorf("列表页应显示 3 首, got %q", stripANSI(m.plPage.view()))
+	}
+}
+
+// 本地路径导入：单文件路径 → 1 首入库。
+func TestPlaylistLocalAddMsgSingleFile(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := m.pl.Create("本地歌单"); err != nil {
+		t.Fatal(err)
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+	file := filepath.Join(t.TempDir(), "solo.mp3")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = update(m, plLocalAddMsg{path: file})
+	if got := activeToastText(m); got != fmt.Sprintf("已从 %s 添加 1 首到「本地歌单」", file) {
+		t.Errorf("toast = %q, want 已从 %s 添加 1 首到「本地歌单」", got, file)
+	}
+	if trs := m.pl.Tracks("本地歌单"); len(trs) != 1 || trs[0].URL != file {
+		t.Fatalf("添加后歌曲 = %+v, want 1 首（URL=文件绝对路径）", trs)
+	}
+}
+
+// 本地路径导入失败：路径不存在 → toastError、不加歌、留在输入模式（可重试）。
+func TestPlaylistLocalAddMsgFailure(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := m.pl.Create("本地歌单"); err != nil {
+		t.Fatal(err)
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+	missing := filepath.Join(t.TempDir(), "不存在.mp3")
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, plLocalAddMsg{path: missing})
+	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "路径不存在") {
+		t.Errorf("toast = %+v, want toastError 且含路径不存在", m.toast)
+	}
+	if len(m.pl.Tracks("本地歌单")) != 0 {
+		t.Error("失败不应添加歌曲")
+	}
+	if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
+		t.Errorf("失败应留在输入框可重试: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+}
+
+// 本地路径导入无目标列表：无选中项 → toastError、不加歌。
+func TestPlaylistLocalAddMsgNoSelection(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	// 未创建任何列表（概览无选中项）
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.mp3"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, plLocalAddMsg{path: dir})
+	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "选择") {
+		t.Errorf("toast = %+v, want toastError 且提示先选择列表", m.toast)
+	}
+	if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
+		t.Errorf("无目标应留在输入框: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+}
+
+// 本地路径输入模式（plLocalAdd）下数字键让位给输入框：路径含数字极常见
+// （如 "/Music/2024/03 - 歌曲.mp3"），数字切页会打断输入（其余页面输入框
+// 保持"数字始终切页"的既有语义，TestTabSwitchesPages 回归）。
+func TestPlaylistLocalAddDigitsTypeNotSwitchPage(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")}) // 切到播放列表页
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")}) // 进入本地路径输入
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("0")})
+	if m.current != pagePlaylists {
+		t.Fatalf("本地路径输入时按 2/0 不应切页: current=%v", m.current)
+	}
+	if got := m.plPage.input.Value(); got != "20" {
+		t.Errorf("input = %q, want %q", got, "20")
+	}
+	// 输入模式之外数字仍切页（既有语义不回归）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
+	if m.current != pageHistory {
+		t.Errorf("退出输入后按 5 应切到历史页, got %v", m.current)
+	}
+}
+
+// 本地曲目取流失败（LoadFailed）：不进入缓存兜底（本地文件失败 = 文件损坏/
+// 被删，无下载可兜——cache 层 CacheAsync 对 local 是 no-op，root 层显式跳过
+// 与 beginPlay/resumeCmd 口径一致），直接走重试/跳过链路。
+func TestErrorEventLocalSkipsCacheFallback(t *testing.T) {
+	m, _, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpOK(t))
+	m, _ = update(m, trackSelectedMsg{track: localTestTrack()})
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if m.fallback.active {
+		t.Fatal("本地曲目取流失败不应进入缓存兜底等待")
+	}
+	// 走重试链路（本地文件损坏重试无意义但无害，与失败曲目统一处理）：
+	// 不启动任何下载（兜底分支是唯一会启动下载的路径，已排除）
+	if !m.loadingSince.IsZero() {
+		t.Error("失败后不应处于加载中")
+	}
+}

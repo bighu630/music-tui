@@ -457,6 +457,35 @@ func callCounterBody() string {
 echo x >> "$(dirname "$out")/calls"`
 }
 
+// 本地曲目（Source=local）不参与缓存下载：CacheAsync 必须 no-op——文件已在
+// 本地，网络缓存/下载对本地文件无意义。此为 cache 层防御：即使未来有调用点
+// 误把本地曲目交给 CacheAsync，也不得启动下载（把本地路径交给 yt-dlp 只会
+// 无谓失败）。断言：返回 nil（无完成信号）、无 inflight、yt-dlp 未被调用、
+// 索引无条目。
+func TestCacheAsyncLocalTrackNoOp(t *testing.T) {
+	dir := t.TempDir()
+	callsFile := filepath.Join(dir, "calls")
+	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+		writeFakeYtDlp(t, fakeYtDlpBody(fakeAudioOut+"\n"+callCounterBody())))
+	tr := model.Track{ID: "/data/music/本地.mp3", URL: "/data/music/本地.mp3", Source: model.SourceLocal}
+	if done := cm.CacheAsync(tr); done != nil {
+		t.Fatalf("本地曲目 CacheAsync 应返回 nil（no-op），got %v", done)
+	}
+	if done := cm.WaitDone(tr.ID); done != nil {
+		t.Fatalf("本地曲目不应产生 inflight 下载，WaitDone 应返回 nil")
+	}
+	time.Sleep(100 * time.Millisecond) // 若错误启动下载，假脚本会立即执行
+	if _, err := os.Stat(callsFile); !os.IsNotExist(err) {
+		t.Fatalf("本地曲目不应调用 yt-dlp（calls 文件被创建）")
+	}
+	if _, ok := cm.Lookup(tr.ID); ok {
+		t.Fatalf("本地曲目不应产生缓存条目（Lookup 命中）")
+	}
+	if cm.idx.len() != 0 {
+		t.Fatalf("本地曲目不应写索引条目，len = %d", cm.idx.len())
+	}
+}
+
 func TestCacheAsyncDedupSameID(t *testing.T) {
 	dir := t.TempDir()
 	callsFile := filepath.Join(dir, "calls")
