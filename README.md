@@ -4,7 +4,8 @@
 
 > A terminal music player for YouTube, built with Go & Bubble Tea — search, queue, synced lyrics, playlists and history, all in one TUI.
 
-<video src="media/demo.mp4" controls></video>
+<video src="media/demo.mp4" controls="controls" style="max-width: 100%; display: block; margin: 0 auto;"></video>
+
 
 ## ✨ 功能特性
 
