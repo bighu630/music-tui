@@ -1684,6 +1684,30 @@ func TestStatusBarLayout(t *testing.T) {
 	}
 }
 
+// TestStatusBarNarrowWindowFits 回归：极端窄窗口（宽度 < 右侧顺序文本）下右侧
+// 截断兜底，状态栏恒 1 行不折行（曾因右侧永不截断致行宽 > 窗口宽度折行）。
+func TestStatusBarNarrowWindowFits(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("一首名字特别长特别长特别长特别长特别长特别长的歌"))
+	_ = execCmds(cmd)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 10, Height: 24})
+	m = m.switchPage("2") // 队列页
+
+	bar := m.statusBarView()
+	if strings.Contains(bar, "\n") {
+		t.Errorf("状态栏必须恒为 1 行不折行, got %q", bar)
+	}
+	if w := ansi.StringWidth(bar); w > 10 {
+		t.Errorf("极窄窗口(10)状态栏行宽 = %d, want ≤ 10", w)
+	}
+	// 经 View 渲染的末行也不得超出窗口宽度（折行残片会出现在末行）
+	lines := strings.Split(m.View(), "\n")
+	if last := lines[len(lines)-1]; ansi.StringWidth(last) > 10 {
+		t.Errorf("View 末行行宽 = %d, want ≤ 10", ansi.StringWidth(last))
+	}
+}
+
 // TestToastLifecycle 集成：showToast 覆盖语义 + 过期消息 id 匹配/不匹配。
 func TestToastLifecycle(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)

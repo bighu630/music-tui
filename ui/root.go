@@ -983,6 +983,14 @@ func (m Model) statusBarView() string {
 	rightRendered := style.Render(right)
 	rightW := ansi.StringWidth(rightRendered)
 	leftMax := m.width - rightW - 1
+	// 极端窄窗口（宽度小于右侧顺序文本）：左侧已无可截断空间，右侧截断兜底，
+	// 保证状态栏恒 1 行不折行（与 overlayToast 的 width≤2 兜底同模式）。
+	if rightW >= m.width {
+		right = ansi.Truncate(right, m.width, "…")
+		rightRendered = style.Render(right)
+		rightW = ansi.StringWidth(rightRendered)
+		leftMax = m.width - rightW - 1
+	}
 	if leftMax < 0 {
 		leftMax = 0
 	}
