@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"music-tui/model"
 )
@@ -47,10 +48,15 @@ func NewEnhancedClient(l *Client, ai *OpenAIClient, cacheDir string) (*EnhancedC
 	return &EnhancedClient{lrclib: l, ai: ai, aiCache: aiCache, lrcCache: lrcCache}, nil
 }
 
+// aiIdentifyBudget AI 识别子预算：大模型首 token 慢（实测 qwen3.7-plus
+// 11s），独立限时防止吃光 30s 总预算饿死严格重查/确定性兜底；
+// 包级变量（测试可调小）。
+var aiIdentifyBudget = 15 * time.Second
+
 // Fetch 执行 AI 优先的增强匹配流程（用户确认：所有歌词请求都走 AI 判断）：
 //  1. AI 未配置 → 纯确定性匹配（行为与无增强一致）；
-//  2. AI 识别（结果缓存优先 + single-flight）失败/非歌曲/空标题 →
-//     确定性匹配兜底（Title/Artist 空，与纯确定性一致）；
+//  2. AI 识别（结果缓存优先 + single-flight，子预算 aiIdentifyBudget）
+//     失败/非歌曲/空标题 → 确定性匹配兜底（Title/Artist 空）；
 //  3. AI 识别成功 → 歌词缓存命中直接返回；否则严格重查 lrclib
 //     （get 优先，search ≤3s）→ 命中入缓存并返回；
 //  4. 严格重查未命中（ErrNotFound）→ 确定性多候选兜底（30s 阈值）
@@ -63,7 +69,9 @@ func (e *EnhancedClient) Fetch(ctx context.Context, track model.Track) (FetchRes
 	if e.ai == nil {
 		return e.lrclib.Fetch(ctx, track)
 	}
-	res, ok := e.identify(ctx, track)
+	aiCtx, cancel := context.WithTimeout(ctx, aiIdentifyBudget)
+	defer cancel()
+	res, ok := e.identify(aiCtx, track)
 	if !ok || !res.IsSong || strings.TrimSpace(res.Title) == "" {
 		// AI 失败/非歌曲/空标题：确定性匹配兜底（与无 AI 行为一致）
 		return e.lrclib.Fetch(ctx, track)

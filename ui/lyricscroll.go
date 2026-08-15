@@ -43,7 +43,7 @@ func lyricScrollOffset(idx, n int) int {
 		off = 0
 	}
 	if off > n-1 {
-		off = n-1
+		off = n - 1
 	}
 	return off
 }

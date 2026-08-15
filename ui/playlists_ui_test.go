@@ -14,8 +14,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"music-tui/model"
-	"music-tui/playlists"
 	"music-tui/player"
+	"music-tui/playlists"
 	"music-tui/ytm"
 )
 
