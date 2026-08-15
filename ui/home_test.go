@@ -710,6 +710,11 @@ func TestHomeLyricsCenteredWhenFew(t *testing.T) {
 	if first < 10 || first > 22 {
 		t.Errorf("歌词首行出现在行 %d, want 中间区中部（10~22）", first)
 	}
+
+	// 方案 A：视口不收缩（统一 padding 模型），5 行歌词时首行仍在视口中央
+	if got := m.home.lyricView.Height; got != 21 {
+		t.Errorf("歌词少时视口高 = %d, want 21（不再收缩）", got)
+	}
 }
 
 // TestHomeLyricsFillWhenMany 歌词行数多于视口高时占满歌词列（滚动语义不变）。
@@ -841,8 +846,8 @@ func TestHomeLyricsViewport21(t *testing.T) {
 	}
 	// 当前行推进 → 滚动到正中（上下各 10 行）
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 155, Duration: 2000}})
-	if got := m.home.lyricView.YOffset; got != 19 { // LineAt(155)=29 → 29-10
-		t.Errorf("YOffset = %d, want 19", got)
+	if got := m.home.lyricView.YOffset; got != 29 { // LineAt(155)=29 → YOffset=29（padding 模型，当前行恒在视口中央）
+		t.Errorf("YOffset = %d, want 29", got)
 	}
 }
 
@@ -864,15 +869,16 @@ func TestHomeLyricsCurrentLineCentered(t *testing.T) {
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
 	m.home = m.home.setSize(120, 60)
 
-	// 第 30 行（0-based 29，155s）：offset = 29 - 10 = 19 → 当前行在视口第 10 行（正中）
+	// 第 30 行（0-based 29，155s）：YOffset = 29（内容含 H/2=10 行前导空白，当前行显示在视口第 10 行正中）
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 155, Duration: 2000}})
-	if got := m.home.lyricView.YOffset; got != 19 {
-		t.Errorf("第 30 行 YOffset = %d, want 19（视口正中）", got)
+	if got := m.home.lyricView.YOffset; got != 29 {
+		t.Errorf("第 30 行 YOffset = %d, want 29（视口正中）", got)
 	}
-	// 第 50 行（idx 49）：offset = 49-10 = 39 = maxYOffset（59-21+1？60-21=39）→ 底部
+	// 末行（LineAt(495) = idx 59，305s ≤ 495）：YOffset = clamp(59, 0, N−1=59) = 59
+	// （padding 模型末行停中央；旧模型 59−10=49 被 viewport clamp 到 39 贴底）
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 495, Duration: 2000}})
-	if got := m.home.lyricView.YOffset; got != 39 {
-		t.Errorf("第 50 行 YOffset = %d, want 39（maxYOffset）", got)
+	if got := m.home.lyricView.YOffset; got != 59 {
+		t.Errorf("末行 YOffset = %d, want 59（padding 模型末行停中央）", got)
 	}
 	// 首行（第一行 10s 后）：offset = 0-10 → clamp 到 0
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
@@ -1023,25 +1029,25 @@ func TestHomeLyricsAISourceTag(t *testing.T) {
 	}
 }
 
-// TestHomeLyricsHeightReservesAITag AI 来源标识占 1 行：视口最高收缩，
-// 防止歌词列溢出推挤底部控制栏（窄窗口 + 长歌词场景）。
+// TestHomeLyricsHeightReservesAITag AI 来源标识占 1 行：padding 模型下视口
+// 自带上下留白（H = midH−4），AI 标识行 + 视口内容 ≤ midH，不推挤底部控制栏。
 func TestHomeLyricsHeightReservesAITag(t *testing.T) {
 	build := func(source string, lineCount int) homeModel {
 		ly, _ := lyrics.ParseLRC([]byte(strings.Repeat("[00:01.00]行\n", lineCount)))
 		ly.Source = source
 		return homeModel{lyrics: ly, lyricsState: lyricsSynced, height: 23}
 	}
-	// 非 AI：视口可占满 midH=21
-	if h := build("", 100).lyricsHeight(); h != 21 {
-		t.Errorf("非 AI lyricsHeight = %d, want 21", h)
+	// midH=21 → H = min(21, 21−4) = 17；AI 标识 1 行 + 视口 17 行 = 18 ≤ 21，不溢出
+	if h := build("", 100).lyricsHeight(); h != 17 {
+		t.Errorf("非 AI lyricsHeight = %d, want 17", h)
 	}
-	// AI：视口最多 midH-1=20，标识行不溢出
-	if h := build(lyrics.LyricsSourceAI, 100).lyricsHeight(); h != 20 {
-		t.Errorf("AI lyricsHeight = %d, want 20（预留标识行）", h)
+	// AI：同样 17（留白已保证标识行不溢出，无需再按来源减行）
+	if h := build(lyrics.LyricsSourceAI, 100).lyricsHeight(); h != 17 {
+		t.Errorf("AI lyricsHeight = %d, want 17（留白模型已防溢出）", h)
 	}
-	// AI + 行数少：视口仍收缩到行数（标识行 + 内容 ≤ midH）
-	if h := build(lyrics.LyricsSourceAI, 5).lyricsHeight(); h != 5 {
-		t.Errorf("AI 少行 lyricsHeight = %d, want 5", h)
+	// AI + 行数少：方案 A 不收缩视口（N < H 时首行仍居中，统一 padding 模型）
+	if h := build(lyrics.LyricsSourceAI, 5).lyricsHeight(); h != 17 {
+		t.Errorf("AI 少行 lyricsHeight = %d, want 17（不收缩）", h)
 	}
 	// 极窄窗口：视口至少 1 行，不归零
 	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
@@ -1085,5 +1091,164 @@ func TestHomeControlBarShowsAITitle(t *testing.T) {
 	}
 	if strings.Contains(got2, "晴天") {
 		t.Errorf("切歌后 AI 覆盖应清空: %q", got2)
+	}
+}
+
+// TestHomeLyricsFirstAndLastLineCentered 核心需求：首行歌词起步于视口中央、
+// 末行歌词停在视口中央（N > H 长歌词）。
+func TestHomeLyricsFirstAndLastLineCentered(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	var sb strings.Builder
+	for i := 0; i < 60; i++ {
+		sb.WriteString(fmt.Sprintf("[%02d:%02d.00]歌词行", (10+i*5)/60, (10+i*5)%60))
+		sb.WriteString(string(rune('A' + i%26)))
+		sb.WriteString("\n")
+	}
+	ly, _ := lyrics.ParseLRC([]byte(sb.String()))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m.home = m.home.setSize(120, 39) // midH=37 → H=21，视口外留白 (37-21)/2=8
+
+	// 视口中央行（view 内坐标，页面行 = view 行 + 3 顶部行）：
+	// = 8（留白 (37-21)/2）+ 10（H/2）= 18
+	centerRow := (37-21)/2 + 10
+
+	// 首行（10s 内 idx=0）：首行歌词显示在中央行
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
+	if got := m.home.lyricView.YOffset; got != 0 {
+		t.Fatalf("首行 YOffset = %d, want 0", got)
+	}
+	lines := strings.Split(m.home.view(), "\n")
+	firstRow := -1
+	for i, ln := range lines {
+		if strings.Contains(stripAnsiForTest(ln), "歌词行A") {
+			firstRow = i
+			break
+		}
+	}
+	if firstRow != centerRow {
+		t.Errorf("首行歌词出现在行 %d, want %d（视口中央）", firstRow, centerRow)
+	}
+	// 中央行上方应为空白（无任何歌词文本）
+	for i := 0; i < centerRow; i++ {
+		if strings.Contains(stripAnsiForTest(lines[i]), "歌词行") {
+			t.Errorf("中央行上方第 %d 行不应有歌词", i)
+		}
+	}
+
+	// 末行（idx=59）：末行歌词停在中央行
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 495, Duration: 2000}})
+	if got := m.home.lyricView.YOffset; got != 59 {
+		t.Fatalf("末行 YOffset = %d, want 59", got)
+	}
+	lines = strings.Split(m.home.view(), "\n")
+	lastRow := -1
+	for i, ln := range lines {
+		if strings.Contains(stripAnsiForTest(ln), "歌词行H") { // idx 59 → 'A'+59%26 = 'H'
+			lastRow = i
+			break
+		}
+	}
+	if lastRow != centerRow {
+		t.Errorf("末行歌词出现在行 %d, want %d（视口中央）", lastRow, centerRow)
+	}
+}
+
+// TestHomeLyricsFewLinesScroll 方案 A：N < H 时视口不收缩，首行与末行都在
+// 视口中央，播放推进滚动 N−1 行。
+func TestHomeLyricsFewLinesScroll(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n[00:30.00]第三行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m.home = m.home.setSize(120, 39) // H=21 > N=3
+
+	if got := m.home.lyricView.Height; got != 21 {
+		t.Fatalf("视口高 = %d, want 21（N<H 不收缩）", got)
+	}
+	// 首行（idx=0）：YOffset=0，第一行在视口中央
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
+	if got := m.home.lyricView.YOffset; got != 0 {
+		t.Errorf("首行 YOffset = %d, want 0", got)
+	}
+	// 末行（idx=2）：YOffset=2，第三行停在视口中央
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 32, Duration: 2000}})
+	if got := m.home.lyricView.YOffset; got != 2 {
+		t.Errorf("末行 YOffset = %d, want 2", got)
+	}
+	// 方案 A：N<H 时首末行都在视口中央（view 内坐标 8+10=18）
+	centerRow := (37-21)/2 + 10
+	lines := strings.Split(m.home.view(), "\n")
+	if !strings.Contains(stripAnsiForTest(lines[centerRow]), "第三行") {
+		t.Errorf("末行应显示在中央行 %d: %q", centerRow, lines[centerRow])
+	}
+}
+
+// TestHomeLyricsMinWhitespace 窗口较小时上下留白至少 2 行（视口外），
+// 视口行数动态收缩。
+func TestHomeLyricsMinWhitespace(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	var sb strings.Builder
+	for i := 0; i < 40; i++ {
+		sb.WriteString(fmt.Sprintf("[%02d:%02d.00]歌词行", (10+i*5)/60, (10+i*5)%60))
+		sb.WriteString(string(rune('A' + i%26)))
+		sb.WriteString("\n")
+	}
+	ly, _ := lyrics.ParseLRC([]byte(sb.String()))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+
+	for _, sz := range [][2]int{{80, 22}, {80, 16}, {80, 10}} { // midH = 20, 14, 8
+		m.home = m.home.setSize(sz[0], sz[1])
+		midH := sz[1] - 2
+		wantH := midH - 4
+		if wantH > 21 {
+			wantH = 21
+		}
+		if wantH < 1 {
+			wantH = 1
+		}
+		if got := m.home.lyricView.Height; got != wantH {
+			t.Errorf("%dx%d 视口高 = %d, want %d", sz[0], sz[1], got, wantH)
+		}
+		// 歌词列视口上下留白 ≥ 2（外层 Place 垂直居中 + 视口 H = midH−4）
+		topPad := 3 + (midH-wantH)/2 // 页面顶 3 行 + 列内上留白
+		if topPad < 5 {              // 3 + 2 = 5
+			t.Errorf("%dx%d 上留白 = %d, want ≥ 2 行", sz[0], sz[1], topPad-3)
+		}
+	}
+}
+
+// TestHomeLyricsResizeRepads 回归：resize 后 padding 随新视口高重建，
+// 首行仍显示在视口中央（此前只重算 YOffset 不重建内容，padding 模型下
+// 会残留旧 padding 导致首行偏移）。
+func TestHomeLyricsResizeRepads(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n[00:30.00]第三行\n[00:40.00]第四行\n[00:50.00]第五行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
+	m.home = m.home.setSize(120, 39) // H=21，首行在中央行
+	m.home = m.home.setSize(80, 20)  // midH=18 → H=14，padding 7
+
+	if got := m.home.lyricView.Height; got != 14 {
+		t.Fatalf("resize 后视口高 = %d, want 14", got)
+	}
+	centerRow := (18-14)/2 + 7 // view 内坐标：2（留白）+ 7（H/2）= 9（页面行 12）
+	lines := strings.Split(m.home.view(), "\n")
+	if !strings.Contains(stripAnsiForTest(lines[centerRow]), "第一行") {
+		t.Errorf("resize 后首行应显示在新中央行 %d: %q", centerRow, lines[centerRow])
 	}
 }

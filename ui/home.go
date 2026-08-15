@@ -379,7 +379,7 @@ func (m homeModel) setLyrics(err error, ly *lyrics.Lyrics) homeModel {
 		m.lyrics = ly
 		m.lyricsState = lyricsSynced
 		m.currentLine = -1
-		// 歌词到达后按行数收缩视口高度（行少时内容垂直居中）。
+		// 歌词到达后按动态公式设置视口高度（padding 模型，不随行数收缩）。
 		m.lyricView.Height = m.lyricsHeight()
 		m.rebuildLyrics()
 	} else {
@@ -427,57 +427,41 @@ func (m homeModel) setSize(width, height int) homeModel {
 	m.width, m.height = width, height
 	// 封面字符画固定 30×17、与终端尺寸无关：setSize 不清缓存不重渲。
 	// 歌词 viewport 尺寸 = 中间区歌词列尺寸：宽 = width-coverW-4（gap 2 + 边距 2），
-	// 高 = 歌词内容行数收缩后居中（见 lyricsHeight），窄窗口下不超过中间区高。
+	// 高 = 动态视口行数 min(21, 中间区高−上下各 2 行留白)（见 lyricsHeight），
+	// 窄窗口下自动收缩。
 	m.lyricView.Width = m.lyricsColumnWidth()
 	m.lyricView.Height = m.lyricsHeight()
-	// 视口高度可能已变化（歌词行数收缩），重算滚动偏移：此前基于
-	// 未知尺寸（Height=1）的 scrollLyricsTo 会留下越界 YOffset，
-	// 导致歌词首行被吞（回归：TestHomeLyricsCenteredWhenFew）。
-	if m.lyricsState == lyricsSynced && m.currentLine >= 0 {
-		m.scrollLyricsTo(m.currentLine)
+	// 视口高度可能已变化（留白/上限动态计算），先重建 padding 内容再重算
+	// 滚动偏移：此前基于未知尺寸（Height=1）的 scrollLyricsTo 会留下越界
+	// YOffset，导致歌词首行被吞（回归：TestHomeLyricsCenteredWhenFew）。
+	if m.lyricsState == lyricsSynced && m.lyrics != nil {
+		m.rebuildLyrics()
+		if m.currentLine >= 0 {
+			m.scrollLyricsTo(m.currentLine)
+		}
 	}
 	return m
 }
 
-// lyricLineCount 歌词总行数（synced = 同步歌词行数；plain = 纯文本行数；
-// 其他态 = 0）。用于歌词行数少于视口时收缩视口高度实现内容垂直居中。
-func (m homeModel) lyricLineCount() int {
-	if m.lyricsState == lyricsSynced && m.lyrics != nil {
-		return len(m.lyrics.Lines)
-	}
-	return 0
-}
-
-// lyricsHeight 歌词视口高度：歌词行数已知且少于中间区高时收缩到行数
-// （歌词列内容垂直居中，而非顶部对齐）；行数未知/超多时占满中间区
-// （viewport 滚动 + scrollLyricsTo 当前行居中）。
+// lyricsHeight 歌词视口高度：动态行数 min(21, 中间区高−上下各 2 行留白)，
+// 至少 1 行（见 lyricViewportHeight）。synced 态视口恒为 H（padding 模型，
+// 不随歌词行数收缩）；内容不足 H 时 viewport.View() 只输出实际行数，
+// 外层 Place 垂直居中——与旧的"收缩视口"视觉效果一致。
 func (m homeModel) lyricsHeight() int {
-	midH := m.middleHeight()
-	maxH := midH
-	if maxH > lyricMaxLines {
-		maxH = lyricMaxLines
-	}
-	// AI 来源标识占歌词列 1 行：视口最高收缩 1 行，避免标识 + 内容
-	// 溢出中间区推挤底部控制栏（回归：TestHomeLyricsHeightReservesAITag）。
-	if m.lyrics != nil && m.lyrics.Source == lyrics.LyricsSourceAI {
-		maxH--
-	}
-	if n := m.lyricLineCount(); n > 0 && n < maxH {
-		return n
-	}
-	if maxH < 1 {
-		return 1
-	}
-	return maxH
+	return lyricViewportHeight(m.middleHeight())
 }
 
-// rebuildLyrics 用当前高亮行重渲染歌词内容。
+// rebuildLyrics 用当前高亮行重渲染歌词内容：内容 = H/2 行空白 + 歌词行
+// + H/2 行空白（padding 模型，配合 scrollLyricsTo 使当前行恒在视口中央；
+// H 变化后必须重调本函数，padding 行数随 H/2 变化）。
 func (m *homeModel) rebuildLyrics() {
 	if m.lyrics == nil {
 		return
 	}
 	active := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	pad := m.lyricView.Height / 2
 	var sb strings.Builder
+	sb.WriteString(strings.Repeat("\n", pad))
 	for i, line := range m.lyrics.Lines {
 		text := line.Text
 		if i == m.currentLine {
@@ -486,21 +470,18 @@ func (m *homeModel) rebuildLyrics() {
 		sb.WriteString(text)
 		sb.WriteString("\n")
 	}
+	sb.WriteString(strings.Repeat("\n", pad))
 	m.lyricView.SetContent(strings.TrimSuffix(sb.String(), "\n"))
 }
 
-// scrollLyricsTo 让当前行保持在歌词区垂直居中附近。
+// scrollLyricsTo 让当前行保持在歌词区视口中央（padding 模型：YOffset = 当前行）。
+// 开头首行在中央（上方整片空白）、结尾末行停中央（下方可空白）；行数少时
+// 同样滚动 N−1 行，首末行都在中央。
 func (m *homeModel) scrollLyricsTo(idx int) {
-	if m.lyricView.Height <= 0 {
+	if m.lyricView.Height <= 0 || m.lyrics == nil {
 		return
 	}
-	// 当前行恒在视口正中（21 行视口 → 上下各 10 行）；行数不足时
-	// 收缩视口 + clamp 到 0（歌词块整体居中，当前行尽量居中）。
-	offset := idx - m.lyricView.Height/2
-	if offset < 0 {
-		offset = 0
-	}
-	m.lyricView.SetYOffset(offset)
+	m.lyricView.SetYOffset(lyricScrollOffset(idx, len(m.lyrics.Lines), m.lyricView.Height))
 }
 
 // view 渲染首页（全屏撑满：输出恰好 m.height 行）。

@@ -21,7 +21,7 @@
 
 - 新建 `ui/lyricscroll.go`：两个纯函数（视口高度、滚动偏移）。
 - 新建 `ui/lyricscroll_test.go`：纯函数单测（TDD Task 1 的核心）。
-- 修改 `ui/home.go`：`lyricsHeight`、`scrollLyricsTo`、`rebuildLyrics`、`setSize`；删除 `lyricLineCount`；常量 `lyricMaxLines` 保留、新增 `lyricPadLines`。
+- 修改 `ui/home.go`：`lyricsHeight`、`scrollLyricsTo`、`rebuildLyrics`、`setSize`；删除 `lyricLineCount`；常量 `lyricMaxLines`/`lyricPadLines` 移入 `ui/lyricscroll.go`（home.go 删除原定义）。
 - 修改 `ui/home_test.go`：更新 3 个既有断言的 YOffset 期望值（19→29、39→49）；新增集成测试。
 
 **背景知识（worker 必读）：**
@@ -99,8 +99,9 @@ func TestLyricScrollOffset(t *testing.T) {
 			t.Errorf("%s: lyricScrollOffset(%d,%d,%d) = %d, want %d", c.name, c.idx, c.n, c.h, got, c.wantOffset)
 			continue
 		}
-		// 核心不变量：当前行显示行 = h/2 + idx − offset 恒等于 h/2（视口中央）
-		if c.n > 0 {
+		// 核心不变量：当前行显示行 = h/2 + idx − offset 恒等于 h/2（视口中央）。
+		// 仅对合法 idx 成立（越界 idx 是 clamp 场景，不是真实歌词行）。
+		if c.n > 0 && c.idx >= 0 && c.idx < c.n {
 			if row := c.h/2 + c.idx - got; row != c.h/2 {
 				t.Errorf("%s: 当前行显示行 = %d, want %d（视口中央）", c.name, row, c.h/2)
 			}
@@ -173,8 +174,13 @@ Expected: PASS（2 个测试）
 
 - [ ] **Step 5: Commit**
 
+> 实现修正：`lyricMaxLines` 常量从 home.go 移入 lyricscroll.go 后，home.go 的
+> 常量定义必须在 Task 1 一并删除（同包重名无法编译），因此本 commit 额外
+> 包含 home.go 的常量删除（仅删定义行，lyricsHeight 引用自动落到新常量，
+> 行为不变）。
+
 ```bash
-git add ui/lyricscroll.go ui/lyricscroll_test.go
+git add ui/lyricscroll.go ui/lyricscroll_test.go ui/home.go
 git commit -m "feat(ui): 歌词居中滚动纯函数（视口动态行数 + 中央滚动偏移，TDD）"
 ```
 
@@ -206,6 +212,11 @@ git commit -m "feat(ui): 歌词居中滚动纯函数（视口动态行数 + 中�
 		t.Errorf("歌词少时视口高 = %d, want 21（不再收缩）", got)
 	}
 ```
+
+4. `TestHomeLyricsHeightReservesAITag`（计划遗漏，同步修正）：master 已含
+   feat/ai-lyrics（AI 来源标识减 1 行逻辑在 lyricsHeight 内），计划未覆盖。
+   新公式下该测试断言改为：midH=21 → H=17（非 AI 与 AI 相同，留白模型本身
+   保证 AI 标识 1 行 + 视口 17 行 = 18 ≤ midH 不溢出）；AI 少行也不再收缩（方案 A）。
 
 Run: `export PATH=$HOME/go-sdk/go/bin:$PATH && go test ./ui/ -run 'TestHomeLyrics' 2>&1 | tail -20`
 Expected: FAIL — YOffset 断言不匹配（红，符合 TDD）
@@ -307,6 +318,8 @@ Expected: 全部 PASS
 ```go
 // TestHomeLyricsFirstAndLastLineCentered 核心需求：首行歌词起步于视口中央、
 // 末行歌词停在视口中央（N > H 长歌词）。
+// 坐标修正：lines 来自 m.home.view()（不含顶部 3 行），centerRow 用 view 内
+// 坐标 = 留白 + H/2，不再加 3（计划初版误用页面坐标，恒差 3 行）。
 func TestHomeLyricsFirstAndLastLineCentered(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -323,8 +336,9 @@ func TestHomeLyricsFirstAndLastLineCentered(t *testing.T) {
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
 	m.home = m.home.setSize(120, 39) // midH=37 → H=21，视口外留白 (37-21)/2=8
 
-	// 视口中央行（页面内）= 3（顶部）+ 8（留白）+ 10（H/2）= 21
-	centerRow := 3 + (37-21)/2 + 10
+	// 视口中央行（view 内坐标，页面行 = view 行 + 3 顶部行）：
+	// = 8（留白 (37-21)/2）+ 10（H/2）= 18
+	centerRow := (37-21)/2 + 10
 
 	// 首行（10s 内 idx=0）：首行歌词显示在中央行
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
@@ -392,7 +406,8 @@ func TestHomeLyricsFewLinesScroll(t *testing.T) {
 	if got := m.home.lyricView.YOffset; got != 2 {
 		t.Errorf("末行 YOffset = %d, want 2", got)
 	}
-	centerRow := 3 + (37-21)/2 + 10
+	// 方案 A：N<H 时首末行都在视口中央（view 内坐标 8+10=18）
+	centerRow := (37-21)/2 + 10
 	lines := strings.Split(m.home.view(), "\n")
 	if !strings.Contains(stripAnsiForTest(lines[centerRow]), "第三行") {
 		t.Errorf("末行应显示在中央行 %d: %q", centerRow, lines[centerRow])
@@ -430,7 +445,6 @@ func TestHomeLyricsMinWhitespace(t *testing.T) {
 			t.Errorf("%dx%d 视口高 = %d, want %d", sz[0], sz[1], got, wantH)
 		}
 		// 歌词列视口上下留白 ≥ 2（外层 Place 垂直居中 + 视口 H = midH−4）
-		lines := strings.Split(m.home.view(), "\n")
 		topPad := 3 + (midH-wantH)/2 // 页面顶 3 行 + 列内上留白
 		if topPad < 5 {              // 3 + 2 = 5
 			t.Errorf("%dx%d 上留白 = %d, want ≥ 2 行", sz[0], sz[1], topPad-3)
@@ -456,7 +470,7 @@ func TestHomeLyricsResizeRepads(t *testing.T) {
 	if got := m.home.lyricView.Height; got != 14 {
 		t.Fatalf("resize 后视口高 = %d, want 14", got)
 	}
-	centerRow := 3 + (18-14)/2 + 7 // 3 + 2 + 7 = 12
+	centerRow := (18-14)/2 + 7 // view 内坐标：2（留白）+ 7（H/2）= 9（页面行 12）
 	lines := strings.Split(m.home.view(), "\n")
 	if !strings.Contains(stripAnsiForTest(lines[centerRow]), "第一行") {
 		t.Errorf("resize 后首行应显示在新中央行 %d: %q", centerRow, lines[centerRow])
@@ -492,4 +506,4 @@ git commit -m "feat(ui): 歌词区居中滚动排版——首行中央起步/末
 1. `go build ./...`、`go vet ./...`、`go test ./... -race` 全绿。
 2. 纯函数单测覆盖：N<H、N>H、idx=0、idx=N−1、中间、H=1/2、越界 clamp、N=0、留白边界（midH 24/21/10/5/4/3）。
 3. 集成测试覆盖：长歌词首末行都在视口中央（页面行 21）、N<H 滚动 N−1 行、小窗口留白 ≥ 2、resize 重建 padding。
-4. 不回归：`TestHomeLyricsCenteredWhenFew`/`FillWhenMany`/`Viewport21`/`CurrentLineCentered`/`WheelScroll`/`HorizontallyCentered`/`CenterFallback`/`ResizeRelayout`/`ViewNarrowWindow` 全过。
+4. 不回归：`TestHomeLyricsCenteredWhenFew`/`FillWhenMany`/`Viewport21`/`CurrentLineCentered`/`WheelScroll`/`HorizontallyCentered`/`CenterFallback`/`ResizeRelayout`/`ViewNarrowWindow`/`AISourceTag`/`HeightReservesAITag`（适配后）全过。
