@@ -963,6 +963,8 @@ func (m Model) saveSession() {
 // playingFromCache，异步 LoadFailedError 时据此移除损坏条目）；未命中 →
 // 播网络 URL，并触发后台下载（下载完成即缓存，下次恢复/播放走本地）。
 // IPC 层失败（PlayPaused 命令被拒）与缓存文件无关，不删条目。
+// CacheAsync 在 PlayPaused 之前触发，故 IPC 失败时下载仍会进行（缓存预热
+// 供下次恢复命中，与 beginPlay 一致），并非缺陷。
 func resumeCmd(m Model) tea.Cmd {
 	track := m.resume.track
 	pos := m.resume.pos

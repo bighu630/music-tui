@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -241,8 +242,11 @@ func TestResumeCachePreservedOnPlayPausedIpcError(t *testing.T) {
 // 并触发后台下载——与 beginPlay 的 CacheAsync 对齐：下载完成即缓存，下次
 // 恢复/播放直接走本地。
 func TestResumeCacheMissTriggersBackgroundDownload(t *testing.T) {
-	// 假 yt-dlp 提取直链 → httptest 音频 URL + m4a 扩展名；server 返回非零音频字节
+	// 假 yt-dlp 提取直链 → httptest 音频 URL + m4a 扩展名；server 返回非零音频字节。
+	// atomic 计数验证下载请求真实到达（与 cache/download_test.go handler 同款写法）。
+	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
 		w.Write([]byte("fake-audio-bytes"))
 	}))
 	t.Cleanup(srv.Close)
@@ -275,12 +279,25 @@ func TestResumeCacheMissTriggersBackgroundDownload(t *testing.T) {
 			if _, err := os.Stat(path); err != nil {
 				t.Fatalf("缓存文件应真实存在: %v", err)
 			}
+			// 下载请求确实到达 + 文件内容与 handler 返回体一致（防未来回归为写出空文件）
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("读取缓存文件: %v", err)
+			}
+			if !strings.Contains(string(data), "fake-audio-bytes") {
+				t.Errorf("缓存文件内容 = %q, want 含 fake-audio-bytes", data)
+			}
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("恢复播放未命中应触发后台下载并完成缓存（3s 内未见缓存条目）")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+
+	// 下载请求真实到达（非仅注册了空文件）：atomic 计数 >= 1
+	if n := atomic.LoadInt32(&hits); n < 1 {
+		t.Errorf("后台下载应真实发起 HTTP 请求: hits = %d, want >= 1", n)
 	}
 
 	// 结果回灌：未命中 → playingFromCache 保持 false
