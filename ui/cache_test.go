@@ -23,9 +23,16 @@ import (
 )
 
 // newCacheTestModel 与 newResumeTestModel 同款组装，但额外返回 cache Manager
-// 与缓存目录（测试预置缓存条目/断言命中需要）。ytdlpPath 指向不存在的路径：
-// CacheAsync 的后台 goroutine 立即 exec 失败退出（无网络请求、无泄漏）。
+// 与缓存目录（测试预置缓存条目/断言命中需要）。ytdlpPath 固定指向不存在的
+// 路径：CacheAsync 的后台 goroutine 立即 exec 失败退出（无网络请求、无泄漏）。
 func newCacheTestModel(t *testing.T, st *session.State) (Model, *fakePlayer, *cache.Manager, string) {
+	return newCacheTestModelWithYtdlp(t, st, "/nonexistent/yt-dlp")
+}
+
+// newCacheTestModelWithYtdlp 同 newCacheTestModel，但允许注入 ytdlpPath：
+// 后台下载完成类测试需要指向假 yt-dlp 脚本（writeFakeYtDlp）真实走完
+// 提取→下载→注册全链路。
+func newCacheTestModelWithYtdlp(t *testing.T, st *session.State, ytdlpPath string) (Model, *fakePlayer, *cache.Manager, string) {
 	t.Helper()
 	fp := newFakePlayer()
 	lyricServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +62,7 @@ func newCacheTestModel(t *testing.T, st *session.State) (Model, *fakePlayer, *ca
 		t.Fatal(err)
 	}
 	cacheDir := filepath.Join(t.TempDir(), "cache")
-	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: cacheDir}, "/nonexistent/yt-dlp")
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: cacheDir}, ytdlpPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +70,17 @@ func newCacheTestModel(t *testing.T, st *session.State) (Model, *fakePlayer, *ca
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
 		cf, hist, sess, pls, cm, nil)
 	return m, fp, cm, cacheDir
+}
+
+// writeFakeYtDlp 写一个假 yt-dlp 脚本：打印一行 "URL EXT"（与
+// cache/download_test.go 的 writeFakeYtDlp 同款模式），返回脚本路径。
+func writeFakeYtDlp(t *testing.T, body string) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "yt-dlp")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
 }
 
 // presetCache 预置缓存条目：写缓存文件（SafeName 命名）+ 注册进索引，
@@ -216,6 +234,59 @@ func TestResumeCachePreservedOnPlayPausedIpcError(t *testing.T) {
 	}
 	if !strings.Contains(m.lastError, "恢复播放失败") {
 		t.Errorf("lastError = %q, want 含恢复播放失败", m.lastError)
+	}
+}
+
+// 恢复播放未命中缓存：resumeCmd 应 PlayPaused 网络 URL（不阻塞恢复加载），
+// 并触发后台下载——与 beginPlay 的 CacheAsync 对齐：下载完成即缓存，下次
+// 恢复/播放直接走本地。
+func TestResumeCacheMissTriggersBackgroundDownload(t *testing.T) {
+	// 假 yt-dlp 提取直链 → httptest 音频 URL + m4a 扩展名；server 返回非零音频字节
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("fake-audio-bytes"))
+	}))
+	t.Cleanup(srv.Close)
+	script := writeFakeYtDlp(t, `echo "`+srv.URL+` m4a"`)
+
+	m, fp, cm, dir := newCacheTestModelWithYtdlp(t, sessionState(66.6, false), script)
+	if m.state.Track == nil || m.state.Track.ID != "b" {
+		t.Fatalf("恢复场景应有当前曲目 b: %+v", m.state.Track)
+	}
+
+	msgs := execCmds(resumeCmd(m))
+	if fp.pausedCount() != 1 {
+		t.Fatalf("pausedCount = %d, want 1", fp.pausedCount())
+	}
+	if got := fp.lastPaused(); got != m.state.Track.URL {
+		t.Errorf("未命中应 PlayPaused 网络 URL: got %q, want %q", got, m.state.Track.URL)
+	}
+
+	// 后台下载异步执行（exec 假脚本 + HTTP GET）：轮询等缓存注册（3s 超时）
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		path, ok := cm.Lookup("b")
+		if ok {
+			if !strings.HasPrefix(path, dir) || !strings.Contains(path, cache.SafeName("b")) {
+				t.Errorf("缓存路径应在缓存目录内且含 SafeName: %q", path)
+			}
+			if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+				t.Errorf("缓存路径不应是网络 URL: %q", path)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("缓存文件应真实存在: %v", err)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("恢复播放未命中应触发后台下载并完成缓存（3s 内未见缓存条目）")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// 结果回灌：未命中 → playingFromCache 保持 false
+	m, _ = update(m, msgs[0])
+	if m.playingFromCache {
+		t.Error("未命中恢复后 playingFromCache 应为 false")
 	}
 }
 
