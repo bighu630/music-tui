@@ -102,3 +102,23 @@ func TestHistoryItemTitleAndDescription(t *testing.T) {
 		t.Error("Description 不应为空")
 	}
 }
+
+// TestHistoryHintOnLastLine 历史页（非空）提示行应渲染在页面内容区最后一行。
+func TestHistoryHintOnLastLine(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 数字键直达历史页
+	m.historyPage = m.historyPage.setEntries([]history.Entry{
+		{Track: testTrack("t1")},
+		{Track: testTrack("t2")},
+	})
+	assertHintOnLastLine(t, m, "Enter/p 重播")
+}
+
+// TestHistoryEmptyHintOnLastLine 空历史页也应显示提示行，且同样在最后一行。
+func TestHistoryEmptyHintOnLastLine(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 数字键直达历史页
+	assertHintOnLastLine(t, m, "Enter/p 重播")
+}

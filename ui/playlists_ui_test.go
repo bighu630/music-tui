@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"music-tui/model"
+	"music-tui/playlists"
 	"music-tui/player"
 	"music-tui/ytm"
 )
@@ -1816,6 +1817,79 @@ func TestYTSyncKeysScopedToMode(t *testing.T) {
 }
 
 // URL 导入输入聚焦时 a/空格/q 是输入字符（root 让位，同命名输入模式）。
+// ---- 提示行贴底（bottomHint）----
+
+// 播放列表页三个列表态（概览/详情/登录设置）的提示行应渲染在页面内容区
+// 最后一行（窗口最底行），View 恰好 24 行不溢出；输入态（命名/URL 导入）
+// 保持现状不动（不在此断言）。
+func TestPlaylistsHintOnLastLine(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m := env.m
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+
+	// 概览（1 个列表）
+	if _, err := m.pl.Create("收藏"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.pl.AddTrack("收藏", testTrack("t1")); err != nil {
+		t.Fatal(err)
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+	assertHintOnLastLine(t, m, "Enter 查看")
+
+	// 详情
+	m.plPage = m.plPage.enterDetail(m.pl.Lists()[0])
+	assertHintOnLastLine(t, m, "Enter/p 从选中曲播放整个列表")
+
+	// 登录设置主菜单
+	m.plPage = m.plPage.enterSyncSetup()
+	assertHintOnLastLine(t, m, "↑↓ 选择 · Enter 确认")
+
+	// 登录设置输入子层（粘贴 Cookie）
+	m.plPage = m.plPage.beginSetupInput(setupPasteInput, "粘贴 Cookie 字符串（name=value; ...）")
+	assertHintOnLastLine(t, m, "↑↓ 选择 · Enter 确认")
+}
+
+// 登录设置浏览器二级选择时提示行同样贴底（hint 文案去掉 Esc 返回）。
+func TestPlaylistsHintOnLastLineBrowserSub(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m.plPage = m.plPage.enterSetupBrowser()
+	assertHintOnLastLine(t, m, "↑↓ 选择 · Enter 确认")
+}
+
+// TestPlaylistsHintOnLastLineManyLists 概览列表多到出现分页行时提示行仍贴底。
+func TestPlaylistsHintOnLastLineManyLists(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	for i := 0; i < 9; i++ {
+		if _, err := m.pl.Create(fmt.Sprintf("列表%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+	assertHintOnLastLine(t, m, "Enter 查看")
+}
+
+// 概览/详情空态时提示行同样贴底。
+func TestPlaylistsEmptyHintOnLastLine(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m := env.m
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+
+	// 概览空态（无列表）
+	assertHintOnLastLine(t, m, "Enter 查看")
+
+	// 详情空态
+	m.plPage = m.plPage.enterDetail(playlists.List{Name: "收藏"})
+	assertHintOnLastLine(t, m, "Enter/p 从选中曲播放整个列表")
+}
+
 func TestYTURLImportConsumesGlobalKeys(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})

@@ -102,14 +102,15 @@ func (h historyModel) setSize(width, height int) historyModel {
 	return h
 }
 
-// view 渲染历史页。
+// view 渲染历史页；空历史显示空态提示。提示行恒在页面内容区最后一行。
 func (h historyModel) view() string {
+	hint := "Enter/p 重播 · d 删除 · c 清空 · a 添加到…"
 	if len(h.entries) == 0 {
-		return lipgloss.NewStyle().
+		content := lipgloss.NewStyle().
 			Padding(1, 0).
 			Faint(true).
 			Render("暂无播放历史\n\n去搜索页播放一首歌吧")
+		return bottomHint(h.height, content, hint)
 	}
-	return h.list.View() + "\n" +
-		lipgloss.NewStyle().Faint(true).Render("Enter/p 重播 · d 删除 · c 清空 · a 添加到…")
+	return bottomHint(h.height, h.list.View(), hint)
 }

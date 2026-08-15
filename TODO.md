@@ -134,3 +134,4 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 测试：toast 状态机 4 单测 + 生命周期/定时器 cmd 集成 + 布局稳定回归（含/不含 toast 逐行对比）+ 超宽 toast 防折行 + 窄窗口状态栏截断，全量 build/vet/test -race 全绿 ✅
 - [x] review 循环：2 轮（超宽 toast 折行修复 TruncateLeft 保句尾、ANSI reset、窄窗口 rightMax 动态截断、停止态 ⏹、极窄窗口 1-2 列截断、测试严格化 21 列触发回归）✅
 - [ ] 验收：真实终端触发播放失败 → toast 右下浮现 3-5s 自动消失 → 排版零跳动 → 状态栏恒在（待用户确认）
+- [x] 状态栏布局优化（用户反馈）：首页状态栏留空（信息与首页控制栏重复，行恒在布局稳定）；其他页左侧歌曲名 + 右侧播放顺序（⏵/⏸/⏹ 模式 · 位置/总数）✅（commit 0ec0c92/3e376cb，已合并 master 9235f19）

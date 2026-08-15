@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -688,4 +689,36 @@ func sameTrackSet(a, b []model.Track) bool {
 		}
 	}
 	return true
+}
+
+// TestQueueHintOnLastLine 队列页（非空）快捷键提示行渲染在页面内容区
+// 最后一行（窗口最底行），hint 含 Enter 跳转播放。
+func TestQueueHintOnLastLine(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	m.queue.Add(testTrack("t1"))
+	m.queue.Add(testTrack("t2"))
+	m.queuePage = m.queuePage.sync(m.queue)
+	assertHintOnLastLine(t, m, "Enter/p 跳转播放")
+}
+
+// TestQueueHintOnLastLineManyItems 队列项多到触发列表分页行时提示行仍贴底。
+func TestQueueHintOnLastLineManyItems(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	for i := 0; i < 10; i++ {
+		m.queue.Add(testTrack(fmt.Sprintf("t%d", i)))
+	}
+	m.queuePage = m.queuePage.sync(m.queue)
+	assertHintOnLastLine(t, m, "Enter/p 跳转播放")
+}
+
+// TestQueueEmptyHintOnLastLine 队列页空态也渲染提示行，且在最后一行。
+func TestQueueEmptyHintOnLastLine(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	assertHintOnLastLine(t, m, "Enter/p 跳转播放")
 }

@@ -147,16 +147,17 @@ func (q queueModel) setSize(width, height int) queueModel {
 	return q
 }
 
-// view 渲染队列页；空队列显示空态提示。
+// view 渲染队列页；空队列显示空态提示。提示行恒在页面内容区最后一行。
 func (q queueModel) view() string {
+	hint := q.modeLabel() + " · Enter/p 跳转播放 · d 删除 · c 清空 · s 切换模式"
 	if len(q.items) == 0 {
-		return lipgloss.NewStyle().
+		content := lipgloss.NewStyle().
 			Padding(1, 0).
 			Faint(true).
 			Render("队列为空\n\n搜索页选中结果后按 a 添加到队列，Enter 立即播放")
+		return bottomHint(q.height, content, hint)
 	}
-	return q.list.View() + "\n" +
-		lipgloss.NewStyle().Faint(true).Render(q.modeLabel()+" · Enter/p 跳转播放 · d 删除 · c 清空 · s 切换模式")
+	return bottomHint(q.height, q.list.View(), hint)
 }
 
 // modeLabel 队列页底部的模式名（完整三态文案：列表循环/随机播放/单曲循环）。
