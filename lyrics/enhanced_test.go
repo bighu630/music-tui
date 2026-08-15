@@ -664,7 +664,7 @@ func TestEnhancedNoAIPassesThroughNonNotFound(t *testing.T) {
 
 // newCNEnv 组装含网易云/QQ mock 的增强客户端；netease/qq 为 nil 时不启用
 // 对应源（返回各自的 httptest server URL 供断言）。
-func newCNEnv(t *testing.T, neteaseHandler, qqHandler func(http.ResponseWriter, *http.Request)) (*EnhancedClient, func(string) string) {
+func newCNEnv(t *testing.T, neteaseHandler, qqHandler func(http.ResponseWriter, *http.Request)) *EnhancedClient {
 	t.Helper()
 	var neteaseURL, qqURL string
 	if neteaseHandler != nil {
@@ -684,7 +684,7 @@ func newCNEnv(t *testing.T, neteaseHandler, qqHandler func(http.ResponseWriter, 
 	if qqURL != "" {
 		c.EnableCNSources(NewQQMusicClientWithBaseURL(qqURL))
 	}
-	return c, func(_ string) string { return "" }
+	return c
 }
 
 // neteaseHit 返回网易云命中 mock（search 返回 280s 病态 + lyric 返回 LRC）。
@@ -717,7 +717,7 @@ func qqHit(w http.ResponseWriter, r *http.Request) {
 
 // TestEnhancedCNHitsAfterLrclibMiss lrclib 严格未命中 → 网易云命中。
 func TestEnhancedCNHitsAfterLrclibMiss(t *testing.T) {
-	c, _ := newCNEnv(t, neteaseHit, nil)
+	c := newCNEnv(t, neteaseHit, nil)
 	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
@@ -740,7 +740,7 @@ func TestEnhancedCNFallsToQQ(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}
-	c, _ := newCNEnv(t, neteaseEmpty, qqHit)
+	c := newCNEnv(t, neteaseEmpty, qqHit)
 	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
@@ -762,7 +762,7 @@ func TestEnhancedCNTimeRule(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}
-	c, _ := newCNEnv(t, neteaseWrongDur, qqHit)
+	c := newCNEnv(t, neteaseWrongDur, qqHit)
 	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
@@ -777,7 +777,7 @@ func TestEnhancedCNErrorContinues(t *testing.T) {
 	neteaseErr := func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 	}
-	c, _ := newCNEnv(t, neteaseErr, qqHit)
+	c := newCNEnv(t, neteaseErr, qqHit)
 	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
@@ -795,9 +795,9 @@ func TestEnhancedCNAllMissFallsBackToDeterministic(t *testing.T) {
 		_, _ = w.Write([]byte(`{"code":200,"result":{"songs":[]}}`))
 	}
 	detHit := false
-	c, _ := newCNEnv(t, empty, empty)
+	c := newCNEnv(t, empty, empty)
 	// 确定性兜底：换 lrclib mock 让确定性命中
-	c.lrclib = NewClientWithBaseURL(httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	detServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/get" {
 			if isDetQuery(r) {
 				detHit = true
@@ -808,7 +808,9 @@ func TestEnhancedCNAllMissFallsBackToDeterministic(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode([]lrclibSong{})
-	})).URL, testUA)
+	}))
+	defer detServer.Close()
+	c.lrclib = NewClientWithBaseURL(detServer.URL, testUA)
 	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
@@ -828,7 +830,7 @@ func TestEnhancedCNCached(t *testing.T) {
 		neteaseCalls++
 		neteaseHit(w, r)
 	}
-	c, _ := newCNEnv(t, netease, nil)
+	c := newCNEnv(t, netease, nil)
 	track := model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0}
 	if _, err := c.Fetch(context.Background(), track); err != nil {
 		t.Fatalf("首次 Fetch: %v", err)
@@ -855,12 +857,49 @@ func TestEnhancedCNPlainRejected(t *testing.T) {
 			_, _ = w.Write([]byte(`{"code":200,"lrc":{"lyric":"这星球像一颗胚胎\n没有时间轴\n"}}`))
 		}
 	}
-	c, _ := newCNEnv(t, neteasePlain, qqHit)
+	c := newCNEnv(t, neteasePlain, qqHit)
 	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
 	if len(res.Lyrics.Lines) != 2 {
 		t.Errorf("网易云纯文本应被拒，走 QQ: got %+v", res.Lyrics.Lines)
+	}
+}
+
+// TestEnhancedCNUnknownDurationSkipped 候选时长未知（duration==0）：
+// 无法验证时长，跳过（与 lrclib 严格路径语义一致，宁缺毋滥）。
+func TestEnhancedCNUnknownDurationSkipped(t *testing.T) {
+	neteaseNoDur := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/search/get" {
+			_, _ = w.Write([]byte(`{"code":200,"result":{"songs":[
+				{"id":1,"name":"病态","artists":[{"name":"薛之谦"}],"duration":0}]}}`))
+			return
+		}
+		if r.URL.Path == "/api/song/lyric" {
+			// 若 duration==0 被放行会取到这份歌词（测试应失败）
+			_, _ = w.Write([]byte(`{"code":200,"lrc":{"lyric":"[00:01.00]时长未知的歌"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}
+	c := newCNEnv(t, neteaseNoDur, qqHit)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙", Duration: 280.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(res.Lyrics.Lines) != 2 || res.Lyrics.Lines[1].Text != "这星球像一颗胚胎" {
+		t.Errorf("时长未知候选应跳过（走 QQ 命中）: got %+v", res.Lyrics.Lines)
+	}
+}
+
+// TestEnhancedCNUnknownTargetDuration 目标时长未知（Duration==0）：
+// 任何候选都无法验证时长 → 全部跳过 → 兜底。
+func TestEnhancedCNUnknownTargetDuration(t *testing.T) {
+	c := newCNEnv(t, neteaseHit, qqHit)
+	_, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙", Duration: 0})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound（目标时长未知，中文源全部跳过）", err)
 	}
 }

@@ -129,8 +129,10 @@ func (e *EnhancedClient) fetchCN(ctx context.Context, title, artist string, dura
 			continue
 		}
 		for _, s := range songs {
-			if s.Duration > 0 && math.Abs(s.Duration-duration) > maxAIDurationDelta {
-				continue // 时长差 >3s：视为不同曲目，跳过
+			// 时长规则与 lrclib 严格路径一致：候选时长未知（0）或与目标
+			// 差距 >3s → 视为不同曲目，跳过（宁缺毋滥）。
+			if s.Duration == 0 || math.Abs(s.Duration-duration) > maxAIDurationDelta {
+				continue
 			}
 			ly, err := src.Lyric(ctx, s.ID)
 			if err != nil {

@@ -178,7 +178,7 @@ func TestQQSearchError(t *testing.T) {
 	}
 }
 
-// TestQQSearchRefererRequired 歌词接口必须带 Referer（实际服务端 301 兜底）
+// TestQQSearchURLShape 搜索请求 URL 形状（format=json + 关键词转义）。
 func TestQQSearchURLShape(t *testing.T) {
 	var gotURL string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

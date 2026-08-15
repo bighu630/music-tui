@@ -785,12 +785,14 @@ AI 识别（结果缓存优先 + single-flight；瞬时错误重试 1 次；成�
           无需登录；候选时长 ≤3s 才采用；源错误记日志继续下一源）
           命中 → 入歌词缓存并返回
       中文源全未命中 → 确定性多候选兜底（原始标题，30s 阈值）
+      中文源命中与 lrclib 严格命中同样标 Source=ai（链仅在 AI 识别
+          成功后运行，UI 显示〔AI 匹配〕标识）
           → 命中入歌词缓存（AI title-artist 键，下次秒回）并返回（Source=ai）
       lrclib 服务端错误（非 ErrNotFound）→ 原样透传，不做兜底
 ```
 - **中文歌词源**（用户确认：lrclib → 网易云 → QQ）：lrclib 中文覆盖差（版权方数据缺失，如薛之谦《病态》仅有翻唱版）；网易云 `music.163.com/api/search/get` + `/api/song/lyric`（实测匿名可用，社区 LrcAPI-Go 同结论）、QQ 音乐 `c.y.qq.com/soso/fcgi-bin/client_search_cp` + `/lyric/fcgi-bin/fcg_query_lyric_new.fcg`（需 Referer: y.qq.com）均为无登录纯 GET，返回标准 LRC；仅 AI 识别成功后查询（无 AI 配置行为零变化）；命中入 LRC 缓存
 - **AI 优先的原因**（用户反馈）：原「确定性优先 → AI 兜底」依赖失败才触发，而 lrclib 数据缺失 + 标题噪声使确定性经常失败；AI 优先 + 严格重查 + 确定性兜底命中率最高，且 AI 结果缓存（按 title|artist）使同歌二次播放零 AI 调用
-- **预算分配**：fetchLyricsCmd 总预算 30s，AI 识别子预算 15s（大模型首 token 慢，实测 qwen3.7-plus 11s），剩余预算留给严格重查 + 确定性兜底，防止 lrclib 链被饿死
+- **预算分配**：fetchLyricsCmd 总预算 40s，AI 识别子预算 25s（大模型首 token 慢，实测 qwen3.7-plus 11.4s 高峰期 20s+），剩余预算留给严格重查 + 中文源 + 确定性兜底，防止 lrclib 链被饿死
 - **AI 标题全局展示覆盖**：AI 路径成功时 `FetchResult.Title/Artist` 携带清洗后歌名/歌手（`Fetcher.Fetch` 返回值从 `*Lyrics` 扩展为 `FetchResult{Lyrics, Title, Artist}`）；ui 在歌词结果到达时对 home/queuePage 应用展示覆盖并立即重建队列视图、以清洗后曲目副本重发 onTrack（MPRIS 回调；服务端元数据仍为原始标题，见 19.8）、beginPlay 切歌清空覆盖
 - prompt：英文指令 + JSON 形状约束 + 繁→简转换 + feat./版本描述剥离 + 5 组示例（含参考项目的「山吹菌/少年霜」刁钻例）；响应解析先取括号平衡的 JSON 对象（代码围栏/前后杂文/数组包裹均容错），截断或垃圾内容报错不静默
 - 识别输入 = 标题 + 频道名（hint）：频道名可帮 AI 定位歌手（如「周杰倫官方頻道」），prompt 明示其仅为 hint 可能无关
@@ -826,8 +828,8 @@ AI 识别（结果缓存优先 + single-flight；瞬时错误重试 1 次；成�
 | client 严格阈值（6 个）+ sync-only（2 个） | FetchForQuery 六项 + 纯文本歌词拒绝（get 命中）、FetchResult 形状（确定性路径 Title/Artist 空） | FetchForQuery：get 命中优先、search 选差距最小、全部 >3s 弃用、3.0s 边界采用 / 3.01s 弃用、空 artist 跳过 get、get 命中超 3s 弃用降级 search |
 | aicache（10 个） | 落盘 roundtrip、负缓存持久化、损坏行跳过 + 文件重写、键空白规范化、并发 Put（-race）、同键不重复、行格式 |
 | lrccache（9 个） | 同步歌词 roundtrip（毫秒误差内）、sync-only（只产出 .lrc、.txt 不识别、旧 .txt 启动清理）、未知名 miss、清洗/截断/控制字符、空歌词不写、文件可 ParseLRC | synced/plain 存取 roundtrip（毫秒误差内）、未知名 miss、不安全字符清洗、超长截断（字节计）、sync/plain 分文件不覆盖、空歌词不写、文件为可 ParseLRC 纯文本 |
-| cnlyrics（10 个） | 网易云搜索解析（毫秒→秒、路径/参数）/歌词（空/纯文本 sync-only 拒绝）/403 报错；QQ 搜索解析（interval 秒、Referer 头）/歌词/URL 形状/403；集成：lrclib 未命中→网易云→QQ 链、时长 >3s 跳过、源错误继续、全未命中确定性兜底、命中入 LRC 缓存二次零网络、纯文本拒绝 |
-| enhanced（20 个） | AI 优先流程（含 4 个审查补充）：AI 子预算超时后兜底可跑、兜底命中以 AI 键缓存二次零网络、错误透传后 AI 结果缓存不重调、no-AI 非 NotFound 透传；识别成功严格重查（确定性不跑）；严格未命中确定性兜底（展示信息仍用 AI 标题）；非歌曲/AI 失败/空标题 → 确定性兜底（负缓存生效）；服务端错误透传不兜底；双缓存命中零请求；并发 single-flight；AI 标题携带（live/缓存）；纯文本拒绝；失败路径不携带标题 | 确定性命中不调 AI；无 AI 配置降级；AI 清洗→重查命中（Source 标注）；is_song=false 负缓存（二次不调 AI）；AI 失败降级 + 失败不缓存；全部候选 >3s 弃用；AI 结果缓存 + 歌词缓存命中免 AI/免 lrclib；AI 结果缓存命中仍重查 lrclib；空 title 拒绝；缓存跨重启落盘命中 |
+| cnlyrics（9 个）+ enhanced 链集成（9 个） | 网易云搜索解析（毫秒→秒、路径/参数）/歌词（空/纯文本 sync-only 拒绝）/403 报错；QQ 搜索解析（interval 秒、Referer 头）/歌词/URL 形状/403；集成：lrclib 未命中→网易云→QQ 链、时长 >3s 跳过、源错误继续、全未命中确定性兜底、命中入 LRC 缓存二次零网络、纯文本拒绝 |
+| enhanced（27 个） | AI 优先流程（含 4 个审查补充）：AI 子预算超时后兜底可跑、兜底命中以 AI 键缓存二次零网络、错误透传后 AI 结果缓存不重调、no-AI 非 NotFound 透传；识别成功严格重查（确定性不跑）；严格未命中确定性兜底（展示信息仍用 AI 标题）；非歌曲/AI 失败/空标题 → 确定性兜底（负缓存生效）；服务端错误透传不兜底；双缓存命中零请求；并发 single-flight；AI 标题携带（live/缓存）；纯文本拒绝；失败路径不携带标题 | 确定性命中不调 AI；无 AI 配置降级；AI 清洗→重查命中（Source 标注）；is_song=false 负缓存（二次不调 AI）；AI 失败降级 + 失败不缓存；全部候选 >3s 弃用；AI 结果缓存 + 歌词缓存命中免 AI/免 lrclib；AI 结果缓存命中仍重查 lrclib；空 title 拒绝；缓存跨重启落盘命中 |
 | config（7 个新增） | openai 缺失禁用、key 存在 model 默认、显式空 key 禁用、显式值、显式空 model 默认、Save roundtrip |
 | ui（6 个新增） | AI 来源歌词显示 `〔AI 匹配〕`、确定性来源不显示、AI 标识行视口高度预留（窄窗口不溢出）、控制栏/状态栏 AI 标题覆盖 + 切歌清空、队列当前项 AI 标题（非当前项保持原始）、MPRIS onTrack 收到清洗后曲目（无 AI 信息不触发） |
 
@@ -837,6 +839,6 @@ AI 识别（结果缓存优先 + single-flight；瞬时错误重试 1 次；成�
 - **AI 调用 429 无退避**：重试 1 次为立即重试（lrclib 客户端会尊重 Retry-After，AI 客户端未实现；429 后大概率仍 429，代价仅 1 次无效调用）
 - **ai.jsonl 无条目上限**：唯一标题永久累积（~百字节/条，可接受）；如需可加 LRU 截断
 - **歌词缓存键不含时长**：同 title-artist 的不同版本（如现场版与录音室版）共用缓存条目；AI 路径查询时 3s 严格规则已排除明显错配，但缓存命中路径不再校验时长——同名同歌手但时长差异极大的极端情形可能拿到另一版本歌词（与参考项目行为一致，可接受）
-- **AI 调用共享 30s 歌词拉取预算**（fetchLyricsCmd 超时）：AI 识别子预算 15s（见 19.3），超时降级确定性兜底，不阻塞 UI
+- **AI 调用共享 40s 歌词拉取预算**（fetchLyricsCmd 超时）：AI 识别子预算 25s（见 19.3），超时降级确定性兜底，不阻塞 UI
 - **is_song=true 但空 title** 的识别结果按负缓存处理（不再调 AI），避免拿空标题空转 lrclib
 - 仅支持 OpenAI 协议兼容服务（官方或自托管均可，baseURL 可注入）；未接 Gemini 等其它厂商（参考项目支持，本期不做）
