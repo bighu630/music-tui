@@ -14,9 +14,22 @@ import (
 // DefaultMaxEntries 是缓存歌曲数上限默认值。
 const DefaultMaxEntries = 100
 
-// Config 是顶层配置；目前仅含缓存设置项（嵌入 cache.Options，json tag 即文件格式）。
+// DefaultOpenAIModel 是 OpenAI 识别默认模型（openai.model 缺失时回落；
+// 与 lyrics 包 DefaultAIModel 保持一致）。
+const DefaultOpenAIModel = "gpt-4o-mini"
+
+// OpenAI 是 OpenAI 增强歌词匹配配置：api_key 为空 = 整个 AI 路径禁用
+// （行为与未启用增强完全一致）；model 为空回落 DefaultOpenAIModel。
+type OpenAI struct {
+	APIKey string `json:"api_key"`
+	Model  string `json:"model"`
+}
+
+// Config 是顶层配置：缓存设置（嵌入 cache.Options，json tag 即文件格式）
+// + OpenAI 增强歌词配置。
 type Config struct {
-	Cache cache.Options `json:"cache"`
+	Cache  cache.Options `json:"cache"`
+	OpenAI OpenAI        `json:"openai"`
 }
 
 // Default 返回默认配置：缓存开启、上限 DefaultMaxEntries、
@@ -30,6 +43,8 @@ func Default() (*Config, error) {
 		Enabled:    true,
 		MaxEntries: DefaultMaxEntries,
 		Dir:        filepath.Join(dir, "music-tui"),
+	}, OpenAI: OpenAI{
+		Model: DefaultOpenAIModel,
 	}}, nil
 }
 
@@ -67,6 +82,10 @@ func Load(path string) (*Config, error) {
 			MaxEntries *int    `json:"max_entries"`
 			Dir        *string `json:"dir"`
 		} `json:"cache"`
+		OpenAI struct {
+			APIKey *string `json:"api_key"`
+			Model  *string `json:"model"`
+		} `json:"openai"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("解析配置文件: %w", err)
@@ -76,6 +95,8 @@ func Load(path string) (*Config, error) {
 		Enabled:    true,
 		MaxEntries: DefaultMaxEntries,
 		Dir:        d.Cache.Dir,
+	}, OpenAI: OpenAI{
+		Model: DefaultOpenAIModel,
 	}}
 	if raw.Cache.Enabled != nil {
 		c.Cache.Enabled = *raw.Cache.Enabled
@@ -85,6 +106,13 @@ func Load(path string) (*Config, error) {
 	}
 	if raw.Cache.Dir != nil && *raw.Cache.Dir != "" {
 		c.Cache.Dir = *raw.Cache.Dir
+	}
+	// OpenAI：api_key 缺失/空 → 禁用（保持零值）；model 缺失/空 → 默认
+	if raw.OpenAI.APIKey != nil {
+		c.OpenAI.APIKey = *raw.OpenAI.APIKey
+	}
+	if raw.OpenAI.Model != nil && *raw.OpenAI.Model != "" {
+		c.OpenAI.Model = *raw.OpenAI.Model
 	}
 	return c, nil
 }

@@ -529,7 +529,14 @@ func (m homeModel) lyricsColumnView() string {
 		//  + gap = 32，列内居中 → 文本中心 = 32 + 列宽/2 = 76 ≠ 屏幕中心 60。
 		//  注：viewport 的 Style.Align 不生效——bubbles viewport.View 会把
 		//  Style 的 Width/Height Unset 后再 Render。）
-		return m.centerLyrics(m.lyricView.View())
+		content := m.lyricView.View()
+		// AI 增强路径来源标识：歌词块上方一行小字（不参与视口滚动数学，
+		// 不影响 scrollLyricsTo 当前行居中）。
+		if m.lyrics != nil && m.lyrics.Source == lyrics.LyricsSourceAI {
+			tag := lipgloss.NewStyle().Faint(true).Render("〔AI 匹配〕")
+			return m.centerLyrics(tag + "\n" + content)
+		}
+		return m.centerLyrics(content)
 	}
 	return ""
 }

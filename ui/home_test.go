@@ -910,3 +910,35 @@ func TestHomeResizeRelayout(t *testing.T) {
 		}
 	}
 }
+
+// TestHomeLyricsAISourceTag AI 来源歌词渲染「AI 匹配」标识，
+// 确定性来源不显示。
+func TestHomeLyricsAISourceTag(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	ly, err := lyrics.ParseLRC([]byte("[00:10.00]第一行\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ly.Source = lyrics.LyricsSourceAI
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	if !strings.Contains(m.home.view(), "AI 匹配") {
+		t.Error("AI 来源歌词应显示「AI 匹配」标识")
+	}
+
+	// 确定性来源（Source 空）：不显示标识
+	ly2, _ := lyrics.ParseLRC([]byte("[00:10.00]第二行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly2})
+	if strings.Contains(m.home.view(), "AI 匹配") {
+		t.Error("确定性来源歌词不应显示「AI 匹配」标识")
+	}
+
+	// 纯文本 AI 歌词同样显示
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: &lyrics.Lyrics{Plain: "纯文本", Source: lyrics.LyricsSourceAI}})
+	if !strings.Contains(m.home.view(), "AI 匹配") {
+		t.Error("AI 纯文本歌词应显示「AI 匹配」标识")
+	}
+}

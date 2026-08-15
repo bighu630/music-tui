@@ -228,7 +228,7 @@ var retryBackoff = 2 * time.Second // 重试间隔（包级变量：测试可调
 // 页面切换、服务调用与结果路由。
 type Model struct {
 	player  player.Player
-	lyrics  *lyrics.Client
+	lyrics  lyrics.Fetcher
 	cover   *cover.Fetcher
 	history *history.Store
 	queue   *queue.Queue
@@ -290,7 +290,7 @@ type Model struct {
 // onTrack 在播放状态变化时同步回调当前曲目（nil 表示无曲目；可为 nil）。
 // 若 sess 存在已保存会话（队列 + 进度），同步恢复队列与播放状态（暂停态），
 // mpv 的静默加载由 Init 返回的 resumeCmd 完成。
-func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, cm *cache.Manager, yt *ytm.Client, onTrack func(*model.Track)) Model {
+func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, cm *cache.Manager, yt *ytm.Client, onTrack func(*model.Track)) Model {
 
 	m := Model{
 		player:       p,
@@ -1311,7 +1311,7 @@ func resumeCmd(m Model) tea.Cmd {
 	}
 }
 
-func fetchLyricsCmd(c *lyrics.Client, track model.Track) tea.Cmd {
+func fetchLyricsCmd(c lyrics.Fetcher, track model.Track) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

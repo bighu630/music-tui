@@ -330,3 +330,124 @@ func TestFetchRetryCanceledDuringWait(t *testing.T) {
 		t.Fatal("取消后 Fetch 未返回")
 	}
 }
+
+// ── FetchForQuery（AI 清洗后重查：get 优先 + ≤3s 严格评分）──────────
+
+func TestFetchForQueryGetHit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/get" {
+			t.Errorf("path = %q, want /api/get（清洗后应优先精确匹配）", r.URL.Path)
+		}
+		q := r.URL.Query()
+		if q.Get("track_name") != "晴天" || q.Get("artist_name") != "周杰伦" {
+			t.Errorf("query = %q, want track_name=晴天&artist_name=周杰伦", q)
+		}
+		_ = json.NewEncoder(w).Encode(lrclibSong{
+			TrackName: "晴天", ArtistName: "周杰伦", Duration: 269.0,
+			SyncedLyrics: "[00:01.00]故事的小黄花",
+		})
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	ly, err := c.FetchForQuery(context.Background(), "晴天", "周杰伦", 269.5)
+	if err != nil {
+		t.Fatalf("FetchForQuery: %v", err)
+	}
+	if len(ly.Lines) != 1 || ly.Lines[0].Text != "故事的小黄花" {
+		t.Errorf("got %+v", ly.Lines)
+	}
+}
+
+func TestFetchForQuerySearchPicksClosestWithin3s(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			w.WriteHeader(http.StatusNotFound) // get 未命中 → 降级 search
+			return
+		}
+		if r.URL.Path != "/api/search" {
+			t.Errorf("path = %q, want /api/search", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode([]lrclibSong{
+			{TrackName: "晴天", ArtistName: "周杰伦", Duration: 274.0, SyncedLyrics: "[00:01.00]远"},
+			{TrackName: "晴天", ArtistName: "周杰伦", Duration: 268.0, SyncedLyrics: "[00:01.00]近"},
+		})
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	ly, err := c.FetchForQuery(context.Background(), "晴天", "周杰伦", 269.0)
+	if err != nil {
+		t.Fatalf("FetchForQuery: %v", err)
+	}
+	if len(ly.Lines) != 1 || ly.Lines[0].Text != "近" {
+		t.Errorf("应选差距最小（269.5 vs 268→Δ1 < 274→Δ5）的歌词，got %+v", ly.Lines)
+	}
+}
+
+func TestFetchForQueryRejectsAllAbove3s(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]lrclibSong{
+			{TrackName: "晴天", ArtistName: "周杰伦", Duration: 275.0, SyncedLyrics: "[00:01.00]现场版"},
+			{TrackName: "晴天", ArtistName: "周杰伦", Duration: 260.0, SyncedLyrics: "[00:01.00]错歌"},
+		})
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	if _, err := c.FetchForQuery(context.Background(), "晴天", "周杰伦", 269.0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound（所有候选差距 >3s 必须弃用）", err)
+	}
+}
+
+func TestFetchForQueryBoundary3s(t *testing.T) {
+	// 差距恰 3.0s：采用；3.01s：弃用
+	for _, tc := range []struct {
+		songDur  float64
+		target   float64
+		wantText string
+	}{
+		{272.0, 269.0, "边界内"},
+		{272.01, 269.0, ""},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode([]lrclibSong{
+				{TrackName: "晴天", Duration: tc.songDur, SyncedLyrics: "[00:01.00]边界内"},
+			})
+		}))
+		c := NewClientWithBaseURL(server.URL, testUA)
+		ly, err := c.FetchForQuery(context.Background(), "晴天", "", tc.target)
+		if tc.wantText == "" {
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("songDur=%.2f: err = %v, want ErrNotFound", tc.songDur, err)
+			}
+		} else if err != nil || len(ly.Lines) == 0 || ly.Lines[0].Text != tc.wantText {
+			t.Errorf("songDur=%.2f: got %v %+v, want 命中", tc.songDur, err, ly)
+		}
+		server.Close()
+	}
+}
+
+func TestFetchForQueryEmptyArtistSkipsGet(t *testing.T) {
+	gotSearch := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			t.Error("artist 为空不应请求 /api/get（lrclib 会 400）")
+		}
+		gotSearch = true
+		_ = json.NewEncoder(w).Encode([]lrclibSong{})
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	if _, err := c.FetchForQuery(context.Background(), "晴天", "", 269.0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if !gotSearch {
+		t.Error("未走 /api/search")
+	}
+}
