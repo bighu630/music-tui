@@ -1873,14 +1873,15 @@ func TestStatusBarEmptyStateOtherPage(t *testing.T) {
 }
 
 // TestStatusBarLayout 回归：状态栏首页留空（信息与首页控制栏重复）、
-// 其他页左侧歌曲名 + 右侧播放顺序；窄窗口下右侧顺序优先、左侧名称截断不折行。
+// 其他页三段式：左 = 歌曲名 + 右 = 播放顺序（中间歌词区无歌词时留空）；
+// 名称按剩余宽度 40% 截断、右侧顺序优先完整、不折行。
 // （曾为左顺序右标题：标题按剩余宽度动态截断，曾按 m.width/2 固定截断致折行。）
 func TestStatusBarLayout(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("一首名字特别长特别长特别长特别长特别长特别长的歌"))
 	_ = execCmds(cmd)
-	m, _ = update(m, tea.WindowSizeMsg{Width: 21, Height: 24})
+	m, _ = update(m, tea.WindowSizeMsg{Width: 40, Height: 24})
 
 	// 首页：状态栏行留空（布局行恒在）
 	homeLines := strings.Split(m.View(), "\n")
@@ -1902,14 +1903,15 @@ func TestStatusBarLayout(t *testing.T) {
 		t.Errorf("队列页状态栏右侧应含播放顺序, got %q", bar)
 	}
 	// 标题在左侧、顺序在右侧（顺序文本出现在名称之后）；锚点用“歌”：
-	// 标题以 "测试歌曲 " 开头，截断后仍保留开头字符（“名”为长 id 中段必被截掉）
+	// 标题以 "测试歌曲 " 开头，40% 截断后仍保留开头字符（更窄窗口如 21
+	// 列名称会被全截掉——窄窗口兜底见 TestStatusBarNarrowWindowFits）
 	titleIdx := strings.Index(bar, "歌")
 	seqIdx := strings.Index(bar, "顺序")
 	if titleIdx < 0 || seqIdx < 0 || titleIdx > seqIdx {
 		t.Errorf("状态栏应为左名称右顺序, got %q", bar)
 	}
-	if w := ansi.StringWidth(bar); w > 21 {
-		t.Errorf("窄窗口状态栏行宽 = %d, want ≤ 21", w)
+	if w := ansi.StringWidth(bar); w > 40 {
+		t.Errorf("状态栏行宽 = %d, want ≤ 40", w)
 	}
 }
 
@@ -1960,6 +1962,55 @@ func TestStatusBarNarrowWindowFits(t *testing.T) {
 	lines := strings.Split(m.View(), "\n")
 	if last := lines[len(lines)-1]; ansi.StringWidth(last) > 10 {
 		t.Errorf("View 末行行宽 = %d, want ≤ 10", ansi.StringWidth(last))
+	}
+}
+
+// TestStatusBarLyricCenter 回归：状态栏三段式——左名称 + 中间当前歌词行
+// （居中）+ 右播放顺序；无歌词时中间留空。
+func TestStatusBarLyricCenter(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = m.switchPage("2") // 队列页（首页状态栏留空）
+
+	// 无歌词：中间留空，左右仍在
+	bar := strings.Split(m.View(), "\n")
+	last := bar[len(bar)-1]
+	if !strings.Contains(last, "t1") || !strings.Contains(last, "顺序") {
+		t.Errorf("无歌词时状态栏应含左名称右顺序, got %q", last)
+	}
+
+	ly, err := lyrics.ParseLRC([]byte("[00:10.00]第一行歌词文本\n[00:20.00]第二行歌词文本\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12}})
+	last = strings.Split(m.View(), "\n")[len(strings.Split(m.View(), "\n"))-1]
+	if !strings.Contains(last, "第一行歌词文本") {
+		t.Errorf("状态栏应显示当前歌词行, got %q", last)
+	}
+	// 歌词行在左右之间（起始列 > 左名称列、歌词中心 ≈ 中间区域中心）
+	vis := stripAnsiForTest(last)
+	lIdx := strings.Index(vis, "t1")
+	yIdx := strings.Index(vis, "第一行")
+	sIdx := strings.Index(vis, "顺序")
+	if !(lIdx >= 0 && yIdx > lIdx && sIdx > yIdx) {
+		t.Errorf("状态栏应为 左名称 < 歌词 < 右顺序 布局, got %q", vis)
+	}
+	// 居中：歌词行中心 ≈ 中间区域中心（窗口中心 40 ± 6）。
+	// strings.Index 返回的是字节偏移（CJK 每字 3 字节 ≠ 2 列），
+	// 起始列须用 ansi.StringWidth 对前缀按列宽计算。
+	lyricW := ansi.StringWidth("第一行歌词文本")
+	lyricStart := ansi.StringWidth(vis[:yIdx])
+	center := lyricStart + lyricW/2
+	if center < 34 || center > 46 {
+		t.Errorf("歌词行中心列 = %d, want ≈ 40（居中）, got %q", center, vis)
+	}
+	if w := ansi.StringWidth(last); w > 80 {
+		t.Errorf("状态栏行宽 = %d, want ≤ 80", w)
 	}
 }
 
