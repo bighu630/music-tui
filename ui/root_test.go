@@ -740,6 +740,79 @@ func TestPlayFlow(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 事件链回归：TrackEnded 自动连播后 waitForPlayerEvents 必须重新发出
+// ---------------------------------------------------------------------------
+// 背景：waitForPlayerEvents 是一次性 cmd（每次只读 1 个事件），由 onPlayerEvent
+// 重新发出才能继续读下一个。TrackEndedEvent 分支此前提前 return beginPlay/
+// stopAfterEnd 的结果，丢弃了链——连播后无人再读 p.Events()，256 缓冲满后
+// emit 丢弃新事件：UI 进度冻结在 0.00、歌词不动，而 MPRIS（独立 Subscribe
+// 广播通道）仍正常 → playerctl 进度正常。手动切歌/暂停不受影响（链在按键
+// 时仍活着），只有自然播完自动连播触发。
+
+// execReturnedChain 执行 update 返回的 cmd，并把产出消息回灌 Update
+//（模拟 bubbletea 事件循环：cmd 执行结果作为下一条消息处理）。
+// 返回处理后的模型。
+func execReturnedChain(m Model, cmd tea.Cmd) Model {
+	msgs := execCmds(cmd)
+	for _, msg := range msgs {
+		m, _ = update(m, msg)
+	}
+	return m
+}
+
+// TrackEnded 自动连播下一首（用户报告场景：连播未缓存下一首走 URL）后，
+// 返回的 cmd 必须重新包含 waitForPlayerEvents：预推的 ProgressEvent 应被
+// UI 消费并更新 Position（否则进度冻结 0.00、歌词不动）。
+func TestTrackEndedAutoAdvanceKeepsEventChainAlive(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m.queue.Replace(testTrack("t1"))
+	m.queue.Add(testTrack("t2"))
+	m, cmd := m.playQueueTrack() // 播放 t1
+	_ = execCmds(cmd)
+
+	// 预推连播后首个进度事件：若 TrackEnded 返回的 cmd 不含事件链，
+	// 该事件将永远滞留在播放器通道中（生产：256 缓冲满后被 emit 丢弃）。
+	fp.events <- player.ProgressEvent{Position: 5, Duration: 200}
+	m, cmd = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t2").URL {
+		t.Fatalf("TrackEnded 应自动连播 t2: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	if cmd == nil {
+		t.Fatal("TrackEnded 后必须重新发出事件链（否则 UI 永久收不到播放器事件）")
+	}
+	m = execReturnedChain(m, cmd)
+	if m.state.Position != 5 {
+		t.Fatalf("连播后首个 ProgressEvent 未被 UI 消费: Position=%v, want 5（事件链断裂，进度冻结）", m.state.Position)
+	}
+}
+
+// TrackEnded 时队列为空（停止播放）同样必须保持事件链：之后用户手动播放
+// 新曲时，进度事件才能继续到达 UI。
+func TestTrackEndedStopKeepsEventChainAlive(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m.queue.Replace(testTrack("t1"))
+	m, cmd := m.playQueueTrack()
+	_ = execCmds(cmd)
+
+	// 清空队列 → t1 播完 → 停止路径
+	m, _ = update(m, queueClearMsg{})
+	fp.events <- player.ProgressEvent{Position: 3, Duration: 200}
+	m, cmd = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if !m.ended {
+		t.Fatalf("队列为空时 TrackEnded 应停止: ended=%v", m.ended)
+	}
+	if cmd == nil {
+		t.Fatal("TrackEnded(停止) 后必须重新发出事件链（否则后续手动播放进度冻结）")
+	}
+	m = execReturnedChain(m, cmd)
+	if m.state.Position != 3 {
+		t.Fatalf("停止后事件链未消费预推 ProgressEvent: Position=%v, want 3", m.state.Position)
+	}
+}
+
 func TestStaleAsyncResultsIgnored(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
