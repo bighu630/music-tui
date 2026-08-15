@@ -110,6 +110,32 @@ func (q *Queue) Remove(i int) {
 	}
 }
 
+// Move 把下标 from 的曲目移到最终下标 to（其余曲目相对顺序不变）。
+// currentIdx 跟随同一首歌：被移曲是当前曲 → currentIdx = to；
+// 移动跨越当前曲时相应 ±1。非法（from/to 越界、from==to、空/单曲队列）返回 false 且不改状态。
+func (q *Queue) Move(from, to int) bool {
+	if from < 0 || from >= len(q.tracks) || to < 0 || to >= len(q.tracks) || from == to {
+		return false
+	}
+	t := q.tracks[from]
+	movedIsCurrent := from == q.currentIdx
+	// 移除 from；被移曲是当前曲时先临时置 -1（插入阶段再落到 to）
+	q.tracks = append(q.tracks[:from], q.tracks[from+1:]...)
+	if movedIsCurrent {
+		q.currentIdx = -1
+	} else if q.currentIdx > from {
+		q.currentIdx--
+	}
+	// 插入 to（新数组最终下标）
+	q.tracks = append(q.tracks[:to], append([]model.Track{t}, q.tracks[to:]...)...)
+	if movedIsCurrent {
+		q.currentIdx = to
+	} else if q.currentIdx >= to {
+		q.currentIdx++
+	}
+	return true
+}
+
 // Clear 清空队列并清除当前曲目；模式保留（用户偏好）。
 func (q *Queue) Clear() {
 	q.tracks = nil

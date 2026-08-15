@@ -518,6 +518,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 队列页 s 键：与首页模式按钮共用三态循环
 		return m.cycleMode()
 
+	case queueMoveMsg:
+		// 队列页移动模式：把 from 下标曲目移到最终下标 to（currentIdx 跟随
+		// 同一首歌）。非法（越界/from==to）由 queue.Move 拒绝，忽略。
+		if !m.queue.Move(msg.from, msg.to) {
+			return m, nil
+		}
+		m.refreshPreload() // 移动跨越当前曲时"下一首"候选变化
+		return m.syncQueueViews(), nil
+
 	case plLoadMsg:
 		// 播放列表详情 Enter：整列表替换进队列，从选中曲开始播放
 		// （替换语义同 startPlay：清空队列 → 新队列 → 播放）。
@@ -1727,6 +1736,10 @@ func emitQueuePlay(index int) tea.Cmd {
 
 func emitQueueDelete(index int) tea.Cmd {
 	return func() tea.Msg { return queueDeleteMsg{index: index} }
+}
+
+func emitQueueMove(from, to int) tea.Cmd {
+	return func() tea.Msg { return queueMoveMsg{from: from, to: to} }
 }
 
 func emitQueueClear() tea.Cmd {

@@ -697,6 +697,31 @@ func sameTrackSet(a, b []model.Track) bool {
 	return true
 }
 
+// sameIDs 顺序敏感比较曲目 ID 切片（移动模式断言队列顺序用）。
+func sameIDs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// moveMsgOf 从 cmd 结果中提取 queueMoveMsg（未产生则返回零值）。
+func moveMsgOf(t *testing.T, cmd tea.Cmd) queueMoveMsg {
+	t.Helper()
+	var mv queueMoveMsg
+	for _, msg := range execCmds(cmd) {
+		if qm, ok := msg.(queueMoveMsg); ok {
+			mv = qm
+		}
+	}
+	return mv
+}
+
 // TestQueueHintOnLastLine 队列页（非空）快捷键提示行渲染在页面内容区
 // 最后一行（窗口最底行），hint 含 Enter 跳转播放。
 func TestQueueHintOnLastLine(t *testing.T) {
@@ -974,4 +999,386 @@ func TestQueueSlashFilterEmptyQueue(t *testing.T) {
 	if m.queuePage.filtering {
 		t.Fatal("Esc 应退出过滤")
 	}
+}
+
+// ---- 移动模式 ----
+
+// buildQueuePageModel 构造队列页模型（无当前曲目）：入队指定曲目并直达队列页。
+func buildQueuePageModel(t *testing.T, ids ...string) Model {
+	t.Helper()
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	for _, id := range ids {
+		m.queue.Add(testTrack(id))
+	}
+	m = m.syncQueueViews()
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	return m
+}
+
+// TestQueueMoveEnterExit m 进入移动模式（view 切换移动 hint）；Enter/Esc 等效
+// 结束且 Enter 不产生 queuePlayMsg；退出后 hint 恢复含 "m 移动"。
+func TestQueueMoveEnterExit(t *testing.T) {
+	m := buildQueuePageModel(t, "t1", "t2", "t3")
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	if !m.queuePage.moving {
+		t.Fatal("按 m 应进入移动模式")
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, "↑↓←→/hjkl 移动") {
+		t.Errorf("移动模式 view 应含移动 hint, got %q", got)
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, "Enter/Esc 结束") {
+		t.Errorf("移动模式 view 应含结束提示, got %q", got)
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, m.queuePage.modeLabel()) {
+		t.Errorf("移动模式 hint 应含模式名前缀, got %q", got)
+	}
+
+	// Enter 结束：等效 Esc，且不触发跳转播放
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.queuePage.moving {
+		t.Fatal("Enter 应结束移动模式")
+	}
+	for _, msg := range execCmds(cmd) {
+		if _, ok := msg.(queuePlayMsg); ok {
+			t.Fatal("移动模式 Enter 不应触发跳转播放")
+		}
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, "m 移动") {
+		t.Errorf("Enter 退出后 hint 应恢复含 m 移动, got %q", got)
+	}
+
+	// Esc 结束
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	if !m.queuePage.moving {
+		t.Fatal("再次按 m 应进入移动模式")
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.queuePage.moving {
+		t.Fatal("Esc 应结束移动模式")
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, "m 移动") {
+		t.Errorf("Esc 退出后 hint 应恢复含 m 移动, got %q", got)
+	}
+}
+
+// TestQueueMoveNotEnteredEmptyOrSingle 空队列/单曲队列按 m 不进入移动模式。
+func TestQueueMoveNotEnteredEmptyOrSingle(t *testing.T) {
+	m := buildQueuePageModel(t) // 空队列
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	if m.queuePage.moving {
+		t.Error("空队列按 m 不应进入移动模式")
+	}
+
+	m = buildQueuePageModel(t, "t1") // 单曲队列
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	if m.queuePage.moving {
+		t.Error("单曲队列按 m 不应进入移动模式")
+	}
+}
+
+// TestQueueMoveKeys 移动键位全验证：↓/j 下移、↑/k 上移、←/h 队首、→/l 队尾，
+// 每次回灌后队列顺序更新且选中项跟随被移动曲目（从新位置继续）。
+func TestQueueMoveKeys(t *testing.T) {
+	m := buildQueuePageModel(t, "t1", "t2", "t3")
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+
+	// ↓：t1(0) → 1，回灌后 [t2,t1,t3]，选中仍 t1
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyDown})
+	mv := moveMsgOf(t, cmd)
+	if mv.from != 0 || mv.to != 1 {
+		t.Fatalf("↓ from/to = %d/%d, want 0/1", mv.from, mv.to)
+	}
+	m, _ = update(m, mv)
+	if got := idsOf(m.queue.Tracks()); !sameIDs(got, []string{"t2", "t1", "t3"}) {
+		t.Fatalf("↓ 后队列 = %v, want [t2 t1 t3]", got)
+	}
+	if it, ok := m.queuePage.list.SelectedItem().(queueItem); !ok || it.track.ID != "t1" {
+		t.Fatalf("↓ 后选中应跟随 t1, got %+v", it)
+	}
+
+	// ↓：t1(1) → 2（从新位置继续），回灌后 [t2,t3,t1]
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	mv = moveMsgOf(t, cmd)
+	if mv.from != 1 || mv.to != 2 {
+		t.Fatalf("再次 ↓ from/to = %d/%d, want 1/2", mv.from, mv.to)
+	}
+	m, _ = update(m, mv)
+	if got := idsOf(m.queue.Tracks()); !sameIDs(got, []string{"t2", "t3", "t1"}) {
+		t.Fatalf("再次 ↓ 后队列 = %v, want [t2 t3 t1]", got)
+	}
+
+	// ↑：t1(2) → 1
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyUp})
+	mv = moveMsgOf(t, cmd)
+	if mv.from != 2 || mv.to != 1 {
+		t.Fatalf("↑ from/to = %d/%d, want 2/1", mv.from, mv.to)
+	}
+	m, _ = update(m, mv) // [t2,t1,t3]
+
+	// k：t1(1) → 0
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	mv = moveMsgOf(t, cmd)
+	if mv.from != 1 || mv.to != 0 {
+		t.Fatalf("k from/to = %d/%d, want 1/0", mv.from, mv.to)
+	}
+	m, _ = update(m, mv) // [t1,t2,t3]
+
+	// j：t1(0) → 1
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	mv = moveMsgOf(t, cmd)
+	if mv.from != 0 || mv.to != 1 {
+		t.Fatalf("j from/to = %d/%d, want 0/1", mv.from, mv.to)
+	}
+	m, _ = update(m, mv) // [t2,t1,t3]
+
+	// h：t1(1) → 队首 0
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
+	mv = moveMsgOf(t, cmd)
+	if mv.from != 1 || mv.to != 0 {
+		t.Fatalf("h from/to = %d/%d, want 1/0（队首）", mv.from, mv.to)
+	}
+	m, _ = update(m, mv) // [t1,t2,t3]
+
+	// l：t1(0) → 队尾 len-1 = 2
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	mv = moveMsgOf(t, cmd)
+	if mv.from != 0 || mv.to != 2 {
+		t.Fatalf("l from/to = %d/%d, want 0/2（队尾）", mv.from, mv.to)
+	}
+	m, _ = update(m, mv) // [t2,t3,t1]
+	if it, ok := m.queuePage.list.SelectedItem().(queueItem); !ok || it.track.ID != "t1" || it.idx != 2 {
+		t.Errorf("l 后选中应跟随 t1 到队尾, got %+v", it)
+	}
+}
+
+// TestQueueMoveBoundaries 边界：队首 ↑/k/← 无消息；队尾 ↓/j/→ 无消息；
+// 队列与 moving 状态不变。
+func TestQueueMoveBoundaries(t *testing.T) {
+	m := buildQueuePageModel(t, "t1", "t2", "t3")
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+
+	// 队首（t1 idx 0）：上移/队首均为边界
+	for _, key := range []tea.Msg{
+		tea.KeyMsg{Type: tea.KeyUp},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")},
+		tea.KeyMsg{Type: tea.KeyLeft},
+	} {
+		_, cmd := update(m, key)
+		if msgs := execCmds(cmd); len(msgs) != 0 {
+			t.Errorf("队首 %v 不应产生消息, got %v", key, msgs)
+		}
+		if !m.queuePage.moving {
+			t.Fatalf("队首 %v 不应退出移动模式", key)
+		}
+	}
+
+	// l 移到队尾（t1 → idx 2）后测队尾边界
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRight})
+	mv := moveMsgOf(t, cmd)
+	if mv.from != 0 || mv.to != 2 {
+		t.Fatalf("l from/to = %d/%d, want 0/2", mv.from, mv.to)
+	}
+	m, _ = update(m, mv) // [t2,t3,t1]
+
+	for _, key := range []tea.Msg{
+		tea.KeyMsg{Type: tea.KeyDown},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")},
+		tea.KeyMsg{Type: tea.KeyRight},
+	} {
+		_, cmd := update(m, key)
+		if msgs := execCmds(cmd); len(msgs) != 0 {
+			t.Errorf("队尾 %v 不应产生消息, got %v", key, msgs)
+		}
+	}
+	if it, ok := m.queuePage.list.SelectedItem().(queueItem); !ok || it.track.ID != "t1" {
+		t.Fatalf("边界按键后选中应仍为 t1, got %+v", it)
+	}
+	if got := idsOf(m.queue.Tracks()); !sameIDs(got, []string{"t2", "t3", "t1"}) {
+		t.Fatalf("边界按键后队列应不变, got %v", got)
+	}
+}
+
+// TestQueueMoveModal 移动模式模态：d/c/s/p// 一律忽略（无消息、moving 保持、
+// 队列不变），移动键仍有效。
+func TestQueueMoveModal(t *testing.T) {
+	m := buildQueuePageModel(t, "t1", "t2", "t3")
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+
+	for _, key := range []tea.Msg{
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")},
+	} {
+		_, cmd := update(m, key)
+		if msgs := execCmds(cmd); len(msgs) != 0 {
+			t.Fatalf("移动模式 %v 不应产生消息, got %v", key, msgs)
+		}
+		if !m.queuePage.moving {
+			t.Fatalf("移动模式 %v 不应退出, moving=%v", key, m.queuePage.moving)
+		}
+	}
+	if got := idsOf(m.queue.Tracks()); !sameIDs(got, []string{"t1", "t2", "t3"}) {
+		t.Fatalf("移动模式按键后队列应不变, got %v", got)
+	}
+
+	// 移动键仍有效
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyDown})
+	mv := moveMsgOf(t, cmd)
+	if mv.from != 0 || mv.to != 1 {
+		t.Fatalf("模态后 ↓ from/to = %d/%d, want 0/1", mv.from, mv.to)
+	}
+}
+
+// TestQueueMoveFilterInteraction 过滤交互：确认态按 m → 先退出过滤再进入移动
+// 模式；输入框聚焦时按 m → m 是普通过滤字符（moving 仍 false）。
+func TestQueueMoveFilterInteraction(t *testing.T) {
+	m := buildQueuePageModel(t, "t1", "t2", "t3")
+	// / 打开 → 输入 t → Enter 确认失焦（过滤确认态）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.queuePage.filtering || m.queuePage.filterInput.Focused() {
+		t.Fatalf("前置过滤确认态失败: filtering=%v focused=%v", m.queuePage.filtering, m.queuePage.filterInput.Focused())
+	}
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	if m.queuePage.filtering {
+		t.Error("确认态按 m 应先退出过滤")
+	}
+	if !m.queuePage.moving {
+		t.Error("确认态按 m 应进入移动模式")
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, "↑↓←→/hjkl 移动") {
+		t.Errorf("进入后应显示移动 hint, got %q", got)
+	}
+
+	// 聚焦态：m 是普通过滤字符
+	m = buildQueuePageModel(t, "t1", "t2", "t3")
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	if m.queuePage.moving {
+		t.Error("输入框聚焦时按 m 不应进入移动模式")
+	}
+	if !m.queuePage.filterInput.Focused() || m.queuePage.filterInput.Value() != "m" {
+		t.Errorf("聚焦时 m 应输入过滤词, value=%q focused=%v", m.queuePage.filterInput.Value(), m.queuePage.filterInput.Focused())
+	}
+}
+
+// TestQueueMoveGlobalKeysNotIntercepted 需求 5：移动模式不拦截 root 全局键。
+// 全链路（startPlay 建当前曲 + trackAppendMsg 建队列 ≥2 首）进入移动模式后：
+// 空格暂停/继续照常（mpv Pause/Resume 命令发出，StateEvent 回灌后
+// m.state.Playing 翻转）；数字键 1→2 切页往返 moving 保持 true 且移动 hint
+// 仍在；q 照常产生 tea.QuitMsg（先例：TestQuitOnQ/TestSpaceReplayReplacesQueue
+// 均处理 Quit 消息）；Esc 正常退出。
+func TestQueueMoveGlobalKeysNotIntercepted(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	if !m.queuePage.moving {
+		t.Fatal("按 m 应进入移动模式")
+	}
+
+	// 空格：不退出移动模式，暂停命令照常发出（全局语义不被拦截）
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if !m.queuePage.moving {
+		t.Fatal("移动模式按空格不应退出移动模式")
+	}
+	if msgs := execCmds(cmd); fp.pauseCount() != 1 {
+		t.Errorf("空格应触发暂停（Pause 命令已发出）, pauseCount = %d, msgs=%v", fp.pauseCount(), msgs)
+	}
+	m, _ = update(m, playerEventMsg{ev: player.StateEvent{Playing: false}}) // mpv 暂停状态回灌
+	if m.state.Playing {
+		t.Error("暂停事件回灌后 Playing 应为 false")
+	}
+	// 再按空格：继续播放，同样不退出移动模式
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if !m.queuePage.moving {
+		t.Fatal("移动模式再按空格不应退出移动模式")
+	}
+	if msgs := execCmds(cmd); fp.resumeCount() != 1 {
+		t.Errorf("再按空格应触发继续（Resume 命令已发出）, resumeCount = %d, msgs=%v", fp.resumeCount(), msgs)
+	}
+	m, _ = update(m, playerEventMsg{ev: player.StateEvent{Playing: true}})
+	if !m.state.Playing {
+		t.Error("继续事件回灌后 Playing 应为 true")
+	}
+
+	// 数字键切页：moving 状态随页面保留（1 首页 → 2 队列页）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	if m.current != pageHome {
+		t.Fatalf("按 1 应切到首页, current = %v", m.current)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	if m.current != pageQueue {
+		t.Fatalf("按 2 应切回队列页, current = %v", m.current)
+	}
+	if !m.queuePage.moving {
+		t.Fatal("切页往返后 moving 应保持 true")
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, "↑↓←→/hjkl 移动") {
+		t.Errorf("切页往返后仍应显示移动模式 hint, got %q", got)
+	}
+
+	// q：照常触发退出（先例：resume_test 对 Quit 消息有断言）
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	var quit bool
+	for _, msg := range execCmds(cmd) {
+		if _, ok := msg.(tea.QuitMsg); ok {
+			quit = true
+		}
+	}
+	if !quit {
+		t.Error("移动模式按 q 应产生 Quit 消息")
+	}
+	if !m.queuePage.moving {
+		t.Fatal("q 只触发退出消息，不应改变 moving 状态")
+	}
+
+	// Esc 正常退出移动模式
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.queuePage.moving {
+		t.Fatal("Esc 应退出移动模式")
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, "m 移动") {
+		t.Errorf("退出后 hint 应恢复含 m 移动, got %q", got)
+	}
+}
+
+// TestQueueMoveHintOnLastLine 移动模式/过滤确认态的提示行贴底回归：
+// 队列 10 首（触发列表分页）进入移动模式后，移动 hint 替换普通 hint 且
+// 恒在内容区最后一行（状态栏上方）；Esc 退出后过滤确认态 hint 含 m 移动
+// 且同样贴底。
+func TestQueueMoveHintOnLastLine(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	for i := 0; i < 10; i++ {
+		m.queue.Add(testTrack(fmt.Sprintf("t%d", i)))
+	}
+	m = m.syncQueueViews()
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	if !m.queuePage.moving {
+		t.Fatal("按 m 应进入移动模式")
+	}
+	assertHintOnLastLine(t, m, "↑↓←→/hjkl 移动")
+	if got := m.queuePage.view(); strings.Contains(got, "跳转播放") {
+		t.Errorf("移动模式 hint 应替换普通 hint（不应含跳转播放）, got %q", got)
+	}
+
+	// Esc 退出 → 过滤确认态（/ → 输入词 → Enter 失焦）：hint 含 m 移动且贴底
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.queuePage.filterInput.Focused() || !m.queuePage.filtering {
+		t.Fatalf("过滤确认态前置失败: filtering=%v focused=%v", m.queuePage.filtering, m.queuePage.filterInput.Focused())
+	}
+	assertHintOnLastLine(t, m, "m 移动")
 }
