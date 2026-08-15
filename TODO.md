@@ -9,29 +9,29 @@
 6. 设计文档追加第 19 章；全量验证 build/vet/test(-race)
 
 ## TDD 任务
-- [ ] lyrics/ai_test.go：parseAIResponse（围栏/裸 JSON/前后文本/非歌曲/缺 is_song/截断/垃圾/错误形状）
-- [ ] lyrics/ai_test.go：Identify（httptest：请求体 model/temperature/prompt、鉴权头、内容提取、非 200、5xx 重试、401 不重试）
-- [ ] lyrics/client_test.go：FetchForQuery 严格阈值（≤3s 采用差距最小、全部 >3s 拒绝、get 命中优先）
-- [ ] lyrics/aicache_test.go：JSONL 读写/负缓存/损坏行跳过重写/并发 append
-- [ ] lyrics/lrccache_test.go：synced/plain 存取、sanitize、未知名 miss
-- [ ] lyrics/enhanced_test.go：全流程（确定性命中不调 AI；无 AI 配置降级；AI→重查命中；负缓存；AI 失败降级；>3s 弃用；歌词缓存命中免请求；AI 结果缓存命中免调用）
-- [ ] config/config_test.go：openai 缺省禁用 / model 缺省默认 / 显式空 api_key 禁用
-- [ ] ui/home_test.go：AI 来源歌词渲染「AI 匹配」标识
-- [ ] 现有测试不回归（client/config/ui/main）
+- [x] lyrics/ai_test.go：parseAIResponse（围栏/裸 JSON/前后文本/非歌曲/缺 is_song/截断/垃圾/错误形状）
+- [x] lyrics/ai_test.go：Identify（httptest：请求体 model/temperature/prompt、鉴权头、内容提取、非 200、5xx 重试、401 不重试）
+- [x] lyrics/client_test.go：FetchForQuery 严格阈值（≤3s 采用差距最小、全部 >3s 拒绝、get 命中优先）
+- [x] lyrics/aicache_test.go：JSONL 读写/负缓存/损坏行跳过重写/并发 append
+- [x] lyrics/lrccache_test.go：synced/plain 存取、sanitize、未知名 miss
+- [x] lyrics/enhanced_test.go：全流程（确定性命中不调 AI；无 AI 配置降级；AI→重查命中；负缓存；AI 失败降级；>3s 弃用；歌词缓存命中免请求；AI 结果缓存命中免调用）
+- [x] config/config_test.go：openai 缺省禁用 / model 缺省默认 / 显式空 api_key 禁用
+- [x] ui/home_test.go：AI 来源歌词渲染「AI 匹配」标识
+- [x] 现有测试不回归（client/config/ui/main）
 
 ## 实现
-- [ ] lyrics/ai.go：OpenAIClient + AIResult + parseAIResponse + prompt
-- [ ] lyrics/client.go：fetchOne 加 maxDelta 参数 + chooseBestWithin + FetchForQuery
-- [ ] lyrics/aicache.go + lrccache.go
-- [ ] lyrics/enhanced.go：EnhancedClient + Fetcher 接口
-- [ ] config：OpenAI 配置节
-- [ ] ui/root.go：Fetcher 接口接线；ui/home.go：AI 标识
-- [ ] main.go：配置 AI 时组装 EnhancedClient
-- [ ] 设计文档第 19 章
+- [x] lyrics/ai.go：OpenAIClient + AIResult + parseAIResponse + prompt
+- [x] lyrics/client.go：fetchOne 加 maxDelta 参数 + chooseBestWithin + FetchForQuery
+- [x] lyrics/aicache.go + lrccache.go
+- [x] lyrics/enhanced.go：EnhancedClient + Fetcher 接口
+- [x] config：OpenAI 配置节
+- [x] ui/root.go：Fetcher 接口接线；ui/home.go：AI 标识
+- [x] main.go：配置 AI 时组装 EnhancedClient
+- [x] 设计文档第 19 章
 
 ## 验证
 - [ ] go build ./... && go vet ./... && go test ./...（含 -race）
-- [ ] 根目录 TODO.md 更新
+- [x] 根目录 TODO.md 更新
 
 ## OpenAI 增强歌词匹配（用户已确认方案）
 
