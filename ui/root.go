@@ -946,10 +946,20 @@ func (m Model) View() string {
 	return m.overlayToast(out)
 }
 
-// statusBarView 底部常驻状态栏（恒 1 行，布局稳定）：左 = 播放状态 + 模式 +
-// 队列位置；右 = 当前曲目标题（截断）。toast 覆盖在其上方一行的右端。
+// statusBarView 底部常驻状态栏（恒 1 行，布局稳定）：首页自身已展示曲目
+// 信息（控制栏：标题/播放状态/模式/队列位置），状态栏与之重复——首页时
+// 状态栏行留空（行恒存在，布局稳定）；其余页面左 = 歌曲名（截断），
+// 右 = 播放状态 + 模式 + 队列位置。toast 覆盖在其上方一行的右端。
 func (m Model) statusBarView() string {
-	left := "⏹ 未在播放"
+	// 首页控制栏已展示曲目信息，状态栏留空（View 的 "\n" + "" 仍保持行数）
+	if m.current == pageHome {
+		return ""
+	}
+	left := "未在播放"
+	if m.state.Track != nil {
+		left = m.state.Track.Title + " - " + m.state.Track.Artist
+	}
+	right := ""
 	if m.state.Track != nil {
 		icon := "⏵"
 		switch {
@@ -962,27 +972,23 @@ func (m Model) statusBarView() string {
 		if m.queue.CurrentIndex() >= 0 {
 			pos = m.queue.CurrentIndex() + 1
 		}
-		left = fmt.Sprintf("%s %s · %d/%d", icon, modeName(m.queue.Mode()), pos, m.queue.Len())
-	}
-	right := ""
-	if m.state.Track != nil {
-		right = m.state.Track.Title + " - " + m.state.Track.Artist
+		right = fmt.Sprintf("%s %s · %d/%d", icon, modeName(m.queue.Mode()), pos, m.queue.Len())
 	}
 	style := lipgloss.NewStyle().Faint(true)
 	if m.width <= 0 {
 		return style.Render(left)
 	}
-	leftRendered := style.Render(left)
-	leftW := ansi.StringWidth(leftRendered)
-	// 右侧标题按剩余宽度动态截断（曾按 m.width/2 固定截断：窄窗口下
-	// left+right 超宽 → pad 钳 0 仍折行，状态栏被撑成两行）。
-	rightMax := m.width - leftW - 1
-	if rightMax < 0 {
-		rightMax = 0
-	}
-	right = ansi.Truncate(right, rightMax, "…")
+	// 右侧播放顺序信息优先完整，左侧歌曲名按剩余宽度截断（曾按 left 优先：
+	// 名称截断基准须随右侧宽度动态变化）。
 	rightRendered := style.Render(right)
-	pad := m.width - leftW - ansi.StringWidth(rightRendered)
+	rightW := ansi.StringWidth(rightRendered)
+	leftMax := m.width - rightW - 1
+	if leftMax < 0 {
+		leftMax = 0
+	}
+	left = ansi.Truncate(left, leftMax, "…")
+	leftRendered := style.Render(left)
+	pad := m.width - ansi.StringWidth(leftRendered) - rightW
 	if pad < 0 {
 		pad = 0
 	}
