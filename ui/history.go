@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -33,9 +34,13 @@ func (i historyItem) Description() string { return "" }
 func (i historyItem) FilterValue() string { return i.entry.Track.Title + " " + i.entry.Track.Artist }
 
 // historyModel 历史页：列表 + 重播/删除/清空。数据由 root 经 setEntries 推入。
+// / 过滤：过滤后条目复用 historyItem 结构（携带完整 entry，重播/删除零改动）。
 type historyModel struct {
 	list    list.Model
 	entries []history.Entry
+
+	filtering   bool
+	filterInput textinput.Model
 
 	width, height int
 }
@@ -48,13 +53,56 @@ func newHistoryModel() historyModel {
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false)
 	l.SetShowStatusBar(false)
-	return historyModel{list: l}
+	ti := textinput.New()
+	ti.CharLimit = 120
+	return historyModel{list: l, filterInput: ti}
 }
+
+// typing 返回过滤输入框是否聚焦（root 让字符类全局键空格/a/q 让位）。
+func (h historyModel) typing() bool { return h.filtering && h.filterInput.Focused() }
 
 // Update 处理历史页按键。
 func (h historyModel) Update(msg tea.Msg) (historyModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		switch msg.String() {
+		case "/":
+			// 打开或重聚焦过滤输入框；已聚焦时 "/" 作为普通字符输入
+			if !h.filtering {
+				h.filtering = true
+				h.filterInput.Focus()
+				return h, nil
+			}
+			if !h.filterInput.Focused() {
+				h.filterInput.Focus()
+				return h, nil
+			}
+		case "esc":
+			// 任何过滤态 Esc：退出过滤，清空关键词恢复完整列表
+			if h.filtering {
+				h.filtering = false
+				h.filterInput.Blur()
+				h.filterInput.SetValue("")
+				return h.applyFilter(), nil
+			}
+		}
+		if h.filtering && h.filterInput.Focused() {
+			switch msg.String() {
+			case "enter":
+				// 确认过滤：失焦、过滤保持生效
+				h.filterInput.Blur()
+				return h, nil
+			case "up", "down":
+				// 聚焦时方向键仍操作列表（textinput 不消费方向键）
+				var cmd tea.Cmd
+				h.list, cmd = h.list.Update(msg)
+				return h, cmd
+			default:
+				var cmd tea.Cmd
+				h.filterInput, cmd = h.filterInput.Update(msg)
+				return h.applyFilter(), cmd
+			}
+		}
 		switch msg.String() {
 		case "enter", "p":
 			// p 与 Enter 同义：选中记录 → 播放（替换语义）
@@ -76,16 +124,45 @@ func (h historyModel) Update(msg tea.Msg) (historyModel, tea.Cmd) {
 	return h, cmd
 }
 
-// setEntries 更新列表数据（root 在加载/删除/清空后调用）。
+// applyFilter 按当前过滤词重算列表展示（过滤中只显示命中条目，historyItem
+// 携带完整 entry，重播/删除直接可用；未过滤时显示全量）。选中项尽量按
+// 曲目 ID 保持，被过滤掉/已删除则 clamp 到可见末尾。
+func (h historyModel) applyFilter() historyModel {
+	keep := ""
+	if it, ok := h.list.SelectedItem().(historyItem); ok {
+		keep = it.entry.Track.ID
+	}
+	visible := make([]list.Item, 0, len(h.entries))
+	kw := h.filterInput.Value()
+	for _, e := range h.entries {
+		it := historyItem{entry: e}
+		if h.filtering && !filterMatches(kw, it.FilterValue()) {
+			continue
+		}
+		visible = append(visible, it)
+	}
+	h.list.SetItems(visible)
+	if keep != "" {
+		for i, it := range visible {
+			if it.(historyItem).entry.Track.ID == keep {
+				h.list.Select(i)
+				return h
+			}
+		}
+	}
+	if len(visible) > 0 {
+		if idx := h.list.Index(); idx >= len(visible) {
+			h.list.Select(len(visible) - 1)
+		}
+	}
+	return h
+}
+
+// setEntries 更新列表数据（root 在加载/删除/清空后调用）。数据刷新后重放过滤。
 func (h historyModel) setEntries(entries []history.Entry) historyModel {
 	h.entries = entries
 	h.list.Title = fmt.Sprintf("最近播放 (%d/%d)", len(entries), history.MaxEntries)
-	items := make([]list.Item, 0, len(entries))
-	for _, e := range entries {
-		items = append(items, historyItem{entry: e})
-	}
-	h.list.SetItems(items)
-	return h
+	return h.applyFilter()
 }
 
 // selectedTrack 返回当前选中的历史记录（供全局 a 键添加到播放列表）。
@@ -100,11 +177,25 @@ func (h historyModel) selectedTrack() (model.Track, bool) {
 func (h historyModel) setSize(width, height int) historyModel {
 	h.width, h.height = width, height
 	h.list.SetSize(width, height-3)
+	h.filterInput.Width = width - 14
+	if h.filterInput.Width < 10 {
+		h.filterInput.Width = 10
+	}
 	return h
 }
 
-// view 渲染历史页；空历史显示空态提示。提示行恒在页面内容区最后一行。
+// view 渲染历史页：过滤开启时顶部为过滤行，提示行随过滤状态切换；
+// 空历史且未过滤时显示空态提示。提示行恒在页面内容区最后一行。
 func (h historyModel) view() string {
+	if h.filtering {
+		hint := "输入过滤 · Enter 确认 · Esc 取消"
+		if !h.filterInput.Focused() {
+			hint = "Enter/p 重播 · d 删除 · c 清空 · a 添加到… · Esc 退出过滤"
+		}
+		count := fmt.Sprintf("(%d/%d)", len(h.list.VisibleItems()), len(h.entries))
+		filterLine := "过滤: " + h.filterInput.View() + " " + lipgloss.NewStyle().Faint(true).Render(count)
+		return bottomHint(h.height, filterLine+"\n"+h.list.View(), hint)
+	}
 	hint := "Enter/p 重播 · d 删除 · c 清空 · a 添加到…"
 	if len(h.entries) == 0 {
 		content := lipgloss.NewStyle().
