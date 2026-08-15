@@ -1682,41 +1682,61 @@ func TestRootViewToastLayoutStable(t *testing.T) {
 	if !strings.Contains(withToast, "⚠") || !strings.Contains(withToast, "恢复播放失败") {
 		t.Error("View 应包含错误 toast")
 	}
-	// 除状态栏上方一行（toast 覆盖区）外，其余行与无 toast 时逐行相同
+	// 除最后一行（toast 覆盖区 = 状态栏行）外，其余行与无 toast 时逐行相同
 	p, wt := strings.Split(plain, "\n"), strings.Split(withToast, "\n")
 	for i := range p {
-		if i == 22 { // 覆盖区
+		if i == 23 { // 覆盖区 = 最后一行
 			continue
 		}
 		if p[i] != wt[i] {
 			t.Errorf("第 %d 行被 toast 改变:\n无 toast: %q\n有 toast: %q", i, p[i], wt[i])
 		}
 	}
-	if !strings.Contains(wt[22], "恢复播放失败") {
-		t.Errorf("toast 应覆盖在状态栏上方一行（倒数第 2 行）, got %q", wt[22])
+	if !strings.Contains(wt[23], "恢复播放失败") {
+		t.Errorf("toast 应覆盖在最后一行（状态栏行）, got %q", wt[23])
+	}
+	if !strings.HasPrefix(stripAnsiForTest(wt[23]), "⚠") {
+		t.Errorf("toast 应左对齐（行首为 ⚠ 图标）, got %q", wt[23])
+	}
+	// 过期消息命中后 toast 消失，View 与无 toast 时完全一致（状态栏行恢复）
+	m, _ = update(m, toastExpireMsg{id: m.toast.id})
+	if got := m.View(); got != plain {
+		t.Errorf("toast 过期后 View 应与无 toast 时完全一致:\n无 toast: %q\n过期后: %q", plain, got)
 	}
 
-	// 播放态
+	// 播放态（队列页：状态栏显示 顺序 · 1/1，可验证覆盖与恢复）
 	fp := newFakePlayer()
 	m2 := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m2, cmd := m2.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	m2, _ = update(m2, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m2 = m2.switchPage("2") // 队列页，状态栏有内容
 	if got := len(strings.Split(m2.View(), "\n")); got != 24 {
 		t.Errorf("播放态 View 行数 = %d, want 24", got)
 	}
+	before := m2.View()
+	if bar := strings.Split(before, "\n")[23]; !strings.Contains(bar, "顺序") {
+		t.Fatalf("队列页状态栏应含 顺序（覆盖基准）, got %q", bar)
+	}
 	m2, _ = m2.showToast("播放失败: 测试错误", toastError)
 	l2 := strings.Split(m2.View(), "\n")
-	if !strings.Contains(l2[22], "播放失败") {
-		t.Errorf("播放态 toast 应覆盖在状态栏上方一行, got %q", l2[22])
+	if !strings.Contains(l2[23], "播放失败") {
+		t.Errorf("播放态 toast 应覆盖在最后一行（状态栏行）, got %q", l2[23])
 	}
-	if strings.TrimSpace(l2[23]) != "" {
-		t.Errorf("首页状态栏应留空（信息与首页控制栏重复）, got %q", l2[23])
+	if strings.Contains(l2[23], "顺序") {
+		t.Errorf("toast 应临时覆盖状态栏内容（不再含 顺序）, got %q", l2[23])
+	}
+	// 过期恢复：toast 消失后状态栏内容恢复，View 与无 toast 时完全一致
+	m2, _ = update(m2, toastExpireMsg{id: m2.toast.id})
+	if got := m2.View(); got != before {
+		t.Errorf("toast 过期后播放态 View 应恢复与无 toast 时一致:\n无 toast: %q\n过期后: %q", before, got)
 	}
 }
 
 // TestRootViewWideToastStaysWithinWidth 回归：超宽 toast 截断后覆盖行宽恒 ≤ 窗口
 // 宽度——曾按 m.width 截断后仍追加分隔符导致覆盖行 m.width+2 格、终端折行超屏。
+// 现在整行替换状态栏行：左对齐 + 尾部省略号（保头部语义，截掉句尾是用户要求
+// 的变更，与旧 TruncateLeft 保句尾不同）。
 func TestRootViewWideToastStaysWithinWidth(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -1727,11 +1747,15 @@ func TestRootViewWideToastStaysWithinWidth(t *testing.T) {
 		t.Fatalf("超宽 toast View 行数 = %d, want 24（不超屏）", got)
 	}
 	lines := strings.Split(out, "\n")
-	if w := ansi.StringWidth(lines[22]); w > 80 {
+	if w := ansi.StringWidth(lines[23]); w > 80 {
 		t.Errorf("覆盖行宽 = %d, want ≤ 80", w)
 	}
-	if !strings.Contains(lines[22], "跳过继续播放") {
-		t.Errorf("超宽 toast 应从右侧截断保留尾部语义, got %q", lines[22])
+	stripped := stripAnsiForTest(lines[23])
+	if !strings.HasPrefix(stripped, "⚠") || !strings.Contains(stripped, "播放失败") {
+		t.Errorf("超宽 toast 应保头部语义（⚠ 图标 + 消息开头）, got %q", lines[23])
+	}
+	if !strings.HasSuffix(stripped, "…") {
+		t.Errorf("超宽 toast 尾部应有省略号截断标记, got %q", lines[23])
 	}
 }
 

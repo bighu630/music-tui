@@ -1,7 +1,8 @@
 // toast 通知状态机：单条覆盖 + 定时自动消失。
-// toast 渲染不参与布局计算（root.View 末尾对状态栏上方一行的右端做覆盖），
-// 因此出现/消失都不会引起排版跳动。本文件为纯逻辑（无 bubbletea 依赖），
-// 定时器命令 showToast 在 root.go（Model 方法，需 tea.Tick）。
+// toast 渲染不参与布局计算（root.View 末尾对最后一行=状态栏行做左对齐整行
+// 覆盖，报错期间临时显示、消失后恢复），因此出现/消失都不会引起排版跳动。
+// 本文件为纯逻辑（无 bubbletea 依赖），定时器命令 showToast 在 root.go
+// （Model 方法，需 tea.Tick）。
 
 package ui
 
