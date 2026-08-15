@@ -30,15 +30,15 @@ type searchResultsMsg struct {
 	err    error
 }
 
-// trackItem 适配 list.Item：标题 + 歌手 · 时长。
+// trackItem 适配 list.Item：标题 - 作者 · 时长（单行）。
 type trackItem struct {
 	track model.Track
 }
 
-func (i trackItem) Title() string { return i.track.Title }
-func (i trackItem) Description() string {
-	return i.track.Artist + " · " + formatDuration(i.track.Duration)
+func (i trackItem) Title() string {
+	return formatTrackLine(i.track.Title, i.track.Artist, formatDuration(i.track.Duration))
 }
+func (i trackItem) Description() string { return "" }
 func (i trackItem) FilterValue() string { return i.track.Title + " " + i.track.Artist }
 
 // searchModel 搜索页：输入框 + 结果列表 + 加载/空/错误态。
@@ -58,6 +58,7 @@ type searchModel struct {
 
 func newSearchModel(adapter search.SearchAdapter) searchModel {
 	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = false // 单行条目（标题 - 作者 · 时长）
 	l := list.New(nil, delegate, 80, 24)
 	l.Title = "搜索结果"
 	l.SetShowHelp(false)
