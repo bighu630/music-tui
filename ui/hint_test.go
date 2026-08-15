@@ -54,18 +54,23 @@ func TestBottomHintContentTooTall(t *testing.T) {
 }
 
 // assertHintOnLastLine 页面布局断言：m.View() 恰好占满窗口（80x24，不超屏
-// 也不缺行），且最后一行（窗口最底行）stripANSI 后含 hint 文本。
+// 也不缺行）。master 已合并 toast 分支（底部常驻状态栏）：窗口 = tabBar 2 +
+// 页面 h=21 + 状态栏 1；提示行在页面内容区最后一行 = 状态栏上方一行
+// （倒数第二行），stripANSI 后含 hint 文本且为 faint 样式。
 // 三个页面的布局测试共用。
 func assertHintOnLastLine(t *testing.T, m Model, hint string) {
 	t.Helper()
 	lines := strings.Split(m.View(), "\n")
 	if len(lines) != 24 {
-		t.Fatalf("View 行数 = %d, want 24（tabBar 2 + 页面 h=22）", len(lines))
+		t.Fatalf("View 行数 = %d, want 24（tabBar 2 + 页面 h=21 + 状态栏 1）", len(lines))
 	}
-	if got := stripANSI(lines[23]); !strings.Contains(got, hint) {
-		t.Errorf("最后一行应为提示行, got %q, want 含 %q", got, hint)
+	if got := stripANSI(lines[22]); !strings.Contains(got, hint) {
+		t.Errorf("倒数第二行（状态栏上方）应为提示行, got %q, want 含 %q", got, hint)
 	}
-	if !strings.Contains(lines[23], "\x1b[2m") {
-		t.Errorf("最后一行应为 faint 样式, got %q", lines[23])
+	if !strings.Contains(lines[22], "\x1b[2m") {
+		t.Errorf("提示行应为 faint 样式, got %q", lines[22])
+	}
+	if !strings.Contains(lines[23], "未在播放") {
+		t.Errorf("最底行应为常驻状态栏, got %q", lines[23])
 	}
 }
