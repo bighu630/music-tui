@@ -2,3 +2,4 @@
 *.sock
 .worktrees/
 .worktrees/
+/AGENTS.md
