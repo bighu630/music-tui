@@ -112,6 +112,18 @@ func realDownload(ctx context.Context, ytdlpPath, url, destBase string, cookieFi
 		cleanDestBase(destBase)
 		return "", fmt.Errorf("下载产物无效（缺失或 0 字节）")
 	}
+	// 内容有效性校验：yt-dlp 被代理/中间页劫持时产物可能是 HTML 错误页或
+	// 截断文件——拒绝入库（外层重试循环重新跑 yt-dlp 重新提取新 URL）并
+	// 清理残留，HTML 绝不注册进缓存索引。
+	ok, err := isAudioFile(final)
+	if err != nil {
+		cleanDestBase(destBase)
+		return "", fmt.Errorf("校验下载产物: %w", err)
+	}
+	if !ok {
+		cleanDestBase(destBase)
+		return "", fmt.Errorf("下载产物非音频内容（HTML 错误页或截断文件）")
+	}
 	return filepath.Base(final), nil
 }
 

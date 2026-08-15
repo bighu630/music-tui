@@ -27,6 +27,12 @@ done
 ` + extra
 }
 
+// fakeAudioOut 是假 yt-dlp 脚本的合法音频产物写法：EBML/WebM 魔数（八进制
+// 转义，POSIX sh 兼容）+ 零填充到 2048 字节（≥ MinAudioSize）——内容校验
+// 通过，下载→注册全链路真实走通（与真实 yt-dlp 落盘音频对齐）。
+const fakeAudioOut = `printf '\032\105\337\243' > "$out"
+head -c 2044 /dev/zero >> "$out"`
+
 // argsLogBody 返回假 yt-dlp 脚本体：把收到的全部参数逐行写入 <缓存目录>/args
 //（配合 fakeYtDlpBody 的 -o 解析），用于断言启动参数（--cookies/--add-header）。
 // printf '%s\n' "$@" 保证参数边界不丢（值含空格时仍是一行一个参数）。
@@ -59,7 +65,7 @@ func writeFakeYtDlp(t *testing.T, body string) string {
 }
 
 func TestRealDownloadFakeScript(t *testing.T) {
-	script := writeFakeYtDlp(t, fakeYtDlpBody(`printf 'fake-audio-bytes' > "$out"`))
+	script := writeFakeYtDlp(t, fakeYtDlpBody(fakeAudioOut))
 	destBase := filepath.Join(t.TempDir(), "song")
 	file, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase, "", nil)
 	if err != nil {
@@ -75,8 +81,8 @@ func TestRealDownloadFakeScript(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	if string(data) != "fake-audio-bytes" {
-		t.Errorf("content = %q, want fake-audio-bytes", data)
+	if string(data) != string(validAudioBytes()) {
+		t.Errorf("content = %q, want 合法音频字节（EBML 魔数 + 2048 字节）", data)
 	}
 }
 
@@ -157,11 +163,11 @@ func TestRealDownloadPicksLatestOnMultipleMatches(t *testing.T) {
 	script := writeFakeYtDlp(t, fakeYtDlpBody(`exit 0`)) // 不写文件：预置两个产物模拟残留
 	dir := t.TempDir()
 	destBase := filepath.Join(dir, "song")
-	if err := os.WriteFile(destBase+".webm", []byte("stale"), 0o644); err != nil { // 陈旧：先写、字典序靠后
+	if err := os.WriteFile(destBase+".webm", validAudioBytes(), 0o644); err != nil { // 陈旧：先写、字典序靠后
 		t.Fatal(err)
 	}
 	time.Sleep(10 * time.Millisecond) // 保证 mtime 有先后
-	if err := os.WriteFile(destBase+".m4a", []byte("new"), 0o644); err != nil { // 本次产物：后写
+	if err := os.WriteFile(destBase+".m4a", validAudioBytes(), 0o644); err != nil { // 本次产物：后写
 		t.Fatal(err)
 	}
 	file, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase, "", nil)
@@ -196,7 +202,7 @@ exit 1
 // -o 之前、url 最后；与真实命令顺序完全一致（逐项 DeepEqual）。
 // 缓存目录名含空格：验证参数逐行写入不丢边界（printf '%s\n' "$@"）。
 func TestRealDownloadAddsCookieAndHeaders(t *testing.T) {
-	script := writeFakeYtDlp(t, argsLogBody(`printf 'fake-audio-bytes' > "$out"`))
+	script := writeFakeYtDlp(t, argsLogBody(fakeAudioOut))
 	base := filepath.Join(t.TempDir(), "cache dir")
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		t.Fatal(err)
@@ -227,7 +233,7 @@ func TestRealDownloadAddsCookieAndHeaders(t *testing.T) {
 // 未配置 cookie/headers（空串 + nil）时 args 与旧版完全一致：
 // --no-playlist --no-warnings -f bestaudio -o <destBase>.%(ext)s <url>（无回归）。
 func TestRealDownloadNoConfigArgsUnchanged(t *testing.T) {
-	script := writeFakeYtDlp(t, argsLogBody(`printf 'fake-audio-bytes' > "$out"`))
+	script := writeFakeYtDlp(t, argsLogBody(fakeAudioOut))
 	destBase := filepath.Join(t.TempDir(), "song")
 	const url = "https://youtube.com/watch?v=abc"
 	if _, err := realDownload(context.Background(), script, url, destBase, "", nil); err != nil {
@@ -239,5 +245,26 @@ func TestRealDownloadNoConfigArgsUnchanged(t *testing.T) {
 	}
 	if got := readArgsFile(t, filepath.Dir(destBase)); !reflect.DeepEqual(got, want) {
 		t.Errorf("args = %q\nwant %q", got, want)
+	}
+}
+
+// 产物内容非音频（yt-dlp 被代理/中间页劫持返回 HTML 错误页，≥MinAudioSize
+// 且魔数不匹配）→ realDownload 返回错误并清理 destBase.* 残留；外层重试
+// 循环重新跑 yt-dlp 重新提取新 URL（HTML 不注册入库）。
+func TestRealDownloadRejectsHtmlOutput(t *testing.T) {
+	script := writeFakeYtDlp(t, fakeYtDlpBody(`
+printf '<!DOCTYPE html><html>err</html>' > "$out"
+head -c 2048 /dev/zero >> "$out"
+`))
+	destBase := filepath.Join(t.TempDir(), "song")
+	_, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase, "", nil)
+	if err == nil {
+		t.Fatal("realDownload HTML 产物 = nil error, want error")
+	}
+	if !strings.Contains(err.Error(), "非音频") {
+		t.Errorf("error = %q, want 含非音频", err)
+	}
+	if _, err := os.Stat(destBase + ".webm"); !os.IsNotExist(err) {
+		t.Errorf("HTML 产物残留未被清理: %v", err)
 	}
 }

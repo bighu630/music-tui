@@ -93,6 +93,13 @@ func New(opts Options, ytdlpPath string, cookieFile string, headers map[string]s
 			changed = true // 条目文件缺失 → 删条目
 			continue
 		}
+		// 内容有效性：条目文件被替换为 HTML/截断等非音频 → 删文件 + 删条目
+		//（防损坏文件滞留；changed=true 最后由统一 save 持久化）
+		if ok, err := isAudioFile(filepath.Join(m.dir, e.File)); err != nil || !ok {
+			os.Remove(filepath.Join(m.dir, e.File))
+			changed = true
+			continue
+		}
 		kept = append(kept, e)
 	}
 	m.idx.entries = kept
@@ -143,6 +150,13 @@ func (m *Manager) Lookup(id string) (string, bool) {
 	full := filepath.Join(m.dir, e.File)
 	if _, err := os.Stat(full); err != nil {
 		m.idx.remove(id) // 文件缺失移除条目（不持久化）
+		return "", false
+	}
+	// 内容有效性：文件被替换为 HTML/截断等非音频 → 删文件 + 删条目 + miss
+	//（UI 自动回退网络取流，损坏文件不滞留）
+	if ok, err := isAudioFile(full); err != nil || !ok {
+		os.Remove(full)
+		m.idx.remove(id)
 		return "", false
 	}
 	m.idx.upsert(id, time.Now())
@@ -223,11 +237,20 @@ func (m *Manager) Register(id string) error {
 }
 
 // register 注册指定文件名的条目（内部：download 完成时文件名含扩展名）。
+// 写入前内容校验：产物被劫持为 HTML/截断等非音频 → 返回错误（download
+// 失败分支会删除已下载文件，防孤儿滞留）。
 func (m *Manager) register(id, file string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.dir == "" {
 		return nil // Disabled 安全
+	}
+	ok, err := isAudioFile(filepath.Join(m.dir, file))
+	if err != nil {
+		return fmt.Errorf("校验缓存文件: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("缓存文件内容非音频（HTML 错误页或截断文件）: %s", file)
 	}
 	m.idx.upsertFile(id, file, time.Now())
 	max := m.maxEntries

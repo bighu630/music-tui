@@ -41,7 +41,23 @@ func writeIndexFile(t *testing.T, dir string, content string) {
 
 func writeCacheFile(t *testing.T, dir, file string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, file), []byte("data-"+file), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, file), validAudioBytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// validAudioBytes 返回合法音频内容（EBML/WebM 魔数 + 零填充到 2048 字节，
+// 满足 MinAudioSize，内容校验通过）。
+func validAudioBytes() []byte {
+	return append([]byte{0x1A, 0x45, 0xDF, 0xA3}, make([]byte, 2044)...)
+}
+
+// writeHTMLCacheFile 写 HTML 内容文件（填充到 ≥MinAudioSize，魔数校验必
+// 失败），模拟被中间页劫持/替换的损坏缓存文件。
+func writeHTMLCacheFile(t *testing.T, dir, file string) {
+	t.Helper()
+	data := append([]byte("<!DOCTYPE html><html>err</html>"), make([]byte, 2048)...)
+	if err := os.WriteFile(filepath.Join(dir, file), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -122,6 +138,42 @@ func TestNewPrunesMissingFiles(t *testing.T) {
 	}
 	if _, ok := ix.get("gone"); ok {
 		t.Error("stale entry gone persisted back")
+	}
+}
+
+// 启动清理内容校验：索引条目文件被替换为 HTML（非音频，魔数不匹配且
+// ≥MinAudioSize）→ 文件删除 + 条目丢弃，清理结果持久化（防损坏文件滞留）。
+func TestNewPrunesInvalidAudioEntries(t *testing.T) {
+	dir := t.TempDir()
+	writeIndexFile(t, dir, `[
+		{"id":"html","file":"html","last_played":"2024-01-01T00:00:00Z"},
+		{"id":"audio","file":"audio","last_played":"2024-01-02T00:00:00Z"}
+	]`)
+	writeHTMLCacheFile(t, dir, "html")
+	writeCacheFile(t, dir, "audio")
+	cm, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent", "", nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if cm.idx.len() != 1 {
+		t.Fatalf("idx len = %d, want 1", cm.idx.len())
+	}
+	if _, ok := cm.idx.get("html"); ok {
+		t.Error("HTML 内容条目 html 仍在索引中，应被丢弃")
+	}
+	if _, ok := cm.idx.get("audio"); !ok {
+		t.Error("合法音频条目 audio 缺失")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "html")); !os.IsNotExist(err) {
+		t.Errorf("HTML 内容文件未被删除: %v", err)
+	}
+	// 清理结果已持久化：重读索引无 HTML 条目
+	ix, err := load(filepath.Join(dir, "index.json"))
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if _, ok := ix.get("html"); ok {
+		t.Error("HTML 条目仍被持久化")
 	}
 }
 
@@ -255,6 +307,30 @@ func TestLookupMissThenHitThenFileGone(t *testing.T) {
 	}
 }
 
+// 命中前内容校验：条目文件被替换为 HTML（非音频）→ Lookup 返回 miss、
+// 文件与条目被清理（UI 自动回退网络取流，损坏文件不滞留）。
+func TestLookupInvalidAudioReturnsMissAndCleans(t *testing.T) {
+	dir := t.TempDir()
+	cm := newTestManager(t, Options{Enabled: true, MaxEntries: 100, Dir: dir})
+	id := "html-id-1234"
+	// 预置条目 + HTML 内容文件（直接操作索引绕过 Register 的写入前校验，
+	// 模拟注册后被外部替换成损坏文件）
+	cm.idx.upsertFile(id, SafeName(id), time.Now())
+	if err := cm.idx.save(cm.indexPath()); err != nil {
+		t.Fatal(err)
+	}
+	writeHTMLCacheFile(t, dir, SafeName(id))
+	if _, ok := cm.Lookup(id); ok {
+		t.Fatal("Lookup HTML 内容 = hit, want miss")
+	}
+	if _, ok := cm.idx.get(id); ok {
+		t.Error("HTML 内容条目未被移除")
+	}
+	if _, err := os.Stat(filepath.Join(dir, SafeName(id))); !os.IsNotExist(err) {
+		t.Errorf("HTML 内容文件未被删除: %v", err)
+	}
+}
+
 func TestRegisterEvictsOldest(t *testing.T) {
 	dir := t.TempDir()
 	cm := newTestManager(t, Options{Enabled: true, MaxEntries: 2, Dir: dir})
@@ -362,7 +438,7 @@ func TestCacheAsyncDedupSameID(t *testing.T) {
 	dir := t.TempDir()
 	callsFile := filepath.Join(dir, "calls")
 	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
-		writeFakeYtDlp(t, fakeYtDlpBody(`printf 'fake-audio-bytes' > "$out"`+"\n"+callCounterBody())))
+		writeFakeYtDlp(t, fakeYtDlpBody(fakeAudioOut+"\n"+callCounterBody())))
 	const id = "dedup-id-1"
 	for i := 0; i < 10; i++ {
 		cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
@@ -397,7 +473,7 @@ func TestCacheAsyncDifferentIDs(t *testing.T) {
 	dir := t.TempDir()
 	callsFile := filepath.Join(dir, "calls")
 	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
-		writeFakeYtDlp(t, fakeYtDlpBody(`printf 'fake-audio-bytes' > "$out"`+"\n"+callCounterBody())))
+		writeFakeYtDlp(t, fakeYtDlpBody(fakeAudioOut+"\n"+callCounterBody())))
 	for _, id := range []string{"id-1", "id-2", "id-3"} {
 		cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
 	}
@@ -435,7 +511,7 @@ func TestCacheAsyncDownloadsAndRegisters(t *testing.T) {
 	callsFile := filepath.Join(dir, "calls")
 	// 脚本同时落盘音频字节并计数：全链路真实走完 下载→注册
 	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
-		writeFakeYtDlp(t, fakeYtDlpBody(`printf 'stream-audio-bytes' > "$out"`+"\n"+callCounterBody())))
+		writeFakeYtDlp(t, fakeYtDlpBody(fakeAudioOut+"\n"+callCounterBody())))
 	id := "dl-abcd1234"
 	cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
 
@@ -461,7 +537,7 @@ func TestCacheAsyncDownloadsAndRegisters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cached file: %v", err)
 	}
-	if string(data) != "stream-audio-bytes" {
+	if string(data) != string(validAudioBytes()) {
 		t.Errorf("cached content = %q", data)
 	}
 	// inflight 已清除：再次 CacheAsync 应 no-op（条目已存在）→ 脚本调用次数不再增长
@@ -542,7 +618,8 @@ if [ "$n" -le 2 ]; then
   echo "HTTP Error 403" >&2
   exit 1
 fi
-printf 'fake-audio-bytes' > "$out"
+printf '\032\105\337\243' > "$out"
+head -c 2044 /dev/zero >> "$out"
 `
 	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
 		writeFakeYtDlp(t, fakeYtDlpBody(body)))
@@ -568,7 +645,7 @@ printf 'fake-audio-bytes' > "$out"
 	if err != nil {
 		t.Fatalf("read cached file: %v", err)
 	}
-	if string(data) != "fake-audio-bytes" {
+	if string(data) != string(validAudioBytes()) {
 		t.Errorf("cached content = %q", data)
 	}
 	// 前 2 次失败 + 第 3 次成功 = 共 3 次调用
@@ -583,7 +660,7 @@ printf 'fake-audio-bytes' > "$out"
 func TestCacheAsyncDirWithGlobMetachar(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "cache[x]")
 	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
-		writeFakeYtDlp(t, fakeYtDlpBody(`printf 'fake-audio-bytes' > "$out"`)))
+		writeFakeYtDlp(t, fakeYtDlpBody(fakeAudioOut)))
 	id := "meta-1234567"
 	cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
 
@@ -654,7 +731,7 @@ func TestCacheAsyncTimeoutKillsAndCleans(t *testing.T) {
 func TestCacheAsyncRegisterFailureRemovesFile(t *testing.T) {
 	dir := t.TempDir()
 	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
-		writeFakeYtDlp(t, fakeYtDlpBody(`printf 'fake-audio-bytes' > "$out"`)))
+		writeFakeYtDlp(t, fakeYtDlpBody(fakeAudioOut)))
 	// 让 register 的持久化失败：把 index.json 占位成目录（save 的 Rename 会失败）
 	if err := os.Mkdir(filepath.Join(dir, "index.json"), 0o755); err != nil {
 		t.Fatal(err)

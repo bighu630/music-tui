@@ -96,12 +96,14 @@ done
 	return script
 }
 
-// presetCache 预置缓存条目：写缓存文件（SafeName 命名）+ 注册进索引，
-// 返回缓存文件完整路径（命中时应作为播放目标）。
+// presetCache 预置缓存条目：写缓存文件（SafeName 命名，内容为合法音频
+// 字节：EBML 魔数 + 零填充 ≥ MinAudioSize）+ 注册进索引，返回缓存文件
+// 完整路径（命中时应作为播放目标）。
 func presetCache(t *testing.T, cm *cache.Manager, dir, id string) string {
 	t.Helper()
 	full := filepath.Join(dir, cache.SafeName(id))
-	if err := os.WriteFile(full, []byte("cached-audio"), 0o644); err != nil {
+	audio := append([]byte{0x1A, 0x45, 0xDF, 0xA3}, make([]byte, 2044)...)
+	if err := os.WriteFile(full, audio, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := cm.Register(id); err != nil {
@@ -255,9 +257,11 @@ func TestResumeCachePreservedOnPlayPausedIpcError(t *testing.T) {
 // 启动，避免与 mpv 内置 yt-dlp 并发访问同一 URL 放大 403 风控（回归：连播
 // 未缓存下一首卡住）。下载完成即缓存，下次恢复/播放直接走本地。
 func TestResumeCacheMissTriggersBackgroundDownload(t *testing.T) {
-	// 假 yt-dlp 直接下载：解析 -o 模板把 fake-audio-bytes 落盘到缓存目录
-	// （与真实 yt-dlp -o 落盘同语义）；文件内容断言证明提取→下载→注册全链路真实走通。
-	script := writeFakeYtDlp(t, `printf 'fake-audio-bytes' > "$out"`)
+	// 假 yt-dlp 直接下载：解析 -o 模板把合法音频字节（EBML 魔数 + 零填充
+	// 到 2048 ≥ MinAudioSize）落盘到缓存目录（与真实 yt-dlp -o 落盘同语义）；
+	// 文件内容断言证明提取→下载→注册全链路真实走通。
+	script := writeFakeYtDlp(t, `printf '\032\105\337\243' > "$out"
+head -c 2044 /dev/zero >> "$out"`)
 
 	m, fp, cm, dir := newCacheTestModelWithYtdlp(t, sessionState(66.6, false), script)
 	if m.state.Track == nil || m.state.Track.ID != "b" {
@@ -299,13 +303,13 @@ func TestResumeCacheMissTriggersBackgroundDownload(t *testing.T) {
 			if _, err := os.Stat(path); err != nil {
 				t.Fatalf("缓存文件应真实存在: %v", err)
 			}
-			// 假脚本确实落盘了音频字节（防未来回归为注册空文件）
+			// 假脚本确实落盘了合法音频字节（防未来回归为注册空文件/HTML）
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatalf("读取缓存文件: %v", err)
 			}
-			if !strings.Contains(string(data), "fake-audio-bytes") {
-				t.Errorf("缓存文件内容 = %q, want 含 fake-audio-bytes", data)
+			if len(data) < 2048 || data[0] != 0x1A || data[1] != 0x45 || data[2] != 0xDF || data[3] != 0xA3 {
+				t.Errorf("缓存文件内容应为合法音频（EBML 魔数 + ≥2048 字节），实际 %d 字节", len(data))
 			}
 			break
 		}

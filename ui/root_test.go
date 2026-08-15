@@ -2024,7 +2024,8 @@ for a in "$@"; do
   prev="$a"
 done
 [ -n "$out" ] || exit 9
-printf 'fake-audio-bytes' > "$out"
+printf '\032\105\337\243' > "$out"
+head -c 2044 /dev/zero >> "$out"
 `, logPath)
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
