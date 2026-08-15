@@ -627,5 +627,5 @@ cache/
 | main | loadConfig 缺失/损坏备份重建（同 loadHistory 模式） |
 
 ### 17.6 已知限制
-- **LoadFailed 陈旧事件可能误删新曲目的有效缓存**：end-file error 不携带曲目信息，若旧曲失败事件在 tea 队列中晚于新曲 beginPlay 被处理，会按 `m.state.Track` 删除新曲的缓存条目（窗口毫秒级、后果自愈——重下即可，重试播放逻辑不受影响）。修复需 player 层为 loadfile 维护单调序号；最小 UI 层方案已记录：Model 加 `cacheHitGen`，beginPlay 命中分支记录 `cacheHitGen = playGen`，LoadFailed 移除块追加 `cacheHitGen == playGen` 条件（利用既有 playGen，无需改 player 包）
-- **多实例共享缓存目录**：与 index.json/session.json 同款单实例假设，多实例并发写索引有竞态
+- **LoadFailed 陈旧事件可能误删新曲目的有效缓存**：**主场景已修复，残留亚毫秒级窗口**——player 层按 playlist_entry_id 归属过滤陈旧 end-file error（mpv ≥0.33 的 end-file 事件与 loadfile 命令响应均携带 playlist_entry_id，且响应先于事件到达）：事件 id 与最近一次成功 loadfile 的 id 不一致 = 旧曲取流失败晚到，丢弃防 UI 按“当前曲目”误删健康缓存；旧版 mpv 无该字段时过滤禁用、保守放行（loadfile 响应无 id 同样保守放行）。**残差**：旧曲取流失败事件恰在切歌的 loadfile 命令处理前写出（亚毫秒级窗口）时仍可能被归属为当前曲，后果为缓存条目被删后可重新下载自愈；UI 层无法区分同代际事件，接受该残差。UI 层同步区分：IPC 层恢复失败不再删缓存（与缓存文件无关），真实损坏由异步 LoadFailedError 路径移除条目，提示区分“缓存文件损坏”与网络取流失败
+- **多实例共享缓存目录**：与 index.json/session.json 同款单实例假设，多实例并发写索引的互相覆盖问题仍为已知限制

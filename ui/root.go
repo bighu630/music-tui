@@ -94,7 +94,8 @@ type historyResultMsg struct {
 }
 
 // resumeResultMsg 续播恢复结果（PlayPaused（含定位）成败）。
-// fromCache 标记本次恢复是否命中本地缓存（命中 → 失败时移除损坏缓存）。
+// fromCache 标记本次恢复是否命中本地缓存（命中 → 异步 LoadFailedError
+// （onPlayerEvent）路径据此移除损坏缓存；IPC 层失败与文件无关，不删）。
 type resumeResultMsg struct {
 	err       error
 	fromCache bool
@@ -413,16 +414,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
 
 	case resumeResultMsg:
-		// 命中/未命中标记回填（成功与失败分支都先同步，失败时据此移除损坏缓存）。
+		// 命中/未命中标记回填（成功分支据此在异步 LoadFailed 时移除损坏缓存）。
 		m.playingFromCache = msg.fromCache
 		if msg.err != nil {
 			// 恢复失败：状态重置（当前曲播放不了），但队列保留展示——用户仍
 			// 可查看/跳转播放其他曲目；磁盘会话保留，下次启动重试（mpv 瞬时
 			// 故障可恢复），用户播放新曲或退出时自然覆盖/清除。
-			// 命中缓存仍失败 → 缓存文件损坏：移除条目，下次恢复/播放走网络。
-			if msg.fromCache && m.resume != nil {
-				m.cache.Remove(m.resume.track.ID)
-			}
+			// 注意：不依据 fromCache 移除缓存条目——IPC 层错误（PlayPaused 命令
+			// 失败）只代表命令未被 mpv 接受（连接/参数瞬态问题），与缓存文件损坏
+			// 无关（坏文件 mpv 会接受 loadfile 后异步报 end-file error）；删除健康
+			// 缓存有害，真实损坏由异步 LoadFailedError 路径处理。
 			m.resuming = false // 恢复上下文作废
 			m.lastError = "恢复播放失败: " + msg.err.Error()
 			m.state = model.PlaybackState{}
@@ -716,9 +717,19 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		if errors.As(ev.Err, &le) {
 			// 播放自缓存文件时取流失败 → 缓存条目损坏（下载不完整/已过期）：
 			// 移除条目 + 复位标记，后续重试/跳过自然回退网络 URL 重新取流。
-			if m.playingFromCache && m.state.Track != nil {
+			// fromCache 须在移除动作之前捕获（移除后 playingFromCache 已复位）。
+			fromCache := m.playingFromCache && m.state.Track != nil
+			if fromCache {
 				m.cache.Remove(m.state.Track.ID)
 				m.playingFromCache = false
+			}
+			// 提示区分两类失败：缓存损坏（从缓存播放失败，已删条目下次重下）
+			// 与网络取流失败（file_error 诊断映射）；恢复中/重试中/耗尽跳过共用。
+			var hint string
+			if fromCache {
+				hint = "缓存文件损坏，已移除（下次播放将重新下载）"
+			} else {
+				hint = loadFailureHint(le.FileError)
 			}
 			// 续播恢复（PlayPaused 静默加载）期间撞取流失败：不自动重试——
 			// 恢复上下文已作废（重试会走 beginPlay→Play()：发声、从 0:00、
@@ -727,7 +738,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 			// 下次启动重试。
 			if m.resuming {
 				m.resuming = false
-				m.lastError = "恢复播放失败: " + loadFailureHint(le.FileError)
+				m.lastError = "恢复播放失败: " + hint
 				m.state = model.PlaybackState{}
 				m.home = m.home.syncState(m.state)
 				m.queueSkip = false
@@ -736,13 +747,11 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 			}
 			if m.retryCount < maxPlayRetries {
 				m.retryCount++
-				hint := loadFailureHint(le.FileError)
 				m.lastError = fmt.Sprintf("播放失败：%s，正在自动重试（%d/%d）…", hint, m.retryCount, maxPlayRetries)
 				m.state.Playing = false
 				m.home = m.home.syncState(m.state)
 				return m, tea.Batch(waitForPlayerEvents(m.player), retryPlayCmd(m.playGen))
 			}
-			hint := loadFailureHint(le.FileError)
 			// 重试耗尽：跳过失败曲目继续连播。注意 Next 现为回绕语义——单曲队列/
 			// 重复 ID 会把失败曲目自身送回，继续播放会陷入“失败→重试→耗尽→
 			// 重播失败曲”死循环，故候选与失败曲目同 ID 时视为无曲可跳，保留
@@ -950,8 +959,9 @@ func (m Model) saveSession() {
 
 // resumeCmd 续播恢复：PlayPaused 静默加载当前曲目并定位（不发声；定位随
 // loadfile 的 start= 选项原子完成，避免加载窗口内 seek 被 mpv 拒绝的竞态，
-// 见 mpv.go PlayPaused）。命中缓存 → 播本地文件（fromCache 标记回填，
-// 失败时据此移除损坏条目）；未命中 → 网络 URL。
+// 见 mpv.go PlayPaused）。命中缓存 → 播本地文件（fromCache 标记回填至
+// playingFromCache，异步 LoadFailedError 时据此移除损坏条目）；未命中 →
+// 网络 URL。IPC 层失败（PlayPaused 命令被拒）与缓存文件无关，不删条目。
 func resumeCmd(m Model) tea.Cmd {
 	track := m.resume.track
 	pos := m.resume.pos

@@ -145,6 +145,9 @@ func TestLoadFailedFromCacheEvictsThenRetriesNetwork(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("应调度自动重试 cmd")
 	}
+	if !strings.Contains(m.lastError, "缓存文件损坏") {
+		t.Errorf("重试横幅应含缓存文件损坏提示: %q", m.lastError)
+	}
 	if m.state.Playing {
 		t.Error("重试等待期间 Playing 应为 false")
 	}
@@ -193,9 +196,10 @@ func TestResumeFromCacheUsesLocalPath(t *testing.T) {
 	}
 }
 
-// 恢复命中缓存但 PlayPaused 失败（缓存文件损坏）：条目移除 + 标记复位，
-// 下次恢复/播放走网络。
-func TestResumeCacheCorruptOnFailure(t *testing.T) {
+// 恢复命中缓存但 PlayPaused 返回 IPC 层错误：命令未被 mpv 接受（连接/参数
+// 瞬态问题），与缓存文件损坏无关（坏文件 mpv 会接受 loadfile 后异步报
+// end-file error）——不得移除缓存条目，健康缓存保留，下次恢复/播放仍走本地。
+func TestResumeCachePreservedOnPlayPausedIpcError(t *testing.T) {
 	m, fp, cm, dir := newCacheTestModel(t, sessionState(66.6, false))
 	if m.state.Track == nil {
 		t.Fatal("恢复场景应有当前曲目")
@@ -203,14 +207,60 @@ func TestResumeCacheCorruptOnFailure(t *testing.T) {
 	curID := m.state.Track.ID
 	presetCache(t, cm, dir, curID)
 
-	// PlayPaused 失败（注入）：应移除损坏缓存条目
+	// PlayPaused IPC 失败（注入）：条目应保留
 	fp.playErr = true
 	msgs := execCmds(resumeCmd(m))
 	m, _ = update(m, msgs[0])
-	if _, ok := cm.Lookup(curID); ok {
-		t.Error("恢复失败且来自缓存时条目应被移除（损坏缓存）")
+	if _, ok := cm.Lookup(curID); !ok {
+		t.Error("IPC 层恢复失败与缓存文件无关：条目应保留")
 	}
 	if !strings.Contains(m.lastError, "恢复播放失败") {
 		t.Errorf("lastError = %q, want 含恢复播放失败", m.lastError)
 	}
 }
+
+// 恢复命中缓存 + mpv 异步加载失败（end-file error → LoadFailedError）：这才是
+// “缓存文件损坏”的真实信号（mpv 接受 loadfile 后异步报错）——条目移除 +
+// playingFromCache 复位，错误提示区分缓存损坏（而非误导为 YouTube 网络失败）。
+// 参考 TestResumeLoadFailNoAutoRetry 的断言结构：resuming 复位、状态重置。
+func TestResumeCacheRemovedOnAsyncLoadFailed(t *testing.T) {
+	m, _, cm, dir := newCacheTestModel(t, sessionState(66.6, false))
+	if m.state.Track == nil {
+		t.Fatal("恢复场景应有当前曲目")
+	}
+	curID := m.state.Track.ID
+	presetCache(t, cm, dir, curID)
+
+	// PlayPaused IPC 成功 → fromCache 回填 true（resuming 保持，等待异步加载结果）
+	msgs := execCmds(resumeCmd(m))
+	m, cmd := update(m, msgs[0])
+	_ = execCmds(cmd) // 歌词/封面加载结果与本测试无关
+	if !m.playingFromCache {
+		t.Fatal("前置：恢复命中缓存后 playingFromCache 应为 true")
+	}
+	if !m.resuming {
+		t.Fatal("前置：恢复 IPC 成功后 resuming 应保持")
+	}
+
+	// mpv 异步取流失败：条目移除（损坏）、resuming 复位、状态重置、提示区分缓存损坏
+	m, cmd = update(m, playerEventMsg{ev: player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}})
+	if _, ok := cm.Lookup(curID); ok {
+		t.Error("恢复加载失败（来自缓存）后条目应被移除（损坏缓存）")
+	}
+	if m.playingFromCache {
+		t.Error("移除损坏条目后 playingFromCache 应为 false")
+	}
+	if cmd == nil {
+		t.Fatal("恢复加载失败后事件监听链应存活（cmd 应为 waitForPlayerEvents，非 nil）")
+	}
+	if !strings.Contains(m.lastError, "恢复播放失败") || !strings.Contains(m.lastError, "缓存文件损坏") {
+		t.Errorf("lastError = %q, want 含“恢复播放失败”与“缓存文件损坏”", m.lastError)
+	}
+	if m.resuming {
+		t.Error("失败处理后 resuming 应复位")
+	}
+	if m.state.Track != nil || m.state.Playing {
+		t.Errorf("失败后状态应重置: %+v", m.state)
+	}
+}
+
