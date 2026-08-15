@@ -2111,6 +2111,8 @@ func ytDlpCallCount(logPath string) int {
 // 缓存预热移后（回归：连播未缓存下一首卡住）：beginPlay 不再触发 CacheAsync
 // ——避免与 mpv 内置 yt-dlp 并发访问同一 URL 放大 403 风控；TrackStartedEvent
 // （mpv 取流成功）后才启动后台下载。假 yt-dlp 脚本记录调用时序验证。
+// 预加载集成后下载来源有两个：当前曲预热（TrackStarted）+ 下一首预载
+// （refreshPreload，单曲回绕跳过），二者均与 beginPlay 解耦。
 func TestTrackStartedTriggersCacheWarmup(t *testing.T) {
 	fp := newFakePlayer()
 	fa := &fakeSearchAdapter{}
@@ -2121,7 +2123,8 @@ func TestTrackStartedTriggersCacheWarmup(t *testing.T) {
 	}
 	m := newTestModelBaseWithCache(t, fp, fa, nil, nil, cm)
 
-	// 手动播放 t1（缓存 miss）：beginPlay 不得触发下载
+	// 手动播放 t1（缓存 miss）：beginPlay 不得触发下载；单曲队列预加载
+	// 自回绕跳过（refreshPreload 不设目标），窗口内假 yt-dlp 不得被调用。
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	if fp.playCount() != 1 {
@@ -2133,23 +2136,33 @@ func TestTrackStartedTriggersCacheWarmup(t *testing.T) {
 		t.Fatalf("beginPlay（缓存 miss）不应触发缓存下载, calls = %d", got)
 	}
 
-	// 连播：TrackEnded → 下一首 t2（缓存 miss）→ beginPlay 仍不得触发下载
-	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
-	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
-	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t2").URL {
-		t.Fatalf("TrackEnded 后应连播 t2: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
-	}
-	time.Sleep(200 * time.Millisecond)
-	if got := ytDlpCallCount(logPath); got != 0 {
-		t.Fatalf("连播 beginPlay（缓存 miss）不应触发缓存下载, calls = %d", got)
-	}
-
-	// TrackStartedEvent（mpv 取流成功）→ 后台下载才启动
+	// TrackStartedEvent（mpv 取流成功）→ 当前曲预热：后台下载启动（第 1 次调用）
 	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
-	if m.state.Track == nil || m.state.Track.ID != "t2" {
-		t.Fatalf("TrackStarted 后 state.Track 应为 t2, got %+v", m.state.Track)
+	if m.state.Track == nil || m.state.Track.ID != "t1" {
+		t.Fatalf("TrackStarted 后 state.Track 应为 t1, got %+v", m.state.Track)
 	}
 	waitFor(t, 3*time.Second, func() bool { return ytDlpCallCount(logPath) >= 1 })
+
+	// 追加 t2：预加载立即接管"下一首"的下载（第 2 次调用，无需等 TrackEnded）——
+	// 下载发生在 beginPlay 之前，切歌时直接命中缓存秒切。
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	if got := targetID(m); got != "t2" {
+		t.Fatalf("追加 t2 后预加载目标 = %q, want t2", got)
+	}
+	waitFor(t, 3*time.Second, func() bool { return ytDlpCallCount(logPath) >= 2 })
+
+	// 连播：TrackEnded → beginPlay(t2) 不得再触发新下载（t2 已由预加载下载；
+	// 预加载恰好在切歌前完成时命中缓存播本地文件，未完成时播网络 URL——两种
+	// 时序都合法，故不断言播放路径，只断播放次数；"不触发新下载"由下载总数
+	// 保持 2 覆盖，后续 TrackStarted 的预热对已缓存条目是 no-op）。
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if fp.playCount() != 2 {
+		t.Fatalf("TrackEnded 后应连播 t2（命中缓存秒切或网络取流）, playCount=%d", fp.playCount())
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := ytDlpCallCount(logPath); got != 2 {
+		t.Fatalf("连播 beginPlay（缓存 miss）不应触发缓存下载（应保持预加载的 2 次）, calls = %d", got)
+	}
 }
 
 // 加载中提示（回归：取流悬挂卡住可感知）：beginPlay 后 2s 未收到
