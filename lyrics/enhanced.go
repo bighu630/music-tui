@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"music-tui/model"
@@ -103,6 +104,9 @@ func (e *EnhancedClient) identify(ctx context.Context, track model.Track) (AIRes
 	defer e.aiCache.End(key)
 	r, err := e.ai.Identify(ctx, track.Title, track.Artist)
 	if err != nil {
+		// 失败不缓存（瞬时错误下次重试）；打日志便于诊断——
+		// 曾静默降级导致无法区分「AI 未配置/超时/key 无效/网络」
+		log.Printf("AI 歌词识别失败（降级确定性结果）: %v", err)
 		return AIResult{}, false
 	}
 	e.aiCache.Put(key, r)

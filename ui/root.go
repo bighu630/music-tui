@@ -1475,7 +1475,10 @@ func resumeCmd(m Model) tea.Cmd {
 
 func fetchLyricsCmd(c lyrics.Fetcher, track model.Track) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// 30s 总预算：确定性匹配（~1-3s）+ AI 识别（大模型首 token 可达
+		// 10s+，实测 qwen3.7-plus 11s）+ AI 后重查 lrclib。曾用 10s：AI
+		// 请求在等待期被掐断，识别永不成功（回归：ai.jsonl 无记录）。
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		res, err := c.Fetch(ctx, track)
 		return lyricsResultMsg{trackID: track.ID, lyrics: res.Lyrics, title: res.Title, artist: res.Artist, err: err}
