@@ -132,7 +132,7 @@ func hitBtn(x, start int) bool {
 	return x >= start && x < start+btnHitWidth
 }
 
-// lyricsState 歌词展示状态（四种态）。
+// lyricsState 歌词展示状态（三种态）。
 type lyricsState int
 
 const (
@@ -445,8 +445,7 @@ func (m homeModel) setSize(width, height int) homeModel {
 
 // lyricsHeight 歌词视口高度：动态行数 min(21, 中间区高−上下各 2 行留白)，
 // 至少 1 行（见 lyricViewportHeight）。synced 态视口恒为 H（padding 模型，
-// 不随歌词行数收缩）；内容不足 H 时 viewport.View() 只输出实际行数，
-// 外层 Place 垂直居中——与旧的"收缩视口"视觉效果一致。
+// 不随歌词行数收缩）。
 func (m homeModel) lyricsHeight() int {
 	return lyricViewportHeight(m.middleHeight())
 }
@@ -481,7 +480,7 @@ func (m *homeModel) scrollLyricsTo(idx int) {
 	if m.lyricView.Height <= 0 || m.lyrics == nil {
 		return
 	}
-	m.lyricView.SetYOffset(lyricScrollOffset(idx, len(m.lyrics.Lines), m.lyricView.Height))
+	m.lyricView.SetYOffset(lyricScrollOffset(idx, len(m.lyrics.Lines)))
 }
 
 // view 渲染首页（全屏撑满：输出恰好 m.height 行）。
@@ -526,8 +525,8 @@ func (m homeModel) middleView() string {
 	return lipgloss.Place(m.width, midH, lipgloss.Center, lipgloss.Center, block)
 }
 
-// lyricsColumnView 按四种歌词态渲染歌词列内容（居中由外层 Place 处理；
-// synced/plain 走 viewport：行数溢出时保持滚动 + scrollLyricsTo 当前行居中，
+// lyricsColumnView 按三种歌词态渲染歌词列内容（居中由外层 Place 处理；
+// synced 走 viewport：行数溢出时保持滚动 + scrollLyricsTo 当前行居中，
 // 内容少时 viewport.View() 输出固定高、顶部对齐）。
 func (m homeModel) lyricsColumnView() string {
 	switch m.lyricsState {

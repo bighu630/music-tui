@@ -880,7 +880,7 @@ func TestHomeLyricsCurrentLineCentered(t *testing.T) {
 	if got := m.home.lyricView.YOffset; got != 59 {
 		t.Errorf("末行 YOffset = %d, want 59（padding 模型末行停中央）", got)
 	}
-	// 首行（第一行 10s 后）：offset = 0-10 → clamp 到 0
+	// 首行（idx=0）：YOffset = clamp(0, 0, N−1) = 0（padding 模型，首行在视口中央）
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
 	if got := m.home.lyricView.YOffset; got != 0 {
 		t.Errorf("首行 YOffset = %d, want 0", got)
@@ -906,7 +906,7 @@ func TestHomeLyricsWheelScroll(t *testing.T) {
 	ly, _ := lyrics.ParseLRC([]byte(sb.String()))
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
 	m.home = m.home.setSize(120, 60)
-	// 先滚动到中间（第 30 行居中，YOffset 19）
+	// 先滚动到中间（第 30 行居中，YOffset 29）
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 155, Duration: 2000}})
 	base := m.home.lyricView.YOffset
 

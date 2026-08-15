@@ -31,8 +31,10 @@ func lyricViewportHeight(midH int) int {
 //	中间 → top=idx−H/2，当前行恒居中；
 //	结尾（idx=N−1）→ top=N−1−H/2，末行停在视口中央，下方可空白。
 //
-// viewport 侧 maxYOffset = (H/2+N+H/2) − H = N，故返回 N−1 恒合法。
-func lyricScrollOffset(idx, n, h int) int {
+// 偏移与视口高 H 无关：padding 前导 H/2 行恰好抵消 H/2 的居中需求，故不依赖 H。
+// viewport 侧 maxYOffset：content 行数 = N + 2·(H/2)，maxYOffset = (N+2·(H/2)) − H
+// = N − (H%2)（H 偶 = N，H 奇 = N−1）；故返回 N−1 恒合法。
+func lyricScrollOffset(idx, n int) int {
 	if n <= 0 {
 		return 0
 	}
