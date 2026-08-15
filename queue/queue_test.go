@@ -476,6 +476,231 @@ func TestRemoveInvalidIndexIgnored(t *testing.T) {
 	}
 }
 
+// ---- Move（队列页 m 键移动模式：把 from 移到最终下标 to，currentIdx 跟随同一首歌） ----
+
+// 普通曲跨当前曲移动：被移曲在当前位置之后、前移到当前曲之前。
+// [a b c d] 当前 a(0)，Move(3,0)：d 移到队首 → [d a b c]，currentIdx 仍指向 a(1)。
+func TestMoveTrackAfterCurrentToFront(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	for _, id := range []string{"b", "c", "d"} {
+		q.Add(testTrack(id))
+	}
+	if !q.Move(3, 0) {
+		t.Fatal("Move(3,0) 应成功")
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"d", "a", "b", "c"}) {
+		t.Errorf("Tracks = %v, want [d a b c]", got)
+	}
+	if q.Len() != 4 {
+		t.Errorf("Len = %d, want 4", q.Len())
+	}
+	if q.CurrentIndex() != 1 {
+		t.Errorf("CurrentIndex = %d, want 1", q.CurrentIndex())
+	}
+	if cur, _ := q.Current(); cur.ID != "a" {
+		t.Errorf("Current = %s, want a（当前曲应跟随原歌）", cur.ID)
+	}
+}
+
+// 普通曲跨当前曲移动：被移曲在当前位置之前、后移到当前曲之后。
+// [a b c d] 当前 c(2)，Move(0,3)：a 移到队尾 → [b c d a]，currentIdx 仍指向 c(1)。
+func TestMoveTrackBeforeCurrentToTail(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	for _, id := range []string{"b", "c", "d"} {
+		q.Add(testTrack(id))
+	}
+	q.Next() // b
+	q.Next() // c 当前（2）
+	if !q.Move(0, 3) {
+		t.Fatal("Move(0,3) 应成功")
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"b", "c", "d", "a"}) {
+		t.Errorf("Tracks = %v, want [b c d a]", got)
+	}
+	if q.Len() != 4 {
+		t.Errorf("Len = %d, want 4", q.Len())
+	}
+	if q.CurrentIndex() != 1 {
+		t.Errorf("CurrentIndex = %d, want 1", q.CurrentIndex())
+	}
+	if cur, _ := q.Current(); cur.ID != "c" {
+		t.Errorf("Current = %s, want c（当前曲应跟随原歌）", cur.ID)
+	}
+}
+
+// 移动当前曲本身：currentIdx = 新位置，Current() 仍是同一首歌。
+// [a b c d] 当前 b(1)，Move(1,2) → [a c b d]，currentIdx = 2。
+func TestMoveCurrentTrackToMiddle(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	for _, id := range []string{"b", "c", "d"} {
+		q.Add(testTrack(id))
+	}
+	q.Next() // b 当前（1）
+	if !q.Move(1, 2) {
+		t.Fatal("Move(1,2) 应成功")
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"a", "c", "b", "d"}) {
+		t.Errorf("Tracks = %v, want [a c b d]", got)
+	}
+	if q.CurrentIndex() != 2 {
+		t.Errorf("CurrentIndex = %d, want 2", q.CurrentIndex())
+	}
+	if cur, _ := q.Current(); cur.ID != "b" {
+		t.Errorf("Current = %s, want b", cur.ID)
+	}
+}
+
+// 移动当前曲到队首：[a b c d] 当前 b(1)，Move(1,0) → [b a c d]，currentIdx = 0。
+func TestMoveCurrentTrackToFront(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	for _, id := range []string{"b", "c", "d"} {
+		q.Add(testTrack(id))
+	}
+	q.Next() // b 当前（1）
+	if !q.Move(1, 0) {
+		t.Fatal("Move(1,0) 应成功")
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"b", "a", "c", "d"}) {
+		t.Errorf("Tracks = %v, want [b a c d]", got)
+	}
+	if q.CurrentIndex() != 0 {
+		t.Errorf("CurrentIndex = %d, want 0", q.CurrentIndex())
+	}
+	if cur, _ := q.Current(); cur.ID != "b" {
+		t.Errorf("Current = %s, want b", cur.ID)
+	}
+}
+
+// 移动当前曲到队尾：[a b c d] 当前 b(1)，Move(1,3) → [a c d b]，currentIdx = 3。
+func TestMoveCurrentTrackToTail(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	for _, id := range []string{"b", "c", "d"} {
+		q.Add(testTrack(id))
+	}
+	q.Next() // b 当前（1）
+	if !q.Move(1, 3) {
+		t.Fatal("Move(1,3) 应成功")
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"a", "c", "d", "b"}) {
+		t.Errorf("Tracks = %v, want [a c d b]", got)
+	}
+	if q.CurrentIndex() != 3 {
+		t.Errorf("CurrentIndex = %d, want 3", q.CurrentIndex())
+	}
+	if cur, _ := q.Current(); cur.ID != "b" {
+		t.Errorf("Current = %s, want b", cur.ID)
+	}
+}
+
+// 无当前曲目（仅 Add 入队）时移动：currentIdx 保持 -1，顺序正确。
+func TestMoveWithoutCurrentKeepsNone(t *testing.T) {
+	q := New()
+	for _, id := range []string{"a", "b", "c", "d"} {
+		q.Add(testTrack(id))
+	}
+	if !q.Move(0, 2) {
+		t.Fatal("Move(0,2) 应成功")
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"b", "c", "a", "d"}) {
+		t.Errorf("Tracks = %v, want [b c a d]", got)
+	}
+	if q.CurrentIndex() != -1 {
+		t.Errorf("CurrentIndex = %d, want -1（无当前曲目）", q.CurrentIndex())
+	}
+}
+
+func TestMoveSameIndexRejected(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.Add(testTrack("c"))
+	if q.Move(1, 1) {
+		t.Error("Move(1,1) 应返回 false")
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"a", "b", "c"}) {
+		t.Errorf("失败移动不应改变队列: %v", got)
+	}
+	if q.CurrentIndex() != 0 {
+		t.Errorf("失败移动不应改变指针: %d", q.CurrentIndex())
+	}
+}
+
+func TestMoveOutOfRangeRejected(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.Add(testTrack("c"))
+	if q.Move(-1, 0) || q.Move(3, 0) || q.Move(0, -1) || q.Move(0, 3) {
+		t.Error("越界移动应返回 false")
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"a", "b", "c"}) {
+		t.Errorf("失败移动不应改变队列: %v", got)
+	}
+	if q.CurrentIndex() != 0 {
+		t.Errorf("失败移动不应改变指针: %d", q.CurrentIndex())
+	}
+}
+
+func TestMoveEmptyQueueRejected(t *testing.T) {
+	q := New()
+	if q.Move(0, 1) || q.Move(-1, 0) {
+		t.Error("空队列 Move 应返回 false")
+	}
+	if q.Len() != 0 || q.CurrentIndex() != -1 {
+		t.Errorf("空队列状态不应改变: Len=%d CurrentIndex=%d", q.Len(), q.CurrentIndex())
+	}
+}
+
+func TestMoveSingleTrackQueueRejected(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	if q.Move(0, 1) || q.Move(1, 0) || q.Move(0, 0) {
+		t.Error("单曲队列 Move 应返回 false")
+	}
+	if q.Len() != 1 || q.CurrentIndex() != 0 {
+		t.Errorf("单曲队列状态不应改变: Len=%d CurrentIndex=%d", q.Len(), q.CurrentIndex())
+	}
+	if cur, _ := q.Current(); cur.ID != "a" {
+		t.Errorf("Current = %s, want a", cur.ID)
+	}
+}
+
+// 连播顺序回归：移动后依次 Next() 的顺序 = 新数组顺序（含末尾回绕）。
+// [a b c d e] 当前 b(1)，Move(1,4) → [a c d e b]，currentIdx = 4（b 在队尾）；
+// 从 b 连播：回绕到 a → c → d → e → b，即新数组完整一轮。
+func TestMovePreservesPlaybackOrder(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	for _, id := range []string{"b", "c", "d", "e"} {
+		q.Add(testTrack(id))
+	}
+	q.Next() // b 当前（1）
+	if !q.Move(1, 4) {
+		t.Fatal("Move(1,4) 应成功")
+	}
+	want := []string{"a", "c", "d", "e", "b"}
+	if got := ids(q.Tracks()); !eq(got, want) {
+		t.Fatalf("Tracks = %v, want %v", got, want)
+	}
+	if q.CurrentIndex() != 4 {
+		t.Fatalf("CurrentIndex = %d, want 4", q.CurrentIndex())
+	}
+	for i, wantID := range want {
+		tr, ok := q.Next()
+		if !ok {
+			t.Fatalf("Next[%d] 失败", i)
+		}
+		if tr.ID != wantID {
+			t.Fatalf("Next[%d] = %s, want %s（连播顺序 = 新数组顺序）", i, tr.ID, wantID)
+		}
+	}
+}
+
 // ---- Clear ----
 
 func TestClearEmptiesAndKeepsMode(t *testing.T) {
