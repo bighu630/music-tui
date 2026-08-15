@@ -388,6 +388,18 @@ func (m homeModel) setLyrics(err error, ly *lyrics.Lyrics) homeModel {
 	return m
 }
 
+// currentLyricText 返回当前高亮歌词行文本（同步歌词态且有高亮行时）；
+// 无歌词/加载中/无高亮行返回空串。供 root 状态栏中间段展示当前歌词行。
+func (m homeModel) currentLyricText() string {
+	if m.lyricsState != lyricsSynced || m.lyrics == nil {
+		return ""
+	}
+	if m.currentLine < 0 || m.currentLine >= len(m.lyrics.Lines) {
+		return ""
+	}
+	return m.lyrics.Lines[m.currentLine].Text
+}
+
 // setCover 应用封面结果（root 已校验 trackID 匹配）。
 func (m homeModel) setCover(trackID, path string, err error) homeModel {
 	if m.state.Track == nil {

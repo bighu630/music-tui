@@ -269,6 +269,39 @@ func TestHomeMiddleAreaSideBySide(t *testing.T) {
 	t.Fatal("封面占位框（No Cover）与歌词提示（暂无歌词）应在同一行水平并排")
 }
 
+// TestHomeCurrentLyricText 回归：状态栏歌词行取值——同步歌词态且有高亮行时
+// 返回当前行文本；无歌词/无高亮返回空串。
+func TestHomeCurrentLyricText(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	// 未加载歌词：空
+	if got := m.home.currentLyricText(); got != "" {
+		t.Errorf("未加载歌词时应返回空串, got %q", got)
+	}
+	ly, err := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	// 高亮行尚未定位（currentLine=-1）：空
+	if got := m.home.currentLyricText(); got != "" {
+		t.Errorf("无高亮行时应返回空串, got %q", got)
+	}
+	// 进度推进到 12s → 高亮第 0 行（10s 处）
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12}})
+	if got := m.home.currentLyricText(); got != "第一行" {
+		t.Errorf("currentLyricText = %q, want 第一行", got)
+	}
+	// 进度推进到 22s → 高亮第 1 行
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 22}})
+	if got := m.home.currentLyricText(); got != "第二行" {
+		t.Errorf("currentLyricText = %q, want 第二行", got)
+	}
+}
+
 // TestHomeLyricsNoneCentered 无歌词提示垂直居中：40 行视图中位于垂直中部。
 func TestHomeLyricsNoneCentered(t *testing.T) {
 	fp := newFakePlayer()

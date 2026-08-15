@@ -1010,7 +1010,8 @@ func (m Model) padBody(body string) string {
 
 // statusBarView 底部常驻状态栏（恒 1 行，布局稳定）：首页自身已展示曲目
 // 信息（控制栏：标题/播放状态/模式/队列位置），状态栏与之重复——首页时
-// 状态栏行留空（行恒存在，布局稳定）；其余页面左 = 歌曲名（截断），
+// 状态栏行留空（行恒存在，布局稳定）；其余页面三段式布局：左 = 歌曲名
+// （截断，AI 识别结果优先）、中 = 当前歌词行（居中，无歌词/无高亮时留空）、
 // 右 = 播放状态 + 模式 + 队列位置。toast 活跃时本行被左对齐临时覆盖
 // （报错期间显示报错消息），消失后恢复。
 func (m Model) statusBarView() string {
@@ -1019,8 +1020,11 @@ func (m Model) statusBarView() string {
 		return ""
 	}
 	left := "未在播放"
+	lyric := ""
 	if m.state.Track != nil {
 		left = m.home.trackLabel() // AI 识别结果展示覆盖（见 19 章）
+		// 中间段：当前歌词行（无歌词/无高亮时留空）
+		lyric = m.home.currentLyricText()
 	}
 	right := ""
 	if m.state.Track != nil {
@@ -1041,29 +1045,50 @@ func (m Model) statusBarView() string {
 	if m.width <= 0 {
 		return style.Render(left)
 	}
-	// 右侧播放顺序信息优先完整，左侧歌曲名按剩余宽度截断（曾按 left 优先：
-	// 名称截断基准须随右侧宽度动态变化）。
+	// 三段布局：右顺序优先完整 → 左名称按剩余 40% 截断 → 中间歌词行在
+	// left 与 right 之间居中（无歌词时留空）。
 	rightRendered := style.Render(right)
 	rightW := ansi.StringWidth(rightRendered)
-	leftMax := m.width - rightW - 1
-	// 极端窄窗口（宽度小于右侧顺序文本）：左侧已无可截断空间，右侧截断兜底，
-	// 保证状态栏恒 1 行不折行。
+	// 极端窄窗口（宽度小于右侧顺序文本）：右侧截断兜底，恒 1 行不折行
+	// （与 overlayToast 的 width≤2 兜底同模式）。
 	if rightW >= m.width {
 		right = ansi.Truncate(right, m.width, "…")
 		rightRendered = style.Render(right)
 		rightW = ansi.StringWidth(rightRendered)
-		leftMax = m.width - rightW - 1
 	}
+	leftMax := (m.width - rightW - 2) * 2 / 5 // 名称最多占剩余 40%
 	if leftMax < 0 {
 		leftMax = 0
 	}
 	left = ansi.Truncate(left, leftMax, "…")
 	leftRendered := style.Render(left)
-	pad := m.width - ansi.StringWidth(leftRendered) - rightW
-	if pad < 0 {
-		pad = 0
+	leftW := ansi.StringWidth(leftRendered)
+	// 中间区域 = 总宽 - 左 - 右 - 2 格间距；歌词行在其中居中截断
+	midW := m.width - leftW - rightW - 2
+	if midW < 0 {
+		midW = 0
 	}
-	return leftRendered + strings.Repeat(" ", pad) + rightRendered
+	midRendered := ""
+	if midW > 0 && lyric != "" {
+		lyric = ansi.Truncate(lyric, midW, "…")
+		midRendered = style.Render(lyric)
+		midPad := (midW - ansi.StringWidth(midRendered)) / 2
+		if midPad > 0 {
+			midRendered = strings.Repeat(" ", midPad) + midRendered
+		}
+	}
+	// 组装：left + 1 空格 + mid（居中）+ 1 空格 + right。
+	// 一侧无内容时该侧间距归零（总宽 = m.width 或 m.width-1，恒不超宽不折行）。
+	midRendered += strings.Repeat(" ", midW-ansi.StringWidth(midRendered))
+	padL := 1
+	if leftW == 0 || midW == 0 {
+		padL = 0
+	}
+	padR := 1
+	if rightW == 0 || midW == 0 {
+		padR = 0
+	}
+	return leftRendered + strings.Repeat(" ", padL) + midRendered + strings.Repeat(" ", padR) + rightRendered
 }
 
 // toastText 按类型渲染 toast 文案（图标 + 颜色，与 lipgloss 主题一致）。
