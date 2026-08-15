@@ -142,10 +142,11 @@ type plTrackItem struct {
 	idx   int // 列表内下标（0 基）
 }
 
-func (i plTrackItem) Title() string { return fmt.Sprintf("%2d. %s", i.idx+1, i.track.Title) }
-func (i plTrackItem) Description() string {
-	return i.track.Artist + " · " + formatDuration(i.track.Duration)
+func (i plTrackItem) Title() string {
+	return fmt.Sprintf("%2d. %s", i.idx+1,
+		formatTrackLine(i.track.Title, i.track.Artist, formatDuration(i.track.Duration)))
 }
+func (i plTrackItem) Description() string { return "" }
 func (i plTrackItem) FilterValue() string { return i.track.Title + " " + i.track.Artist }
 
 // ---- 播放列表页 ----
@@ -238,18 +239,21 @@ type playlistModel struct {
 }
 
 func newPlaylistModel() playlistModel {
-	delegate := list.NewDefaultDelegate()
-	ov := list.New(nil, delegate, 80, 24)
+	ovDelegate := list.NewDefaultDelegate()
+	dtDelegate := list.NewDefaultDelegate()
+	dtDelegate.ShowDescription = false // 详情歌曲条目单行（标题 - 作者 · 时长）
+	stDelegate := list.NewDefaultDelegate()
+	ov := list.New(nil, ovDelegate, 80, 24)
 	ov.Title = "播放列表"
 	ov.SetShowHelp(false)
 	ov.SetFilteringEnabled(false)
 	ov.SetShowStatusBar(false)
-	dt := list.New(nil, delegate, 80, 24)
+	dt := list.New(nil, dtDelegate, 80, 24)
 	dt.Title = ""
 	dt.SetShowHelp(false)
 	dt.SetFilteringEnabled(false)
 	dt.SetShowStatusBar(false)
-	st := list.New(nil, delegate, 80, 24)
+	st := list.New(nil, stDelegate, 80, 24)
 	st.Title = ""
 	st.SetShowHelp(false)
 	st.SetFilteringEnabled(false)
