@@ -32,8 +32,10 @@ type CacheClient interface {
 //
 // 内部结构：
 //   - target：最新目标（mutex 保护）；nil = 无目标，worker 阻塞等 wake/stop。
-//   - lastProcessed：上一次已启动下载的目标指针——目标未变时 worker 不重复
-//     调用 CacheAsync（见 run 内注释：防 no-op 空转与重复预下载）。
+//   - lastProcessed：去重状态——已启动下载的目标（按 ID 判同，非指针比较：
+//     UI 层每次传新指针，指针比较会让去重形同虚设）。同 ID 目标不重复调用
+//     CacheAsync（见 run 内注释）；SetTarget(nil) 清空目标的同时重置该状态
+//     （之后重设同 ID 曲目会重新触发下载，失败后可重试）。
 //   - worker goroutine：循环 取最新目标 → CacheAsync → 串行等完成。
 //   - wake：缓冲 1 的唤醒信号（见 run 内注释：为何缓冲 1 防丢失）。
 //   - stop/done：Stop 终止 worker 并等待其退出；stopOnce 保证 stop 只 close
@@ -47,7 +49,7 @@ type Scheduler struct {
 	mu     sync.Mutex
 	cache  CacheClient
 	target *model.Track // 最新目标指针；nil = 无目标（worker 阻塞等 wake）
-	last   *model.Track // 上一次已启动下载的目标（防重复调用，见 run）
+	last   *model.Track // 去重状态：已启动下载的目标（按 ID 判同；SetTarget(nil) 重置）
 
 	wake chan struct{} // worker 唤醒信号（缓冲 1：见 run 注释）
 	stop chan struct{} // 停止信号（只 close 一次）
@@ -70,13 +72,22 @@ func New(c CacheClient) *Scheduler {
 }
 
 // SetTarget 更新预加载目标（最新目标胜出：worker 每次只取当前槽位）。
-// nil = 停止/清空目标；在途下载不取消（让其完成，产物仍是有效缓存）。
+// nil = 停止/清空目标，同时重置去重状态——之后重设同一曲目（同 ID）会
+// 重新触发下载（失败后可重试：先清空再重设 = 显式重试）。
+// 无 nil 间隔的同 ID 重设（含下载失败后重设）不重新触发——与"失败静默"
+// 一致，不自动重试。
+// 在途下载不取消（让其完成，产物仍是有效缓存）。
 // 线程安全：UI 协程随时可调；cache 为 nil 时 no-op（不 panic）。
 func (s *Scheduler) SetTarget(t *model.Track) {
 	if s.cache == nil {
 		return // 缓存未配置：预加载整体 no-op（New(nil) 安全）
 	}
 	s.mu.Lock()
+	if t == nil {
+		// 清空目标 = 显式重置去重状态：worker 侧对同 ID 的"已处理"记忆失效，
+		// 之后重设同一曲目会重新走 CacheAsync（失败后可重试的语义）。
+		s.last = nil
+	}
 	s.target = t
 	s.mu.Unlock()
 	// 非阻塞唤醒：worker 空闲时被叫醒取最新目标；忙（在途等待/处理中）时
@@ -108,9 +119,13 @@ func (s *Scheduler) Stop() {
 // run 是后台 worker 主循环：串行消费目标槽位。
 //
 // 循环语义：
-//  1. 取最新目标（互斥锁内）；与 last（上次已处理目标）同指针则视为无新目标
-//     ——完成后回环会拿到同一目标，重复调用 CacheAsync 对已缓存条目是纯浪费
-//     （真实 cache 返回 nil 后还得等 wake，等价于直接等）。nil → 阻塞等 wake/stop。
+//  1. 取最新目标（互斥锁内），按 ID 与 last（去重状态）判同：同 ID 视为
+//     已处理（在途或已完成），不再调用 CacheAsync——完成后回环会拿到同一
+//     目标，重复调用对已缓存条目是纯浪费（真实 cache 返回 nil 后还得等
+//     wake，等价于直接等）；也符合"失败静默"（下载失败后同 ID 重设不自动
+//     重试，需 SetTarget(nil) 显式重试）。判同通过则锁内原子"读取 + 认领"
+//     （登记 last）：SetTarget(nil) 恰在窗口期到达时，worker 不会认领一个
+//     已被清空的目标。nil → 阻塞等 wake/stop。
 //  2. 非 nil → cache.CacheAsync(*t)：
 //     - done == nil（已缓存/禁用/同 ID 在途）→ 缓存层无事可做：等 wake/stop。
 //       不能回环重试——目标未变时 CacheAsync 会一直返回 nil，空转烧 CPU；
@@ -129,8 +144,10 @@ func (s *Scheduler) run() {
 	for {
 		s.mu.Lock()
 		t := s.target
-		if t != nil && t == s.last {
-			t = nil // 目标未变：与“无目标”同路径，等 wake/stop（不重复调用）
+		if t != nil && s.last != nil && t.ID == s.last.ID {
+			t = nil // 同 ID 已处理（在途或已完成）：与“无目标”同路径，等 wake/stop
+		} else if t != nil {
+			s.last = t // 认领并登记：本目标视为已启动下载（此后同 ID 去重）
 		}
 		s.mu.Unlock()
 		if t == nil {
@@ -146,15 +163,15 @@ func (s *Scheduler) run() {
 		if s.cache == nil {
 			return
 		}
-		// stop 已关闭则不启动新下载（Stop 语义：不再有任何预下载开始）。
+		// 尽力而为的停止检查（非阻塞）：此处与 Stop() 的 close(stop) 存在竞态
+		// 窗口——检查通过后 Stop 才关闭 stop 的话，本次仍会启动一个下载。
+		// 后果无害（至多多一个后台下载，产物是有效缓存，Stop 也不等它），
+		// 故措辞为 best-effort：不严格保证"停止后不再有任何下载开始"。
 		select {
 		case <-s.stop:
 			return
 		default:
 		}
-		s.mu.Lock()
-		s.last = t
-		s.mu.Unlock()
 		done := s.cache.CacheAsync(*t)
 		if done == nil {
 			// no-op（已缓存/禁用/同 ID 在途）：不会再有完成信号，

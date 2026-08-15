@@ -132,9 +132,48 @@ func TestSetTargetTriggersExactlyOnce(t *testing.T) {
 	if got := fc.callCount(); got != 1 {
 		t.Errorf("下载结束后调用次数 = %d, want 1（同一目标不重复调用）", got)
 	}
+	// 同 ID 新指针重设（无 SetTarget(nil) 间隔）：仍不重复调用——去重按 ID，
+	// 换指针不改变“已处理”状态（与“失败静默、不自动重试”同一语义）。
+	t1b := testTrack("t1")
+	s.SetTarget(&t1b)
+	time.Sleep(50 * time.Millisecond)
+	if got := fc.callCount(); got != 1 {
+		t.Errorf("同 ID 重设（无 nil 间隔）后调用次数 = %d, want 1（不重试）", got)
+	}
 }
 
-// 在途（done 未关）时 SetTarget 同一目标：worker 正串行等待中，不重复调用。
+// SetTarget(nil) 重置去重状态：完成下载后清空目标、再重设同 ID 曲目
+// （新指针），会重新触发下载——失败后可重试的语义（先清空再重设 = 显式重试）。
+func TestSetTargetNilResetsDedupSameIDRetriggers(t *testing.T) {
+	fc := &fakeCache{}
+	s := New(fc)
+	defer s.Stop()
+	t1 := testTrack("t1")
+	s.SetTarget(&t1)
+	waitFor(t, func() bool { return fc.callCount() == 1 })
+	if !fc.closeLast() {
+		t.Fatal("前置：应存在在途完成信号")
+	}
+	// 完成 → 清空 → 重设同 ID 新指针：应恰好再触发一次下载
+	s.SetTarget(nil)
+	t1b := testTrack("t1") // 同 ID、新指针（UI 层每次传 &next 的形态）
+	s.SetTarget(&t1b)
+	waitFor(t, func() bool { return fc.callCount() == 2 })
+	if got := fc.callIDs(); !reflect.DeepEqual(got, []string{"t1", "t1"}) {
+		t.Fatalf("调用 = %v, want [t1 t1]（清空后同 ID 应重新触发）", got)
+	}
+	// 第二次下载完成后：不再重复调用（恰好再调用一次）
+	if !fc.closeLast() {
+		t.Fatal("前置：第二次调用应存在在途完成信号")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := fc.callCount(); got != 2 {
+		t.Errorf("第二次下载结束后调用次数 = %d, want 2", got)
+	}
+}
+
+// 在途（done 未关）时 SetTarget 同 ID 目标（换新指针）：worker 正串行等待中，
+// 不重复调用——去重按 ID，指针换新不影响“在途已处理”的判定。
 func TestSetTargetSameIDWhileInFlightNoDup(t *testing.T) {
 	fc := &fakeCache{}
 	s := New(fc)
@@ -142,8 +181,9 @@ func TestSetTargetSameIDWhileInFlightNoDup(t *testing.T) {
 	t1 := testTrack("t1")
 	s.SetTarget(&t1)
 	waitFor(t, func() bool { return fc.callCount() == 1 })
-	// done 未关闭（在途）时再次 SetTarget 同一曲目
-	s.SetTarget(&t1)
+	// done 未关闭（在途）时再次 SetTarget 同 ID 曲目（新指针，UI 层形态）
+	t1b := testTrack("t1")
+	s.SetTarget(&t1b)
 	time.Sleep(50 * time.Millisecond)
 	if got := fc.callCount(); got != 1 {
 		t.Errorf("在途重复 SetTarget 后调用次数 = %d, want 1", got)
@@ -234,6 +274,7 @@ func TestStopWhileIdle(t *testing.T) {
 func TestStopWhileInFlight(t *testing.T) {
 	fc := &fakeCache{}
 	s := New(fc)
+	defer s.Stop() // 兜底：显式 Stop 前的任何失败（如 waitFor fatal）也能退出 worker
 	t1 := testTrack("t1")
 	s.SetTarget(&t1)
 	waitFor(t, func() bool { return fc.callCount() == 1 })
