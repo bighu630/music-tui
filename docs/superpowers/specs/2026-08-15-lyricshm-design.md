@@ -22,6 +22,23 @@
 
 无 `Clear()` 使用场景:文件从切歌起始终有内容(歌名或歌词)。
 
+## 配置项(追加,2026-08-15 用户确认)
+
+新增配置块 `lyric_file`(JSON,与现有 cache/openai/ytdlp/log 平级):
+
+```json
+{
+  "lyric_file": {
+    "enabled": true
+  }
+}
+```
+
+- `enabled` 开关:缺失 → 默认 `true`(保持现行为:默认开启);显式 `false` → 禁用,完全不写文件(等同功能未实现)
+- **仅 Linux 生效**:非 Linux 平台即使配置 `enabled: true` 也禁用(运行时检测,维持现状,不加 build tag)
+- 路径固定 `/dev/shm/lyrics`,不可配置(YAGNI)
+- 实现:config 包 `LyricFile` 结构(跟随 `cache.Options.Enabled` 的 raw `*bool` 区分缺失/显式模式);main.go 中 `enabled == false` 时向 `NewModel` 传 `nil`(ui 层 nil 安全已有测试覆盖)
+
 ## 架构
 
 ### 新包 `lyricshm/`(仓库根目录,与现有包平行)
