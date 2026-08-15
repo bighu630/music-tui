@@ -30,7 +30,9 @@ func IsSupportedExt(name string) bool {
 //   - path 不存在 → 错误「路径不存在」；
 //   - path 是文件：扩展名不支持 → 错误「不支持的音频格式」，支持 → 单曲列表；
 //   - path 是目录：递归扫描全部子目录（filepath.WalkDir），只收扩展名匹配的
-//     常规文件，按完整路径字符串排序（sort.Strings）保证稳定顺序；
+//     常规文件（d.Type().IsRegular()：悬空符号链接/指向目录的 .mp3 链接等
+//     非常规文件一律跳过，避免单个坏链接毁掉整个目录扫描），
+//     按完整路径字符串排序（sort.Strings）保证稳定顺序；
 //     一个都没有 → 错误「目录中没有找到支持的音频文件」。
 //
 // 每个文件经 FromPath 映射为 model.Track。
@@ -55,20 +57,22 @@ func Scan(path string) ([]model.Track, error) {
 		return []model.Track{tr}, nil
 	}
 
-	// 目录：递归收集扩展名匹配的常规文件
+	// 目录：递归收集扩展名匹配的常规文件（非常规文件如符号链接一律跳过：
+	// 悬空链接或指向目录的 .mp3 链接会让 FromPath 失败，一个坏链接毁掉
+	// 整个目录扫描）
 	var paths []string
 	err = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !IsSupportedExt(p) {
+		if d.IsDir() || !d.Type().IsRegular() || !IsSupportedExt(p) {
 			return nil
 		}
 		paths = append(paths, p)
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("扫描目录失败: %w", err)
 	}
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("目录中没有找到支持的音频文件: %s", path)

@@ -435,7 +435,7 @@ func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cove
 //
 // 额外门控——PeekNext 回绕返回当前曲自身（单曲队列）时不设目标：同 ID 曲目的
 // 缓存已由当前曲 TrackStarted 的预热覆盖，预载纯属重复；且在 TrackStarted 之前
-//（startPlay/切歌后立即刷新）预载当前曲会与 mpv 取流并发访问同一 URL，放大
+// （startPlay/切歌后立即刷新）预载当前曲会与 mpv 取流并发访问同一 URL，放大
 // 403 风控（与"预热移后到 TrackStarted"同一回归动机）。
 // 本地曲目（Source=local）不设目标：本地文件无需预下载，网络缓存对本地文件无意义。
 //
@@ -637,7 +637,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case plLocalAddMsg:
 		// 本地路径导入：同步扫描路径（文件/目录）并把歌曲加入概览选中的列表。
-		// 本地磁盘扫描毫秒级，同步执行即可。成功退出输入框并刷新列表页；
+		// 同步执行（毫秒级，测试亦依赖同步语义）；大型目录/NFS 等慢挂载下可能
+		// 短暂冻结 UI，属有意取舍。成功退出输入框并刷新列表页；
 		// 失败（路径不存在/无音频/AddTracks 错误）仅 toastError——页面提交后
 		// 留在输入模式，用户可直接改路径重试（对比 u 导入：失败需重新按 u）。
 		path := strings.TrimSpace(msg.path)
@@ -646,7 +647,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		item, ok := m.plPage.overview.SelectedItem().(overviewItem)
 		if !ok {
-			m, cmd := m.showToast("请先在概览选择要添加的播放列表", toastError)
+			m, cmd := m.showToast("请先在概览选择要添加的播放列表（Esc 返回概览选中后重试）", toastError)
 			return m, cmd
 		}
 		tracks, err := local.Scan(path)
@@ -1107,8 +1108,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "shift+tab", "ctrl+left":
 			return m.switchPage(msg.String()), nil
 		case "1", "2", "3", "4", "5":
-			// 数字键始终切页。注：计划原代码在搜索输入框聚焦时把数字让给输入框，
-			// 但 TestTabSwitchesPages 要求搜索页聚焦时按 3/1 仍能切页，故取消例外。
+			// 数字键通常始终切页（TestTabSwitchesPages：搜索输入聚焦时也切页，
+			// 故无全局例外）。唯一例外：播放列表页本地路径输入（plLocalAdd）——
+			// 路径含数字极常见（如 "/Music/2024/03 - 歌曲.mp3"），数字须让位
+			// 给输入框，否则输入中途被切页打断。
+			if m.current == pagePlaylists && m.plPage.mode == plLocalAdd {
+				return m.delegate(msg)
+			}
 			return m.switchPage(msg.String()), nil
 		case " ":
 			// 输入框聚焦（搜索关键词/播放列表命名）时空格是输入字符。
@@ -1457,7 +1463,10 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 			// retryOrSkipLoadFailure 现有链路（原错误提示保留）。fromCache 失败（缓存
 			// 文件损坏，条目已移除）不兜底——重下同一 URL 大概率再失败，且与 mpv 并发
 			// 访问同一 URL 放大 403 风控（回归：TestCacheFallbackOnlyOnce）。
-			if !fromCache && !m.playingFromCache && m.state.Track != nil && !m.fallback.active {
+			// 本地曲目（Source=local）同样不兜底：本地文件失败 = 文件损坏/被删，
+			// 无下载可兜（cache 层 CacheAsync 对 local 也是 no-op，此处显式跳过
+			// 与 beginPlay/resumeCmd 的口径保持一致）。
+			if !fromCache && !m.playingFromCache && m.state.Track != nil && !m.fallback.active && m.state.Track.Source != model.SourceLocal {
 				tr := m.state.Track
 				if path, ok := m.cache.Lookup(tr.ID); ok {
 					logger.Warn("播放失败，改用缓存文件: %s - %s (id=%s) 文件=%s", tr.Title, tr.Artist, tr.ID, path)
@@ -1649,7 +1658,7 @@ func (m Model) skipFailedTrack(tr model.Track, hint string) (Model, tea.Cmd) {
 // stopAfterEnd 播放结束且无下一首：停在当前位置等待用户操作（空格重播同曲）。
 func (m Model) stopAfterEnd() (Model, tea.Cmd) {
 	m.ended = true
-	m.refreshPreload() // 播放停止：清空预加载目标（ended 下无下一首可预载）
+	m.refreshPreload()           // 播放停止：清空预加载目标（ended 下无下一首可预载）
 	m.loadingSince = time.Time{} // 已停止：无加载中提示
 	m.state.Playing = false
 	m.home = m.home.syncState(m.state)

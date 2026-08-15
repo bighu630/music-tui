@@ -3217,7 +3217,7 @@ func localTestTrack() model.Track {
 
 // beginPlay 本地曲目：不查 Lookup（playingFromCache 恒 false，mpv 直接播放
 // 本地绝对路径）、不注册 WaitDone 兜底监听。验证手法：预置同名 ID 的在途下载
-//（假 yt-dlp 50ms 后落盘成功）——若 beginPlay 误注册 WaitDone 监听，下载完成
+// （假 yt-dlp 50ms 后落盘成功）——若 beginPlay 误注册 WaitDone 监听，下载完成
 // 信号到达后缓存兜底分支会命中缓存并重播本地文件（playCount=2 + “已改用缓存
 // 文件” toast）；正确实现则无监听、无重播（防未来调用点对本地曲目启动下载的
 // 极端场景）。
@@ -3277,7 +3277,7 @@ func TestTrackStartedLocalSkipsCacheWarmup(t *testing.T) {
 }
 
 // refreshPreload：队列下一首是本地曲目时不 SetTarget——本地文件无需预下载
-//（预载目标保持空，不跳过本地曲目向后找下一首网络曲目）。
+// （预载目标保持空，不跳过本地曲目向后找下一首网络曲目）。
 func TestPreloadLocalNextSkipsTarget(t *testing.T) {
 	fp := newFakePlayer()
 	m := preloadTestModel(t, fp)
@@ -3430,5 +3430,45 @@ func TestPlaylistLocalAddMsgNoSelection(t *testing.T) {
 	}
 	if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
 		t.Errorf("无目标应留在输入框: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+}
+
+// 本地路径输入模式（plLocalAdd）下数字键让位给输入框：路径含数字极常见
+// （如 "/Music/2024/03 - 歌曲.mp3"），数字切页会打断输入（其余页面输入框
+// 保持"数字始终切页"的既有语义，TestTabSwitchesPages 回归）。
+func TestPlaylistLocalAddDigitsTypeNotSwitchPage(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")}) // 切到播放列表页
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")}) // 进入本地路径输入
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("0")})
+	if m.current != pagePlaylists {
+		t.Fatalf("本地路径输入时按 2/0 不应切页: current=%v", m.current)
+	}
+	if got := m.plPage.input.Value(); got != "20" {
+		t.Errorf("input = %q, want %q", got, "20")
+	}
+	// 输入模式之外数字仍切页（既有语义不回归）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
+	if m.current != pageHistory {
+		t.Errorf("退出输入后按 5 应切到历史页, got %v", m.current)
+	}
+}
+
+// 本地曲目取流失败（LoadFailed）：不进入缓存兜底（本地文件失败 = 文件损坏/
+// 被删，无下载可兜——cache 层 CacheAsync 对 local 是 no-op，root 层显式跳过
+// 与 beginPlay/resumeCmd 口径一致），直接走重试/跳过链路。
+func TestErrorEventLocalSkipsCacheFallback(t *testing.T) {
+	m, _, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpOK(t))
+	m, _ = update(m, trackSelectedMsg{track: localTestTrack()})
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if m.fallback.active {
+		t.Fatal("本地曲目取流失败不应进入缓存兜底等待")
+	}
+	// 走重试链路（本地文件损坏重试无意义但无害，与失败曲目统一处理）：
+	// 不启动任何下载（兜底分支是唯一会启动下载的路径，已排除）
+	if !m.loadingSince.IsZero() {
+		t.Error("失败后不应处于加载中")
 	}
 }
