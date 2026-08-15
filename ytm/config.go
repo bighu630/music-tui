@@ -124,18 +124,29 @@ func (s *Store) ClearLogin() error {
 }
 
 // SetPastedLogin 保存粘贴的 Cookie header 文本（MethodPasted）：
-// 先落盘 cookies 文件（0600，默认路径 ytm-cookies.txt，与 ytm.json 同目录），
-// 再保存配置。Netscape 格式文本原样保留；单行 Cookie header 自动转为
-// Netscape 格式（供 yt-dlp 读取）。返回实际 cookies 文件路径。
+// 先解析校验（已是 Netscape 格式原样保留；单行 Cookie header 转为 Netscape），
+// 校验通过后一次性落盘 cookies 文件（0600，默认路径 ytm-cookies.txt，
+// 与 ytm.json 同目录），再保存配置。非法文本不写文件、不改配置
+// （不破坏既有登录）。返回实际 cookies 文件路径。
 func (s *Store) SetPastedLogin(header string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p := s.defaultCookiesPath()
-	if err := writeFileAtomic(p, []byte(header), 0o600); err != nil {
-		return "", fmt.Errorf("写入 cookie 文件失败: %w", err)
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return "", errors.New("Cookie header 为空")
 	}
-	if err := ensurePastedFile(p); err != nil {
-		return "", err
+	p := s.defaultCookiesPath()
+	// 先校验/转换（纯内存，未落盘）：失败直接返回，既有文件与配置原样保留
+	data := []byte(header)
+	if !looksLikeNetscape(data) {
+		cookies, err := cookiesFromHeader(header)
+		if err != nil {
+			return "", err
+		}
+		data = marshalNetscape(cookies)
+	}
+	if err := writeFileAtomic(p, data, 0o600); err != nil {
+		return "", fmt.Errorf("写入 cookie 文件失败: %w", err)
 	}
 	s.data.Login = LoginConfig{Method: MethodPasted, CookiesPath: p, UpdatedAt: time.Now()}
 	if err := s.saveLocked(); err != nil {

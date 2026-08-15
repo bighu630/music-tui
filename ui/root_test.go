@@ -265,7 +265,7 @@ func newTestModelBase(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, yt *y
 // refreshYTStatus 把 store 的登录状态同步进模型与页面（直接 seed store 后调用）。
 func (env *ytTestEnv) refreshYTStatus() {
 	env.m.ytLogin = env.client.Login()
-	env.m.plPage = env.m.plPage.setYTSyncStatus(env.m.ytLogin, env.m.ytSyncing)
+	env.m.plPage = env.m.plPage.setYTSyncStatus(env.m.ytLogin, env.m.ytSyncing, env.m.ytInvalid)
 }
 
 // fakeYTFetcher 按 URL 返回预置歌单（ytm.Fetcher 的 UI 测试实现）。
@@ -351,6 +351,26 @@ const ytBrowseLoggedOut = `{
 // ytTrackURL 生成与 RemotePlaylist.URL() 一致的歌单 URL。
 func ytTrackURL(id string) string {
 	return "https://music.youtube.com/playlist?list=" + id
+}
+
+// m2：SyncAll 动态超时预算 = 30s 枚举余量 + 30s×歌单数，上限 10min。
+func TestSyncAllBudget(t *testing.T) {
+	cases := []struct {
+		n    int
+		want time.Duration
+	}{
+		{0, 30 * time.Second},
+		{1, 60 * time.Second},
+		{9, 5 * time.Minute},   // 原固定 5min 恰好覆盖 9 个歌单
+		{19, 10 * time.Minute}, // 30s + 30s×19 = 600s = 上限
+		{20, 10 * time.Minute}, // 超过上限截断
+		{100, 10 * time.Minute},
+	}
+	for _, tc := range cases {
+		if got := syncAllBudget(tc.n); got != tc.want {
+			t.Errorf("syncAllBudget(%d) = %v, want %v", tc.n, got, tc.want)
+		}
+	}
 }
 
 // execCmds 同步执行 tea.Cmd 并收集返回的非 nil 消息（测试用）。

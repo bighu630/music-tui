@@ -139,14 +139,32 @@ func ytVerifyCmd(c *ytm.Client) tea.Cmd {
 	}
 }
 
-// ytSyncAllCmd 异步同步全部歌单（5min 超时）。
+// ytSyncAllCmd 异步同步全部歌单。超时预算按歌单数动态分配：
+// 先枚举歌单数 N（30s 超时），总预算 = 30s 枚举余量 + 30s×N 拉取，上限 10min
+// （审查 m2：原固定 5min 在 >9 个歌单时可能误杀慢速网络下的合法同步）。
 func ytSyncAllCmd(c *ytm.Client, pl *playlists.Store) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		remotes, err := c.ListPlaylists(ctx)
+		cancel()
+		if err != nil {
+			return ytSyncDoneMsg{err: err}
+		}
+		budget := syncAllBudget(len(remotes))
+		ctx, cancel = context.WithTimeout(context.Background(), budget)
 		defer cancel()
 		results, err := c.SyncAll(ctx, pl)
 		return ytSyncDoneMsg{results: results, err: err}
 	}
+}
+
+// syncAllBudget 按歌单数计算同步总预算：30s 枚举余量 + 每歌单 30s，上限 10min。
+func syncAllBudget(n int) time.Duration {
+	budget := 30*time.Second + 30*time.Second*time.Duration(n)
+	if budget > 10*time.Minute {
+		return 10 * time.Minute
+	}
+	return budget
 }
 
 // ytImportCmd 异步导入歌单 URL（2min 超时）。
@@ -210,9 +228,12 @@ type Model struct {
 	notice    string // 绿色成功提示（如“已添加到「xxx」”；新按键分发时清除）
 	ended     bool   // 当前歌曲是否已播放结束/出错（空格语义：重播同曲而非 Resume）
 
-	// YT Music 同步状态（登录配置 + 同步中标记；页面经 setYTSyncStatus 推入）
+	// YT Music 同步状态（登录配置 + 同步中 + 验证失败标记；页面经 setYTSyncStatus 推入）
 	ytLogin   ytm.LoginConfig
 	ytSyncing bool
+	// ytInvalid 最近一次 VerifyLogin 失败：状态区/设置页降级为「已登录（验证失败）」；
+	// 初始启动未验证过为 false（配置存在即显示已登录，只有验证失败才降级）。
+	ytInvalid bool
 	// queueSkip 标记删除当前曲导致的指针解耦：mpv 仍播放被删曲目，
 	// 但队列指针已顺延。下次 TrackEnded 应播放顺延曲目（不推进），
 	// 避免跳过顺延曲目（回归：TestDeleteCurrentThenTrackEndedPlaysSlidTrack）。
@@ -314,7 +335,7 @@ func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cove
 	if yt != nil {
 		// 初始 YT 状态：登录配置 + 既有同步映射（详情 r 刷新提示）
 		m.ytLogin = yt.Login()
-		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false).setYTSyncs(yt.SyncEntries())
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, false).setYTSyncs(yt.SyncEntries())
 	}
 	return m
 }
@@ -472,7 +493,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ytLogin = m.yt.Login()
-		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing)
+		m.ytInvalid = false // 新配置未验证
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
 		m.notice = "已保存登录配置，验证中…"
 		return m, ytVerifyCmd(m.yt)
 
@@ -496,7 +518,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ytLogin = m.yt.Login()
-		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing)
+		m.ytInvalid = false // 新配置未验证
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
 		m.notice = "已保存登录配置，验证中…"
 		return m, ytVerifyCmd(m.yt)
 
@@ -515,7 +538,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ytLogin = m.yt.Login()
-		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing)
+		m.ytInvalid = false // 新配置未验证
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
 		m.notice = "已保存登录配置，验证中…"
 		return m, ytVerifyCmd(m.yt)
 
@@ -530,21 +554,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ytLogin = ytm.LoginConfig{}
-		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing)
+		m.ytInvalid = false
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
 		m.notice = "已退出 YT Music 登录"
 		return m, nil
 
 	case ytVerifyDoneMsg:
-		// 验证结果：无论成败刷新页面登录状态
+		// 验证结果：无论成败刷新页面登录状态；失败时状态区/设置页降级展示
+		if m.yt == nil {
+			return m, nil // 防御：未集成 yt 时丢弃结果
+		}
 		m.notice = ""
 		m.lastError = ""
+		m.ytInvalid = msg.err != nil
 		if msg.err != nil {
 			m.lastError = ytVerifyErrorText(msg.err)
 		} else {
 			m.notice = "YT Music 登录有效"
 		}
 		m.ytLogin = m.yt.Login()
-		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing)
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, m.ytSyncing, m.ytInvalid)
 		return m, nil
 
 	case ytSyncAllMsg:
@@ -553,12 +582,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ytSyncing = true
-		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, true)
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, true, m.ytInvalid)
 		return m, ytSyncAllCmd(m.yt, m.pl)
 
 	case ytSyncDoneMsg:
+		if m.yt == nil {
+			return m, nil // 防御：未集成 yt 时丢弃结果
+		}
 		m.ytSyncing = false
-		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false)
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, m.ytInvalid)
 		if msg.err != nil {
 			m.notice = ""
 			m.lastError = "同步失败: " + msg.err.Error()
@@ -585,12 +617,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ytSyncing = true
-		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, true)
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, true, m.ytInvalid)
 		return m, ytImportCmd(m.yt, m.pl, url)
 
 	case ytImportDoneMsg:
+		if m.yt == nil {
+			return m, nil // 防御：未集成 yt 时丢弃结果
+		}
 		m.ytSyncing = false
-		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false)
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, m.ytInvalid)
 		if msg.err != nil {
 			m.notice = ""
 			m.lastError = "导入失败: " + msg.err.Error()
@@ -622,12 +657,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ytSyncing = true
-		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, true)
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, true, m.ytInvalid)
 		return m, ytRefreshCmd(m.yt, m.pl, playlistID)
 
 	case ytRefreshDoneMsg:
+		if m.yt == nil {
+			return m, nil // 防御：未集成 yt 时丢弃结果
+		}
 		m.ytSyncing = false
-		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false)
+		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, m.ytInvalid)
 		if msg.err != nil {
 			m.notice = ""
 			m.lastError = "刷新失败: " + msg.err.Error()

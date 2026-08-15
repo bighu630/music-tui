@@ -327,3 +327,44 @@ func TestSetPastedLogin(t *testing.T) {
 		t.Error("空文本应报错")
 	}
 }
+
+// M4 回归：非法粘贴文本不破坏既有登录——先有有效登录（文件+配置），
+// 再粘贴非法文本应报错且文件原样、配置原样（旧实现先覆盖文件再校验）。
+func TestSetPastedLoginInvalidDoesNotClobber(t *testing.T) {
+	s, _ := newTestStore(t)
+	p, err := s.SetPastedLogin("SAPISID=good; __Secure-3PAPISID=3p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 非法粘贴：无 name=value 结构
+	if _, err := s.SetPastedLogin("garbage without equals"); err == nil {
+		t.Fatal("非法粘贴应报错")
+	}
+	// 文件原样（仍含有效 cookie，未写入垃圾文本）
+	after, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("非法粘贴不应覆盖 cookie 文件:\nbefore %q\nafter  %q", before, after)
+	}
+	// 配置原样：仍是第一次粘贴的登录，CookieHeader 可派生
+	cfg := s.Login()
+	if cfg.Method != MethodPasted || cfg.CookiesPath != p {
+		t.Errorf("非法粘贴不应改配置: %+v", cfg)
+	}
+	h, err := s.CookieHeader()
+	if err != nil {
+		t.Fatalf("既有登录应保持可用: %v", err)
+	}
+	if !strings.Contains(h, "SAPISID=good") {
+		t.Errorf("CookieHeader = %q, want 仍含原 cookie", h)
+	}
+	// Netscape 格式粘贴的非法内容同样拒绝（无 cookie 行的纯注释文件除外……）
+	// 注："# comment" 会被 looksLikeNetscape 判为 Netscape 原样保留，属既有行为
+}

@@ -252,14 +252,90 @@ func TestSyncOneRefreshesExisting(t *testing.T) {
 func TestSyncOneNotFound(t *testing.T) {
 	env := newSyncEnv(t, "")
 	_, err := env.client.SyncOne(context.Background(), env.pls, "PLNOPE")
-	if err == nil || !strings.Contains(err.Error(), "未找到歌单") {
-		t.Errorf("SyncOne 未找到应报错, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "该列表不是 YT Music 同步列表") {
+		t.Errorf("SyncOne 无映射应报非同步列表错误, got %v", err)
+	}
+}
+
+// M1 回归：URL 导入的共享歌单（不在库枚举中）也能用 SyncOne 直拉刷新。
+// 旧实现走 ListPlaylists 枚举匹配，导入歌单不在库中 → 必然失败。
+func TestSyncOneRefreshesImportedPlaylist(t *testing.T) {
+	env := newSyncEnv(t, "") // browse 枚举只有 PLAAA/PLBBB/PLCCC
+	// 预置：已导入的公开歌单（SyncEntry 存在；本地列表有旧内容）
+	if _, err := env.pls.Create("YT: 导入歌单"); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.pls.AddTrack("YT: 导入歌单", testTrack("old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.UpsertSync(SyncEntry{PlaylistID: "PLIMPORT", ListName: "YT: 导入歌单", Count: 1}); err != nil {
+		t.Fatal(err)
+	}
+	env.fetcher.playlists[trackURL("PLIMPORT")] = model.Playlist{
+		ID: "PLIMPORT", Title: "导入歌单",
+		Tracks: []model.Track{testTrack("v1"), testTrack("v2")},
+	}
+
+	res, err := env.client.SyncOne(context.Background(), env.pls, "PLIMPORT")
+	if err != nil {
+		t.Fatalf("导入歌单直拉刷新应成功: %v", err)
+	}
+	if res.New {
+		t.Error("已有映射应刷新而非新建")
+	}
+	if res.ListName != "YT: 导入歌单" || res.TrackCount != 2 {
+		t.Errorf("res = %+v", res)
+	}
+	// 内容整体替换；未走枚举（browse 请求未发生——断言 fetcher 只收到直拉 URL）
+	tracks := env.pls.Tracks("YT: 导入歌单")
+	if len(tracks) != 2 || tracks[0].ID != "v1" || tracks[1].ID != "v2" {
+		t.Errorf("刷新后 = %+v", tracks)
+	}
+	if len(env.fetcher.urls) != 1 || env.fetcher.urls[0] != trackURL("PLIMPORT") {
+		t.Errorf("fetcher 应只收到直拉 URL: %v", env.fetcher.urls)
+	}
+	if e, _ := env.store.FindSync("PLIMPORT"); e.ListName != "YT: 导入歌单" || e.Count != 2 {
+		t.Errorf("SyncEntry 应保持原名并更新计数: %+v", e)
+	}
+}
+
+// SyncOne 语义：远端标题变更时刷新仍写入原映射列表（ListName 保持原名），
+// 不因标题变化新建列表。
+func TestSyncOneKeepsListNameWhenRemoteTitleChanged(t *testing.T) {
+	env := newSyncEnv(t, "")
+	if _, err := env.pls.Create("YT: 旧标题"); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.pls.AddTrack("YT: 旧标题", testTrack("old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.UpsertSync(SyncEntry{PlaylistID: "PLAAA", ListName: "YT: 旧标题", Count: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// 远端标题已改为新标题
+	env.fetcher.playlists[trackURL("PLAAA")] = model.Playlist{
+		ID: "PLAAA", Title: "新标题",
+		Tracks: []model.Track{testTrack("v1")},
+	}
+
+	res, err := env.client.SyncOne(context.Background(), env.pls, "PLAAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ListName != "YT: 旧标题" {
+		t.Errorf("ListName = %q, want 保持原名 YT: 旧标题", res.ListName)
+	}
+	if len(env.pls.Lists()) != 1 {
+		t.Errorf("不应新建列表: %+v", env.pls.Lists())
+	}
+	if got := env.pls.Tracks("YT: 旧标题"); len(got) != 1 || got[0].ID != "v1" {
+		t.Errorf("刷新后曲目 = %+v", got)
 	}
 }
 
 func TestNameConflictAddsSuffix(t *testing.T) {
 	env := newSyncEnv(t, "")
-	// 本地已有同名列表但无 SyncEntry 映射 → 追加后缀
+	// 本地已有同名列表但无 SyncEntry 映射 → 追加后缀（走 SyncAll 枚举路径）
 	if _, err := env.pls.Create("YT: 我的最爱"); err != nil {
 		t.Fatal(err)
 	}
@@ -267,10 +343,18 @@ func TestNameConflictAddsSuffix(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.fetcher.playlists[trackURL("PLAAA")] = model.Playlist{ID: "PLAAA", Title: "我的最爱", Tracks: []model.Track{testTrack("v1")}}
+	env.fetcher.playlists[trackURL("PLBBB")] = model.Playlist{ID: "PLBBB", Title: "通勤歌单", Tracks: []model.Track{}}
+	env.fetcher.playlists[trackURL("PLCCC")] = model.Playlist{ID: "PLCCC", Title: "无 run 歌单", Tracks: []model.Track{}}
 
-	res, err := env.client.SyncOne(context.Background(), env.pls, "PLAAA")
+	results, err := env.client.SyncAll(context.Background(), env.pls)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var res SyncResult
+	for _, r := range results {
+		if r.Remote.ID == "PLAAA" {
+			res = r
+		}
 	}
 	if res.ListName != "YT: 我的最爱 (3)" {
 		t.Errorf("冲突应追加递增后缀, got %q", res.ListName)
@@ -278,8 +362,8 @@ func TestNameConflictAddsSuffix(t *testing.T) {
 	if !res.New {
 		t.Error("加后缀后应为新建")
 	}
-	if len(env.pls.Lists()) != 3 {
-		t.Errorf("列表数 = %d, want 3", len(env.pls.Lists()))
+	if len(env.pls.Lists()) != 5 {
+		t.Errorf("列表数 = %d, want 5（2 冲突 + 3 新建）", len(env.pls.Lists()))
 	}
 	if e, ok := env.store.FindSync("PLAAA"); !ok || e.ListName != "YT: 我的最爱 (3)" {
 		t.Errorf("SyncEntry 应指向带后缀列表: %+v, %v", e, ok)
@@ -398,6 +482,44 @@ func TestImportURLCookiesWhenLoggedIn(t *testing.T) {
 	}
 	if len(env.fetcher.args) != 1 || env.fetcher.args[0].File == "" {
 		t.Errorf("已登录导入应携带 cookie 文件: %+v", env.fetcher.args)
+	}
+}
+
+// m5：已配置登录但 cookie 导出失败（浏览器未安装等）→ 上抛，不静默降级。
+func TestImportURLCookieExportFailurePropagates(t *testing.T) {
+	fakeBrowserHome(t) // 空配置目录：浏览器导出必然失败
+	s, _ := newTestStore(t)
+	plsPath := filepath.Join(t.TempDir(), "playlists.json")
+	pls, err := playlists.NewStore(plsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 配置了浏览器方式但本机没有该浏览器配置目录 → CookieFile 导出失败
+	if err := s.SetLogin(LoginConfig{Method: MethodBrowser, Browser: "chrome"}); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{store: s, fetcher: &fakeFetcher{}, httpClient: &http.Client{}}
+	_, err = client.ImportURL(context.Background(), pls, "https://music.youtube.com/playlist?list=PLX")
+	if err == nil || !strings.Contains(err.Error(), "获取登录 cookie 失败") {
+		t.Errorf("cookie 导出失败应上抛, got %v", err)
+	}
+}
+
+// m5：MethodPasted 已配置但落盘文件缺失 → 上抛（非 ErrNoLogin 不静默降级）。
+func TestImportURLCookieFileMissingPropagates(t *testing.T) {
+	s, _ := newTestStore(t)
+	plsPath := filepath.Join(t.TempDir(), "playlists.json")
+	pls, err := playlists.NewStore(plsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetLogin(LoginConfig{Method: MethodPasted, CookiesPath: filepath.Join(t.TempDir(), "nope.txt")}); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{store: s, fetcher: &fakeFetcher{}, httpClient: &http.Client{}}
+	_, err = client.ImportURL(context.Background(), pls, "https://music.youtube.com/playlist?list=PLX")
+	if err == nil || !strings.Contains(err.Error(), "获取登录 cookie 失败") {
+		t.Errorf("cookie 文件缺失应上抛, got %v", err)
 	}
 }
 

@@ -43,22 +43,28 @@ func newInnerTube(hc *http.Client, cookieHeader string) *innerTube {
 }
 
 // browse 发送 browse 请求并返回解析后的 JSON（任意结构）。
+// continuation 非空时分页：body 携带 continuation 令牌（context 不变，无 browseId）。
 // 错误分类：HTTP>=400 → ErrSessionInvalid；网络错误透传（包装）。
-func (it *innerTube) browse(ctx context.Context, browseID string) (any, error) {
+func (it *innerTube) browse(ctx context.Context, browseID, continuation string) (any, error) {
 	sapisid, err := extractSAPISID(it.cookieHeader)
 	if err != nil {
 		return nil, fmt.Errorf("%w（cookie 缺少 SAPISID）", ErrNotLoggedIn)
 	}
 	// clientVersion 动态日期：1.YYYYMMDD.01.00（ytmusicapi 同款，实测有效）
-	body, err := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"context": map[string]any{
 			"client": map[string]any{
 				"clientName":    "WEB_REMIX",
 				"clientVersion": "1." + time.Now().UTC().Format("20060102") + ".01.00",
 			},
 		},
-		"browseId": browseID,
-	})
+	}
+	if continuation != "" {
+		payload["continuation"] = continuation
+	} else {
+		payload["browseId"] = browseID
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -130,14 +136,20 @@ func loggedInParam(v any) string {
 	return ""
 }
 
+// maxContinuationPages 是 browse 分页循环的安全上限：正常歌单数远小于此，
+// 超过说明服务端异常返回相同令牌，报错而非死循环。
+const maxContinuationPages = 100
+
 // extractPlaylists 容错递归扫描响应，提取全部 musicTwoRowItemRenderer
-// 歌单条目（browseId 去重，保序）。不依赖固定 JSON 路径，结构变化也能解析
-// （参考 yutemal extractor.go fromJSON 思路）。
-func extractPlaylists(v any) []RemotePlaylist {
+// 歌单条目（browseId 去重，保序）与分页 continuation 令牌（无则空串）。
+// 不依赖固定 JSON 路径，结构变化也能解析（参考 yutemal extractor.go
+// fromJSON 思路；令牌提取参考 ytmusicapi continuations.py）。
+func extractPlaylists(v any) ([]RemotePlaylist, string) {
 	var out []RemotePlaylist
 	seen := make(map[string]bool)
-	var walk func(any)
-	walk = func(v any) {
+	token := ""
+	var walk func(any) bool // 返回 true = 已找到令牌，停止深入（含失败命中）
+	walk = func(v any) bool {
 		switch val := v.(type) {
 		case map[string]any:
 			if r, ok := val["musicTwoRowItemRenderer"].(map[string]any); ok {
@@ -145,7 +157,13 @@ func extractPlaylists(v any) []RemotePlaylist {
 					seen[p.ID] = true
 					out = append(out, *p)
 				}
-				return // 命中 renderer 不再深入
+				return false // 命中 renderer 不再深入（其内无令牌）
+			}
+			if r, ok := val["continuationItemRenderer"].(map[string]any); ok {
+				if tok := continuationTokenFromRenderer(r); tok != "" {
+					token = tok
+				}
+				return true // 命中即停止（令牌只出现在分页末尾元素）
 			}
 			// 键排序保证同一层多个候选项的发现顺序稳定（歌单保序）
 			keys := make([]string, 0, len(val))
@@ -154,16 +172,61 @@ func extractPlaylists(v any) []RemotePlaylist {
 			}
 			sort.Strings(keys)
 			for _, k := range keys {
-				walk(val[k])
+				if walk(val[k]) {
+					return true
+				}
 			}
 		case []any:
 			for _, item := range val {
-				walk(item)
+				if walk(item) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	walk(v)
+	return out, token
+}
+
+// continuationTokenFromRenderer 从 continuationItemRenderer 提取分页令牌：
+// 标准路径 continuationEndpoint.continuationCommand.token；
+// 兼容 continuationEndpoint.continuation 直存；嵌套 commandExecutorCommand
+// 列表中 request=CONTINUATION_REQUEST_TYPE_BROWSE 的 continuationCommand
+// （ytmusicapi continuations.py 同款三路径）。
+func continuationTokenFromRenderer(r map[string]any) string {
+	ep, _ := r["continuationEndpoint"].(map[string]any)
+	if ep == nil {
+		return ""
+	}
+	if cc, ok := ep["continuationCommand"].(map[string]any); ok {
+		if tok, _ := cc["token"].(string); tok != "" {
+			return tok
+		}
+	}
+	if tok, _ := ep["continuation"].(string); tok != "" {
+		return tok
+	}
+	if cec, ok := ep["commandExecutorCommand"].(map[string]any); ok {
+		if cmds, ok := cec["commands"].([]any); ok {
+			for _, c := range cmds {
+				cm, _ := c.(map[string]any)
+				if cm == nil {
+					continue
+				}
+				cc, _ := cm["continuationCommand"].(map[string]any)
+				if cc == nil {
+					continue
+				}
+				if req, _ := cc["request"].(string); req == "CONTINUATION_REQUEST_TYPE_BROWSE" {
+					if tok, _ := cc["token"].(string); tok != "" {
+						return tok
+					}
+				}
 			}
 		}
 	}
-	walk(v)
-	return out
+	return ""
 }
 
 // remotePlaylistFromItem 从 musicTwoRowItemRenderer 对象提取歌单；

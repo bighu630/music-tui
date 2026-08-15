@@ -649,7 +649,7 @@ func TestYTStatusLineStates(t *testing.T) {
 	}
 
 	// 同步中（三态最高优先级）
-	m.plPage = m.plPage.setYTSyncStatus(env.store.Login(), true)
+	m.plPage = m.plPage.setYTSyncStatus(env.store.Login(), true, false)
 	got = stripANSI(m.plPage.view())
 	if !strings.Contains(got, "YT Music · 同步中…") {
 		t.Errorf("同步中状态行缺失: %q", got)
@@ -910,11 +910,102 @@ func TestYTPasteLoginVerifyFailures(t *testing.T) {
 			if m.notice != "" {
 				t.Errorf("失败后不应有 notice: %q", m.notice)
 			}
-			// 无论成败刷新页面登录状态
-			if !strings.Contains(stripANSI(m.plPage.view()), "YT Music · 已登录") {
-				t.Error("验证失败后概览仍应显示已登录（配置已保存）")
+			// M5：验证失败后状态区降级展示「已登录（验证失败）」（配置仍在）
+			got := stripANSI(m.plPage.view())
+			if !strings.Contains(got, "YT Music · 已登录（验证失败）") {
+				t.Errorf("验证失败后概览应显示已登录（验证失败）, got %q", got)
+			}
+			if strings.Contains(got, "YT Music · 已登录\n") {
+				t.Errorf("验证失败后不应显示纯已登录态: %q", got)
 			}
 		})
+	}
+}
+
+// M5：验证失败 → 状态区/设置页降级「已登录（验证失败）」；
+// 重新登录并验证成功 → 恢复「已登录」；初始加载未验证 → 维持「已登录」。
+func TestYTVerifyFailureDegradesStatus(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	env.client.SetHTTPClient(&http.Client{Transport: ytRoundTripper{code: 403, body: ""}})
+	m := env.m
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	for i := 0; i < 2; i++ {
+		m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("SAPISID=bad")})
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	var lp ytLoginPasteMsg
+	for _, msg := range execCmds(cmd) {
+		if pm, ok := msg.(ytLoginPasteMsg); ok {
+			lp = pm
+		}
+	}
+	m, cmd = update(m, lp)
+	var vd ytVerifyDoneMsg
+	for _, msg := range execCmds(cmd) {
+		if vm, ok := msg.(ytVerifyDoneMsg); ok {
+			vd = vm
+		}
+	}
+	m, _ = update(m, vd) // 验证失败（403）
+
+	if !m.ytInvalid {
+		t.Fatal("验证失败后 ytInvalid 应为 true")
+	}
+	if got := stripANSI(m.plPage.view()); !strings.Contains(got, "YT Music · 已登录（验证失败）") {
+		t.Errorf("状态区应显示已登录（验证失败）: %q", got)
+	}
+	// 设置页当前状态行一致降级
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	if got := stripANSI(m.plPage.view()); !strings.Contains(got, "当前状态：已登录（验证失败）") {
+		t.Errorf("设置页应显示已登录（验证失败）: %q", got)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+
+	// 重新登录（成功验证）→ 恢复已登录（用粘贴方式：不触碰真实浏览器配置）
+	env.client.SetHTTPClient(&http.Client{Transport: ytRoundTripper{code: 200, body: ytBrowseOK}})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	for i := 0; i < 2; i++ {
+		m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("SAPISID=good")})
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	var lp2 ytLoginPasteMsg
+	for _, msg := range execCmds(cmd) {
+		if pm, ok := msg.(ytLoginPasteMsg); ok {
+			lp2 = pm
+		}
+	}
+	m, cmd = update(m, lp2)
+	for _, msg := range execCmds(cmd) {
+		if vm, ok := msg.(ytVerifyDoneMsg); ok {
+			vd = vm
+		}
+	}
+	m, _ = update(m, vd) // 验证成功
+	if m.ytInvalid {
+		t.Error("验证成功后 ytInvalid 应为 false")
+	}
+	if got := stripANSI(m.plPage.view()); !strings.Contains(got, "YT Music · 已登录") || strings.Contains(got, "验证失败") {
+		t.Errorf("验证成功后状态区应恢复已登录: %q", got)
+	}
+}
+
+// 初始启动（未验证过）显示已登录（配置存在即显示，仅验证失败才降级）。
+func TestYTInitialUnverifiedShowsLoggedIn(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := env.store.SetPastedLogin("SAPISID=x"); err != nil {
+		t.Fatal(err)
+	}
+	env.refreshYTStatus()
+	m := env.m
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	got := stripANSI(m.plPage.view())
+	if !strings.Contains(got, "YT Music · 已登录") || strings.Contains(got, "验证失败") {
+		t.Errorf("初始未验证应显示已登录: %q", got)
 	}
 }
 

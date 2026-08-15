@@ -291,35 +291,64 @@ func TestExportBrowserCookiesEmptyKeyFallback(t *testing.T) {
 	}
 }
 
-func TestExportBrowserCookiesLocalStateKey(t *testing.T) {
-	home, profileDir := fakeBrowserHome(t)
-	// Local State 携带 os_crypt.encrypted_key（base64("DPAPI"+password)）
-	password := []byte("local-state-password")
-	if err := os.MkdirAll(profileDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	ls := `{"os_crypt":{"encrypted_key":"` + base64.StdEncoding.EncodeToString(append([]byte("DPAPI"), password...)) + `"}}`
-	if err := os.WriteFile(filepath.Join(profileDir, "Local State"), []byte(ls), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	key := deriveChromeKey(password, linuxKeyIterations)
-	rows := []fakeCookieRow{
-		{hostKey: ".youtube.com", name: "SAPISID", encryptedValue: encryptV10ForTest(t, key, []byte("ls-key-value"), false), path: "/", expiresUtc: 0},
-	}
-	writeFakeBrowserProfile(t, profileDir, 10, rows)
+// M3 回归：Linux 忽略 Local State 的 encrypted_key（对齐 yt-dlp，该字段仅
+// Windows/DPAPI 使用）——Local State 存在时 peanuts 仍被尝试（旧实现用
+// encrypted_key 替换 primary，peanuts 永不被尝试导致解密失败）。
+func TestExportBrowserCookiesIgnoresLocalStateKey(t *testing.T) {
+	t.Run("peanuts-still-tried", func(t *testing.T) {
+		home, profileDir := fakeBrowserHome(t)
+		_ = home
+		// Local State 携带 os_crypt.encrypted_key（base64("DPAPI"+password)）
+		password := []byte("local-state-password")
+		if err := os.MkdirAll(profileDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ls := `{"os_crypt":{"encrypted_key":"` + base64.StdEncoding.EncodeToString(append([]byte("DPAPI"), password...)) + `"}}`
+		if err := os.WriteFile(filepath.Join(profileDir, "Local State"), []byte(ls), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// cookie 用 peanuts 加密（Linux 真实密钥）
+		key := deriveChromeKey([]byte("peanuts"), linuxKeyIterations)
+		rows := []fakeCookieRow{
+			{hostKey: ".youtube.com", name: "SAPISID", encryptedValue: encryptV10ForTest(t, key, []byte("peanuts-value"), false), path: "/", expiresUtc: 0},
+		}
+		writeFakeBrowserProfile(t, profileDir, 10, rows)
 
-	out := filepath.Join(t.TempDir(), "ytm-cookies.txt")
-	if err := ExportBrowserCookies("chrome", out); err != nil {
-		t.Fatal(err)
-	}
-	cookies, err := ParseNetscape(mustRead(t, out))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cookies) != 1 || cookies[0].Value != "ls-key-value" {
-		t.Errorf("Local State 密钥派生失败: %+v", cookies)
-	}
-	_ = home
+		out := filepath.Join(t.TempDir(), "ytm-cookies.txt")
+		if err := ExportBrowserCookies("chrome", out); err != nil {
+			t.Fatalf("encrypted_key 存在时 peanuts 应仍可解密: %v", err)
+		}
+		cookies, err := ParseNetscape(mustRead(t, out))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cookies) != 1 || cookies[0].Value != "peanuts-value" {
+			t.Errorf("解密结果 = %+v, want peanuts-value", cookies)
+		}
+	})
+	t.Run("local-state-key-not-used", func(t *testing.T) {
+		home, profileDir := fakeBrowserHome(t)
+		_ = home
+		password := []byte("local-state-password")
+		if err := os.MkdirAll(profileDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ls := `{"os_crypt":{"encrypted_key":"` + base64.StdEncoding.EncodeToString(append([]byte("DPAPI"), password...)) + `"}}`
+		if err := os.WriteFile(filepath.Join(profileDir, "Local State"), []byte(ls), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// cookie 只用 Local State 密钥加密（旧实现能解，新实现应失败）
+		key := deriveChromeKey(password, linuxKeyIterations)
+		rows := []fakeCookieRow{
+			{hostKey: ".youtube.com", name: "SAPISID", encryptedValue: encryptV10ForTest(t, key, []byte("ls-value"), false), path: "/", expiresUtc: 0},
+		}
+		writeFakeBrowserProfile(t, profileDir, 10, rows)
+
+		err := ExportBrowserCookies("chrome", filepath.Join(t.TempDir(), "out.txt"))
+		if !errors.Is(err, ErrDecryptFailed) {
+			t.Errorf("Local State 密钥不应在 Linux 使用（应解密失败）, got %v", err)
+		}
+	})
 }
 
 func TestExportBrowserCookiesNoYouTubeCookies(t *testing.T) {
@@ -370,6 +399,25 @@ func TestExportBrowserCookiesBraveAlternativeDir(t *testing.T) {
 	}
 	if len(cookies) != 1 || cookies[0].Value != "brave-value" {
 		t.Errorf("brave 目录探测失败: %+v", cookies)
+	}
+}
+
+// m6：macOS 非 v10/v11 前缀的旧明文 cookie 原样返回（yt-dlp Mac 分支同款）；
+// 非 macOS（macLegacyPlain=false）无法处理。
+func TestDecryptValueMacLegacyPlaintext(t *testing.T) {
+	// macOS：无前缀旧明文 → 原样返回
+	macKeys := &chromeKeys{empty: deriveChromeKey(nil, linuxKeyIterations), macLegacyPlain: true}
+	if got, ok := decryptValue([]byte("legacy-plain-value"), macKeys); !ok || got != "legacy-plain-value" {
+		t.Errorf("macOS 旧明文应原样返回, got %q, %v", got, ok)
+	}
+	// 非 macOS：未知前缀 → 无法处理
+	linuxKeys := &chromeKeys{empty: deriveChromeKey(nil, linuxKeyIterations)}
+	if _, ok := decryptValue([]byte("legacy-plain-value"), linuxKeys); ok {
+		t.Error("Linux 未知前缀不应返回明文")
+	}
+	// 空/过短输入两类平台都不处理
+	if _, ok := decryptValue(nil, macKeys); ok {
+		t.Error("空输入不应处理")
 	}
 }
 

@@ -332,3 +332,208 @@ func TestListPlaylistsNotConfigured(t *testing.T) {
 		t.Errorf("未配置登录应返回 ErrNoLogin, got %v", err)
 	}
 }
+
+// ---- 分页（M2）----
+
+// 首页 fixture：grid + 末尾 continuationItemRenderer（标准 continuationCommand.token 路径）。
+const page1Fixture = `{
+  "contents": {
+    "singleColumnBrowseResultsRenderer": {
+      "tabs": [{
+        "tabRenderer": {
+          "selected": true,
+          "content": {
+            "sectionListRenderer": {
+              "contents": [{
+                "itemSectionRenderer": {
+                  "contents": [{
+                    "gridRenderer": {
+                      "items": [
+                        {"musicTwoRowItemRenderer": {
+                          "title": {"runs": [{"text": "我的最爱"}]},
+                          "subtitle": {"runs": [{"text": "5 首"}]},
+                          "navigationEndpoint": {"browseEndpoint": {"browseId": "PLAAA"}}
+                        }}
+                      ]
+                    }
+                  }]
+                }},
+                {"continuationItemRenderer": {
+                  "continuationEndpoint": {
+                    "continuationCommand": {"token": "TOKEN1"}
+                  }
+                }}
+              ]
+            }
+          }
+        }
+      }]
+    }
+  },
+  "serviceTrackingParams": [{"service": "GFEEDBACK", "params": [{"key": "logged_in", "value": "1"}]}]
+}`
+
+// 第二页 fixture：onResponseReceivedActions 追加条目（含重复 PLAAA）+ 下一个令牌。
+const page2Fixture = `{
+  "onResponseReceivedActions": [{
+    "appendContinuationItemsAction": {
+      "continuationItems": [
+        {"musicTwoRowItemRenderer": {
+          "title": {"runs": [{"text": "通勤歌单"}]},
+          "subtitle": {"runs": [{"text": "12 首"}]},
+          "navigationEndpoint": {"browseEndpoint": {"browseId": "PLBBB"}}
+        }},
+        {"musicTwoRowItemRenderer": {
+          "title": {"runs": [{"text": "我的最爱"}]},
+          "subtitle": {"runs": [{"text": "5 首"}]},
+          "navigationEndpoint": {"browseEndpoint": {"browseId": "PLAAA"}}
+        }},
+        {"continuationItemRenderer": {
+          "continuationEndpoint": {
+            "continuation": "TOKEN2"
+          }
+        }}
+      ]
+    }
+  }]
+}`
+
+// 第三页 fixture：无条目、无令牌（分页耗尽）。
+const page3Fixture = `{"onResponseReceivedActions": []}`
+
+func TestListPlaylistsPaginatesAndDedups(t *testing.T) {
+	s, _ := newTestStore(t)
+	pastedLogin(t, s, "SAPISID=test-sap")
+	var bodies []string
+	var tokens []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, string(data))
+		var b map[string]any
+		if err := json.Unmarshal(data, &b); err != nil {
+			t.Fatalf("body 非法 JSON: %v", err)
+		}
+		if tok, _ := b["continuation"].(string); tok != "" {
+			tokens = append(tokens, tok)
+		}
+		switch len(bodies) {
+		case 1:
+			_, _ = w.Write([]byte(page1Fixture))
+		case 2:
+			_, _ = w.Write([]byte(page2Fixture))
+		default:
+			_, _ = w.Write([]byte(page3Fixture))
+		}
+	}))
+	defer srv.Close()
+	old := ytmBrowseURL
+	ytmBrowseURL = srv.URL
+	defer func() { ytmBrowseURL = old }()
+
+	c := newTestClient(t, s, srv)
+	got, err := c.ListPlaylists(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 三页全部拉取，跨页去重（PLAAA 第二页重复不出现两次）
+	if len(bodies) != 3 {
+		t.Fatalf("请求页数 = %d, want 3", len(bodies))
+	}
+	if len(tokens) != 2 || tokens[0] != "TOKEN1" || tokens[1] != "TOKEN2" {
+		t.Errorf("continuation 令牌序列 = %v, want [TOKEN1 TOKEN2]", tokens)
+	}
+	// 首页 body 有 browseId 无 continuation；分页 body 有 continuation 无 browseId
+	var b map[string]any
+	if err := json.Unmarshal([]byte(bodies[0]), &b); err != nil {
+		t.Fatal(err)
+	}
+	if b["browseId"] != "FEmusic_liked_playlists" {
+		t.Errorf("首页 browseId = %v", b["browseId"])
+	}
+	if _, ok := b["continuation"]; ok {
+		t.Error("首页 body 不应有 continuation")
+	}
+	for i, body := range bodies[1:] {
+		b := map[string]any{}
+		if err := json.Unmarshal([]byte(body), &b); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := b["browseId"]; ok {
+			t.Errorf("分页 body %d 不应有 browseId", i+1)
+		}
+		if b["continuation"] == nil {
+			t.Errorf("分页 body %d 应有 continuation", i+1)
+		}
+	}
+	want := []RemotePlaylist{
+		{ID: "PLAAA", Title: "我的最爱", Count: 5},
+		{ID: "PLBBB", Title: "通勤歌单", Count: 12},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("合并后歌单数 = %d, want %d（%+v）", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("playlists[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// 令牌提取：标准 continuationCommand.token / 直存 continuation /
+// commandExecutorCommand 嵌套三路径 + 无令牌。
+func TestExtractContinuationToken(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want string
+	}{
+		{"standard", `{"continuationItemRenderer":{"continuationEndpoint":{"continuationCommand":{"token":"T1"}}}}`, "T1"},
+		{"direct", `{"continuationItemRenderer":{"continuationEndpoint":{"continuation":"T2"}}}`, "T2"},
+		{"executor-nested", `{"continuationItemRenderer":{"continuationEndpoint":{"commandExecutorCommand":{"commands":[
+			{"continuationCommand":{"request":"CONTINUATION_REQUEST_TYPE_BROWSE","token":"T3"}}]}}}}`, "T3"},
+		{"executor-other-request", `{"continuationItemRenderer":{"continuationEndpoint":{"commandExecutorCommand":{"commands":[
+			{"continuationCommand":{"request":"CONTINUATION_REQUEST_TYPE_WATCH","token":"T4"}}]}}}}`, ""},
+		{"empty", `{"continuationItemRenderer":{"continuationEndpoint":{}}}`, ""},
+		{"no-renderer", `{"gridRenderer":{"items":[]}}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var v any
+			if err := json.Unmarshal([]byte(tc.json), &v); err != nil {
+				t.Fatal(err)
+			}
+			if _, tok := extractPlaylists(v); tok != tc.want {
+				t.Errorf("token = %q, want %q", tok, tc.want)
+			}
+		})
+	}
+}
+
+// 无限分页防御：服务端重复返回同一令牌时报错而非死循环。
+func TestListPlaylistsContinuationLoopGuard(t *testing.T) {
+	s, _ := newTestStore(t)
+	pastedLogin(t, s, "SAPISID=test-sap")
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		_, _ = w.Write([]byte(`{"contents":{},"onResponseReceivedActions":[{"appendContinuationItemsAction":{"continuationItems":[
+			{"continuationItemRenderer":{"continuationEndpoint":{"continuationCommand":{"token":"SAME"}}}}
+		]}}]}`))
+	}))
+	defer srv.Close()
+	old := ytmBrowseURL
+	ytmBrowseURL = srv.URL
+	defer func() { ytmBrowseURL = old }()
+
+	c := newTestClient(t, s, srv)
+	_, err := c.ListPlaylists(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "分页超过") {
+		t.Errorf("应报分页超限错误, got %v", err)
+	}
+	if n != maxContinuationPages+1 {
+		t.Errorf("请求次数 = %d, want %d", n, maxContinuationPages+1)
+	}
+}

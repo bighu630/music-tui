@@ -2,6 +2,7 @@ package ytm
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -76,22 +77,45 @@ func (c *Client) VerifyLogin(ctx context.Context) error {
 	return err
 }
 
-// ListPlaylists 枚举 YTM 全部歌单（需登录）。
+// ListPlaylists 枚举 YTM 全部歌单（需登录）。browse 分页：首页解析
+// continuation 令牌后循环拉取直至耗尽，跨页按 playlistId 去重。
 func (c *Client) ListPlaylists(ctx context.Context) ([]RemotePlaylist, error) {
 	it, err := c.innerTube()
 	if err != nil {
 		return nil, err
 	}
-	resp, err := it.browse(ctx, likedPlaylistsBrowseID)
-	if err != nil {
-		return nil, err
+	var all []RemotePlaylist
+	seen := make(map[string]bool)
+	var firstResp any
+	token := ""
+	for pages := 0; ; pages++ {
+		resp, err := it.browse(ctx, likedPlaylistsBrowseID, token)
+		if err != nil {
+			return nil, err
+		}
+		if firstResp == nil {
+			firstResp = resp
+		}
+		playlists, next := extractPlaylists(resp)
+		for _, p := range playlists {
+			if !seen[p.ID] {
+				seen[p.ID] = true
+				all = append(all, p)
+			}
+		}
+		if next == "" {
+			break
+		}
+		token = next
+		if pages >= maxContinuationPages {
+			return nil, fmt.Errorf("browse 分页超过 %d 页，疑似服务端返回相同令牌", maxContinuationPages)
+		}
 	}
-	playlists := extractPlaylists(resp)
-	// 登录判定：logged_in=0 或无歌单条目 → 未登录（契约）
-	if len(playlists) == 0 || loggedInParam(resp) == "0" {
+	// 登录判定（契约）：logged_in=0 或首页无歌单条目 → 未登录
+	if len(all) == 0 || loggedInParam(firstResp) == "0" {
 		return nil, ErrNotLoggedIn
 	}
-	return playlists, nil
+	return all, nil
 }
 
 // innerTube 构建带当前 cookie 的 browse 客户端。

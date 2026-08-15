@@ -154,21 +154,21 @@ func (i plTrackItem) FilterValue() string { return i.track.Title + " " + i.track
 type plMode int
 
 const (
-	plOverview plMode = iota // 概览：全部列表
-	plDetail                 // 详情：某列表的歌曲
-	plNaming                 // 命名输入（新建/重命名）
-	plSyncSetup              // YT Music 登录设置（含二级浏览器选择与输入子层）
-	plURLImport              // YT Music URL 导入输入框
+	plOverview  plMode = iota // 概览：全部列表
+	plDetail                  // 详情：某列表的歌曲
+	plNaming                  // 命名输入（新建/重命名）
+	plSyncSetup               // YT Music 登录设置（含二级浏览器选择与输入子层）
+	plURLImport               // YT Music URL 导入输入框
 )
 
 // setupSub 是登录设置视图的子状态。
 type setupSub int
 
 const (
-	setupMain setupSub = iota // 登录方式菜单
-	setupBrowser              // 浏览器二级选择
-	setupCookiesInput         // cookies.txt 路径输入
-	setupPasteInput           // 粘贴 Cookie 字符串输入
+	setupMain         setupSub = iota // 登录方式菜单
+	setupBrowser                      // 浏览器二级选择
+	setupCookiesInput                 // cookies.txt 路径输入
+	setupPasteInput                   // 粘贴 Cookie 字符串输入
 )
 
 // setupKind 是登录设置菜单项类型。
@@ -207,8 +207,10 @@ type browserItem struct {
 	info ytm.BrowserInfo
 }
 
-func (i browserItem) Title() string       { return i.info.Label }
-func (i browserItem) Description() string { return "自动导出浏览器 cookie（Windows 请改用 cookies.txt）" }
+func (i browserItem) Title() string { return i.info.Label }
+func (i browserItem) Description() string {
+	return "自动导出浏览器 cookie（Windows 请改用 cookies.txt）"
+}
 func (i browserItem) FilterValue() string { return i.info.Label }
 
 // playlistModel 播放列表页：概览 ↔ 详情 两级列表，命名输入用于新建/重命名，
@@ -229,6 +231,7 @@ type playlistModel struct {
 	// YT Music 状态（root 推入；页面不直接持有 ytm 服务）
 	ytLogin     ytm.LoginConfig
 	ytSyncing   bool
+	ytInvalid   bool            // 最近一次 VerifyLogin 失败（验证失败降级展示；未验证/成功为 false）
 	ytSyncNames map[string]bool // 本地列表名 → 是否 YT 同步列表（详情 r 刷新提示）
 
 	width, height int
@@ -259,13 +262,19 @@ func newPlaylistModel() playlistModel {
 
 // Update 处理播放列表页按键。
 // overview：Enter 进入详情、n 新建、r 重命名、d 删除、s 登录设置、
-//   y 同步全部、u URL 导入（s/y/u 仅概览响应，详情不响应）；
+//
+//	y 同步全部、u URL 导入（s/y/u 仅概览响应，详情不响应）；
+//
 // detail：Enter 整列表播放、a 加入队列、d 移除、r 刷新（YT 同步列表）、
-//   Esc/← 返回概览；
+//
+//	Esc/← 返回概览；
+//
 // 命名输入：Enter 提交、Esc 取消；
 // URL 导入：Enter 提交（空值忽略）、Esc 返回概览；
 // 登录设置：主菜单/浏览器二级列表 Enter 确认、Esc 返回上一层，
-//   输入子层 Enter 提交、Esc 返回菜单；
+//
+//	输入子层 Enter 提交、Esc 返回菜单；
+//
 // 其余按键交给对应 list/textinput。
 func (p playlistModel) Update(msg tea.Msg) (playlistModel, tea.Cmd) {
 	if msg, ok := msg.(tea.KeyMsg); ok {
@@ -616,10 +625,11 @@ func (p playlistModel) typing() bool {
 	return false
 }
 
-// setYTSyncStatus 推入 YT 登录状态与同步中标记（root 调用）。
-func (p playlistModel) setYTSyncStatus(login ytm.LoginConfig, syncing bool) playlistModel {
+// setYTSyncStatus 推入 YT 登录状态、同步中标记与验证失败标记（root 调用）。
+func (p playlistModel) setYTSyncStatus(login ytm.LoginConfig, syncing, invalid bool) playlistModel {
 	p.ytLogin = login
 	p.ytSyncing = syncing
+	p.ytInvalid = invalid
 	return p
 }
 
@@ -697,6 +707,7 @@ func (p playlistModel) view() string {
 // ytStatusBlock 渲染概览顶部 YT Music 状态区（列表上方；空列表时也显示）。
 // 未登录：YT Music · 未登录（faint：s 登录设置 · u 导入歌单链接）
 // 已登录：YT Music · 已登录（faint：y 同步全部 · s 设置 · u 导入）
+// 验证失败：YT Music · 已登录（验证失败）（配置仍在，但登录已确认不可用）
 // 同步中：YT Music · 同步中…（无提示行）
 func (p playlistModel) ytStatusBlock() string {
 	status := "YT Music · 未登录"
@@ -706,6 +717,9 @@ func (p playlistModel) ytStatusBlock() string {
 		hint = ""
 	} else if p.ytLogin.Method != ytm.MethodNone {
 		status = "YT Music · 已登录"
+		if p.ytInvalid {
+			status = "YT Music · 已登录（验证失败）"
+		}
 		hint = "y 同步全部 · s 设置 · u 导入"
 	}
 	out := lipgloss.NewStyle().Bold(true).Render(status)
@@ -725,9 +739,12 @@ func (p playlistModel) setupView() string {
 	status := "未登录"
 	if p.ytLogin.Method != ytm.MethodNone {
 		status = "已登录 · " + p.ytLoginMethodLabel() + " · " + p.ytLogin.UpdatedAt.Format("01-02 15:04")
+		if p.ytInvalid {
+			status = "已登录（验证失败） · " + p.ytLoginMethodLabel() + " · " + p.ytLogin.UpdatedAt.Format("01-02 15:04")
+		}
 	}
 	head := lipgloss.NewStyle().Bold(true).Render(title) + "\n" +
-		lipgloss.NewStyle().Faint(true).Render("当前状态：" + status)
+		lipgloss.NewStyle().Faint(true).Render("当前状态："+status)
 	body := p.setup.View()
 	if p.setupSub == setupCookiesInput || p.setupSub == setupPasteInput {
 		body += "\n\n" + p.input.View()
