@@ -393,8 +393,9 @@ func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cove
 // 403 风控（与"预热移后到 TrackStarted"同一回归动机）。
 //
 // 调用点：TrackStartedEvent（预热当前曲之后）、全部队列形态变更（增/删/清/跳转/
-// 替换）、模式切换（cycleMode）、播放停止（stopAfterEnd、ErrorEvent 置 ended 分支）——
-// 即所有"下一首候选"或"播放状态"可能变化之处。注意 Model 为值接收者：本方法只
+// 替换）、模式切换（cycleMode）、播放停止（stopAfterEnd、ErrorEvent 置 ended 分支）、
+// 失败跳过（skipFailedTrack 成功后立即）、重试期间队列被清空（retryPlayMsg 空队列
+// 分支）——即所有"下一首候选"或"播放状态"可能变化之处。注意 Model 为值接收者：本方法只
 // 更新 preloader（指针字段）的目标槽位，不依赖调用方副本的后续状态，
 // 因此在"分支返回前"调用即可生效（scheduler 是共享指针）。
 func (m Model) refreshPreload() {
@@ -1183,7 +1184,8 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 			m.cache.CacheAsync(*m.state.Track)
 		}
 		// 预加载：当前曲确认开始后预下载队列下一首（门控见 refreshPreload；
-		// 单曲回绕时目标=当前曲自身，已被上方预热覆盖，CacheAsync no-op 安全）。
+		// 回绕同 ID 时 refreshPreload 不设目标：同曲缓存已由上方预热覆盖，预载
+		// 纯属重复；且此时预载会与 mpv 取流并发访问同一 URL，放大 403 风控）。
 		m.refreshPreload()
 		// 仅在拿到真实时长时覆盖：Duration=0 表示 observe 与 Get 兜底
 		// 均失败（直播/特殊流），此时保留搜索元数据提供的时长，避免被抹零。
@@ -1290,8 +1292,12 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 				// 目标曲目已在本轮失败集合中（队列回绕撞回已失败曲目）：不跳，
 				// 走下方停止路径，避免无限交替重播（回归：TestLoadFailAllTracksFailStopsLoop）。
 				m2, cmd := m.skipFailedTrack(*skip, hint)
-				// 跳过 = 播放状态变更（新当前曲）：立即重算预加载目标，
-				// 不必等下次 TrackStarted（避免短暂预载到刚跳过的曲目）
+				// 跳过 = 播放状态变更（新当前曲）：立即重算预加载目标，不必等下次
+				// TrackStarted——否则目标仍指向刚跳到的当前曲，预载会与 mpv 取流并发
+				// 访问同一 URL 放大 403 风控。回绕后目标可能撞回刚失败曲目
+				//（failedTracks 成员）：对其发起有界预载重试（MaxDownloadAttempts 次 ×
+				// DownloadRetryBackoff 退避 ≈ 数秒）是设计内接受的浪费——失败静默、
+				// 不与 mpv 并发同 URL（失败曲目已停止取流），与"失败静默"策略一致。
 				m2.refreshPreload()
 				return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
 			}

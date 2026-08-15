@@ -11,9 +11,27 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"music-tui/cache"
 	"music-tui/player"
 	"music-tui/queue"
 )
+
+// init 把 cache 后台下载的重试预算压到最小：默认 5 次 × 2s 退避 ≈ 8s 的重试
+// 突发会让失败下载的 goroutine 贯穿整个测试套件（每触发一次预载/预热下载就
+// 多一条长命 goroutine）。改为单次尝试：exec 立即失败 → goroutine 毫秒级
+// 退出（attempts=1 时退避不会被读），并顺带加速全包 ui 测试（含 root 预热
+// 类测试的后台下载）。
+//
+// 为何用 init 一次性设置而非“每测试 set + defer 恢复”：download 的重试循环
+// 在无同步的情况下读取这两个包级变量（cache.go 的 for 条件与 time.After），
+// 测试内修改后恢复必然与调度延迟的下载 goroutine 读操作竞争（实测 -race
+// 报 DATA RACE：cleanup 恢复写 vs 下载 goroutine 读循环条件）。init 在任何
+// 测试/下载 goroutine 存在之前写入，此后不再写——从构造上消除竞争。cache
+// 包自身测试在独立二进制内各自 set/恢复，互不影响。
+func init() {
+	cache.MaxDownloadAttempts = 1                 // 单次尝试即失败退出：无退避循环
+	cache.DownloadRetryBackoff = time.Millisecond // 防御性调短（attempts=1 时不读）
+}
 
 // targetID 返回当前预加载目标曲目 ID（无目标时返回空串）。测试断言用。
 func targetID(m Model) string {

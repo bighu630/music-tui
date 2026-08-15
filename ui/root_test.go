@@ -2085,11 +2085,13 @@ func TestTrackStartedTriggersCacheWarmup(t *testing.T) {
 	}
 	waitFor(t, 3*time.Second, func() bool { return ytDlpCallCount(logPath) >= 2 })
 
-	// 连播：TrackEnded → beginPlay(t2) 不得再触发新下载（t2 已由预加载下载，
-	// 后续 TrackStarted 的预热对已缓存条目是 no-op）——下载总数保持 2。
+	// 连播：TrackEnded → beginPlay(t2) 不得再触发新下载（t2 已由预加载下载；
+	// 预加载恰好在切歌前完成时命中缓存播本地文件，未完成时播网络 URL——两种
+	// 时序都合法，故不断言播放路径，只断播放次数；"不触发新下载"由下载总数
+	// 保持 2 覆盖，后续 TrackStarted 的预热对已缓存条目是 no-op）。
 	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
-	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t2").URL {
-		t.Fatalf("TrackEnded 后应连播 t2: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	if fp.playCount() != 2 {
+		t.Fatalf("TrackEnded 后应连播 t2（命中缓存秒切或网络取流）, playCount=%d", fp.playCount())
 	}
 	time.Sleep(200 * time.Millisecond)
 	if got := ytDlpCallCount(logPath); got != 2 {
