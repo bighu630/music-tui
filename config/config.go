@@ -44,13 +44,20 @@ type Log struct {
 	Level string `json:"level"`
 }
 
+// LyricFile 是歌词文件写入配置：Enabled 为开关，缺失 → true（默认开启），
+// 显式 false → 禁用（完全不写文件）。仅 Linux 平台生效（非 Linux 恒禁用）。
+type LyricFile struct {
+	Enabled bool `json:"enabled"`
+}
+
 // Config 是顶层配置：缓存设置（嵌入 cache.Options，json tag 即文件格式）
-// + OpenAI 增强歌词配置 + yt-dlp 附加参数配置 + 日志配置。
+// + OpenAI 增强歌词配置 + yt-dlp 附加参数配置 + 日志配置 + 歌词文件写入配置。
 type Config struct {
-	Cache  cache.Options `json:"cache"`
-	OpenAI OpenAI        `json:"openai"`
-	Ytdlp  Ytdlp         `json:"ytdlp"`
-	Log    Log           `json:"log"`
+	Cache     cache.Options `json:"cache"`
+	OpenAI    OpenAI        `json:"openai"`
+	Ytdlp     Ytdlp         `json:"ytdlp"`
+	Log       Log           `json:"log"`
+	LyricFile LyricFile     `json:"lyric_file"`
 }
 
 // Default 返回默认配置：缓存开启、上限 DefaultMaxEntries、
@@ -68,6 +75,8 @@ func Default() (*Config, error) {
 		Model: DefaultOpenAIModel,
 	}, Log: Log{
 		Level: "info",
+	}, LyricFile: LyricFile{
+		Enabled: true,
 	}}, nil
 }
 
@@ -117,6 +126,9 @@ func Load(path string) (*Config, error) {
 		Log struct {
 			Level *string `json:"level"`
 		} `json:"log"`
+		LyricFile struct {
+			Enabled *bool `json:"enabled"`
+		} `json:"lyric_file"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("解析配置文件: %w", err)
@@ -130,6 +142,8 @@ func Load(path string) (*Config, error) {
 		Model: DefaultOpenAIModel,
 	}, Log: Log{
 		Level: "info",
+	}, LyricFile: LyricFile{
+		Enabled: true,
 	}}
 	if raw.Cache.Enabled != nil {
 		c.Cache.Enabled = *raw.Cache.Enabled
@@ -154,6 +168,10 @@ func Load(path string) (*Config, error) {
 	// Log：level 缺失 → 默认 "info"；显式值经 logger 规范化（非法回落 "info"）
 	if raw.Log.Level != nil {
 		c.Log.Level = logger.NormalizeLevel(*raw.Log.Level)
+	}
+	// LyricFile：enabled 缺失 → 默认 true（开启）；显式 false → 禁用（完全不写文件）
+	if raw.LyricFile.Enabled != nil {
+		c.LyricFile.Enabled = *raw.LyricFile.Enabled
 	}
 	// Ytdlp：map 字段天然区分「缺失/null → nil」与「显式 {} → 空 map」；
 	// nil 与空 map 语义一致，均为未配置（不附加任何参数）。

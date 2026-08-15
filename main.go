@@ -133,6 +133,12 @@ func run() error {
 			lyClient = enhanced
 		}
 	}
+	// 歌词文件写入器：lyric_file.enabled=false 时不创建（传 nil，ui 层 no-op）；
+	// 非 Linux 平台 lyricshm.New 内部自动禁用（仅 Linux 生效）。
+	var lyricFile *lyricshm.Writer
+	if cfg.LyricFile.Enabled {
+		lyricFile = lyricshm.New(lyricshm.DefaultPath)
+	}
 	model := ui.NewModel(
 		mpv,
 		searchAdapter,
@@ -145,7 +151,7 @@ func run() error {
 		ytm.NewClient(ytStore, searchAdapter),
 		mprisSrv.SetTrack,
 		cookieFile != "" || len(ytdlpHeaders) > 0,
-		lyricshm.New(lyricshm.DefaultPath),
+		lyricFile,
 	)
 	// MPRIS 队列控制注入：ui 侧桥实现 mpris 包的 controller 接口（编译期检查）；
 	// 模式变更经 sink 同步回 MPRIS 属性（LoopStatus/Shuffle 投影 + PropertiesChanged）。
