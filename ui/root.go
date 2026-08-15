@@ -1202,6 +1202,11 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.resuming = false                 // 恢复加载成功：进入正常播放态，恢复上下文作废
 		m.ended = false
 		m.loadingSince = time.Time{} // 加载成功：加载中提示结束
+		// 事件链存活标记：TrackStarted 到达 = UI 事件消费链健康（连播后首个
+		// 关键事件；若日志缺失说明事件链断裂，进度/歌词将冻结，见 TrackEnded 分支注释）
+		if m.state.Track != nil {
+			logger.Info("新曲就绪: %s - %s (id=%s)", m.state.Track.Title, m.state.Track.Artist, m.state.Track.ID)
+		}
 		// 缓存预热：mpv 取流成功后才启动后台下载——避免与 mpv 内置 yt-dlp
 		// 并发访问同一 URL 放大 403 风控（回归：连播未缓存下一首卡住）。
 		// CacheAsync 对 Disabled/已存在/在途条目均为 no-op，playingFromCache 时安全。
@@ -1225,25 +1230,34 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		// 自动连播。解耦标记（删除当前曲）存在时：播放顺延曲目（当前位），
 		// 无当前位则从头，队列为空则停止；否则正常推进到下一首。
 		// 两种情况均不切换当前页面。
+		// 注意：所有分支都必须重新发出 waitForPlayerEvents（cmds）——本分支
+		// 提前 return，若丢弃链则连播后无人再读 p.Events()，缓冲满后事件被
+		// emit 丢弃：UI 进度冻结 0.00/歌词不动，而 MPRIS 独立订阅通道仍正常
+		// （回归：TestTrackEndedAutoAdvanceKeepsEventChainAlive/Stop）。
 		if m.queueSkip {
 			m.queueSkip = false
 			if tr, ok := m.queue.Current(); ok {
 				logger.Info("曲目结束(删除解耦): 连播顺延曲目 %s - %s", tr.Title, tr.Artist)
-				return m.beginPlay(tr)
+				m2, cmd := m.beginPlay(tr)
+				return m2, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 			}
 			if tr, ok := m.queue.Next(); ok {
 				logger.Info("曲目结束(删除解耦): 连播下一首 %s - %s", tr.Title, tr.Artist)
-				return m.beginPlay(tr)
+				m2, cmd := m.beginPlay(tr)
+				return m2, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 			}
 			logger.Info("曲目结束: 队列为空，停止播放")
-			return m.stopAfterEnd()
+			m2, cmd := m.stopAfterEnd()
+			return m2, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 		}
 		if tr, ok := m.queue.Next(); ok {
 			logger.Info("曲目结束: 连播下一首 %s - %s", tr.Title, tr.Artist)
-			return m.beginPlay(tr)
+			m2, cmd := m.beginPlay(tr)
+			return m2, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 		}
 		logger.Info("曲目结束: 无下一首，停止播放")
-		return m.stopAfterEnd()
+		m2, cmd := m.stopAfterEnd()
+		return m2, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 	case player.ErrorEvent:
 		// 加载/播放有结论（失败、断开、超时）：加载中提示结束。重试/跳过路径
 		// 会经 beginPlay 重新设置（下一轮加载重新计时）。

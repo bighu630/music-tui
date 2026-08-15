@@ -180,6 +180,9 @@ func TestTrackEndedAutoAdvances(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
 	// t1 结束 → 自动连播 t2
+	// 预推一个事件：TrackEnded 返回的 batch 含 waitForPlayerEvents（事件链），
+	// 测试执行该 batch 时需有事件可消费（与 execRetryBatch 同款模式）。
+	fp.events <- player.ProgressEvent{Position: 0, Duration: 200}
 	m, cmd = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
 	msgs := execCmds(cmd)
 	for _, msg := range msgs {
