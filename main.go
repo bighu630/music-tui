@@ -127,8 +127,8 @@ func run() error {
 			fmt.Fprintf(os.Stderr, "music-tui: 警告：AI 歌词缓存初始化失败，已降级确定性匹配: %v\n", err)
 			logger.Warn("AI 歌词缓存初始化失败，已降级确定性匹配: %v", err)
 		} else {
-			// 中文歌词源链（用户确认顺序：lrclib → 网易云 → QQ）：
-			// 匿名接口无需登录，仅在 lrclib 严格重查未命中后查询。
+			// 中文歌词源链（用户确认顺序：网易云 → QQ → lrclib）：
+			// 匿名接口无需登录，优先于 lrclib 严格重查查询。
 			enhanced.EnableCNSources(lyrics.NewNeteaseClient(), lyrics.NewQQMusicClient())
 			lyClient = enhanced
 		}
