@@ -34,7 +34,7 @@ type Manager struct {
 	dir        string
 	maxEntries int
 	idx        index
-	inflight   map[string]bool
+	inflight   map[string]chan struct{}
 	ytdlpPath  string
 	cookieFile string
 	headers    map[string]string
@@ -58,7 +58,7 @@ func New(opts Options, ytdlpPath string, cookieFile string, headers map[string]s
 		enabled:    opts.Enabled,
 		dir:        opts.Dir,
 		maxEntries: maxEntries,
-		inflight:   map[string]bool{},
+		inflight:   map[string]chan struct{}{},
 		ytdlpPath:  ytdlpPath,
 		cookieFile: cookieFile,
 		headers:    headers,
@@ -175,13 +175,15 @@ func (m *Manager) Lookup(id string) (string, bool) {
 // 否则启动后台下载并返回完成信号 channel：下载彻底结束（成功注册进索引，
 // 或预算耗尽失败）时关闭。调用方（如 preload 调度器）用 <-done 串行等待；
 // 现有调用方忽略返回值即可（Go 语句调用允许忽略返回值）。
+// 同 ID 在途时返回 nil 且不返回在途信号：preload 调度器依赖 done==nil 表示
+// no-op 的语义；需要监听在途下载完成信号用 WaitDone。
 func (m *Manager) CacheAsync(track model.Track) <-chan struct{} {
 	m.mu.Lock()
 	if !m.enabled || m.dir == "" {
 		m.mu.Unlock()
 		return nil
 	}
-	if m.inflight[track.ID] {
+	if m.inflight[track.ID] != nil {
 		m.mu.Unlock()
 		return nil
 	}
@@ -189,12 +191,23 @@ func (m *Manager) CacheAsync(track model.Track) <-chan struct{} {
 		m.mu.Unlock()
 		return nil
 	}
-	m.inflight[track.ID] = true
+	done := make(chan struct{})
+	m.inflight[track.ID] = done // 存入该次下载的完成信号，WaitDone 可取同一 channel
 	m.mu.Unlock()
 
-	done := make(chan struct{})
 	go m.download(track, done)
 	return done
+}
+
+// WaitDone 返回该 ID 在途下载的完成信号（与 CacheAsync 首次发起时返回的
+// 是同一 channel）：仅监听不启动下载；下载彻底结束（成功注册或失败耗尽）
+// 时信号关闭，调用方可 <-done 等待；无在途下载返回 nil。
+// 用途：缓存兜底播放——UI 在 mpv URL 播放失败/卡住时，对已由 preload/预热
+// 启动、正在在途的下载也能拿到完成信号，下载完成即切本地文件播放。
+func (m *Manager) WaitDone(id string) <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.inflight[id]
 }
 
 // download 执行一次后台下载：yt-dlp 直接下载到缓存目录（-o 模板落盘）→ 注册进索引。
