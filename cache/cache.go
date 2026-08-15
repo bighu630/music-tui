@@ -166,37 +166,45 @@ func (m *Manager) Lookup(id string) (string, bool) {
 }
 
 // CacheAsync 后台异步下载并注册（不阻塞、立即返回）：
-// 开关关/同 ID 在途/条目已存在 → no-op。
-func (m *Manager) CacheAsync(track model.Track) {
+// 开关关/目录空/同 ID 在途/条目已存在 → no-op，返回 nil（没有下载发生）。
+// 否则启动后台下载并返回完成信号 channel：下载彻底结束（成功注册进索引，
+// 或预算耗尽失败）时关闭。调用方（如 preload 调度器）用 <-done 串行等待；
+// 现有调用方忽略返回值即可（Go 语句调用允许忽略返回值）。
+func (m *Manager) CacheAsync(track model.Track) <-chan struct{} {
 	m.mu.Lock()
 	if !m.enabled || m.dir == "" {
 		m.mu.Unlock()
-		return
+		return nil
 	}
 	if m.inflight[track.ID] {
 		m.mu.Unlock()
-		return
+		return nil
 	}
 	if _, ok := m.idx.get(track.ID); ok {
 		m.mu.Unlock()
-		return
+		return nil
 	}
 	m.inflight[track.ID] = true
 	m.mu.Unlock()
 
-	go m.download(track)
+	done := make(chan struct{})
+	go m.download(track, done)
+	return done
 }
 
 // download 执行一次后台下载：yt-dlp 直接下载到缓存目录（-o 模板落盘）→ 注册进索引。
 // YouTube 对音频直链有概率性 403 风控：同一直链重试无意义（换 URL 才换结果），
 // 因此失败整进程重跑 = 重新运行 yt-dlp = 重新提取新 URL；预算内最多
 // MaxDownloadAttempts 次（每次尝试有 DownloadAttemptTimeout 子超时，总超时
-// DownloadTimeout 封顶）。任一步失败仅 log.Printf；结束必清除 inflight 标记。
-func (m *Manager) download(track model.Track) {
+// DownloadTimeout 封顶）。任一步失败仅 log.Printf；结束必清除 inflight 标记，
+// 且无论成功失败都关闭 done 完成信号（defer close，含开头的 Disabled 防御
+// 分支）——通知 CacheAsync 调用方“下载彻底结束”。
+func (m *Manager) download(track model.Track, done chan struct{}) {
 	defer func() {
 		m.mu.Lock()
 		delete(m.inflight, track.ID)
 		m.mu.Unlock()
+		close(done) // 任何路径（含下方 Disabled 防御分支）都必须关闭完成信号
 	}()
 	if !m.enabled || m.dir == "" || m.ytdlpPath == "" {
 		return // Disabled 安全（正常流程 CacheAsync 已拦截，此处为防御）
