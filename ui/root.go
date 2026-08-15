@@ -77,6 +77,11 @@ type trackAppendMsg struct {
 	track model.Track
 }
 
+// trackInsertNextMsg 选择器请求把曲目插入到当前曲之后（下一首播放）。
+type trackInsertNextMsg struct {
+	track model.Track
+}
+
 // lyricsResultMsg 歌词异步加载结果；title/artist 为 AI 识别出的清洗后
 // 歌名/歌手（空 = 无 AI 信息，展示回落原始标题）。
 type lyricsResultMsg struct {
@@ -439,6 +444,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.queue.Add(msg.track)
 		// 队列形态变化：下一首候选已变，重新计算预加载目标
 		m.refreshPreload()
+		return m.syncQueueViews(), nil
+
+	case trackInsertNextMsg:
+		// 插入到当前曲之后（下一首播放）：不打断当前播放，也不自动开播
+		m.queue.InsertNext(msg.track)
 		return m.syncQueueViews(), nil
 
 	case queuePlayMsg:
@@ -1701,6 +1711,10 @@ func emitTrackSelected(track model.Track) tea.Cmd {
 
 func emitTrackAppend(track model.Track) tea.Cmd {
 	return func() tea.Msg { return trackAppendMsg{track: track} }
+}
+
+func emitTrackInsertNext(track model.Track) tea.Cmd {
+	return func() tea.Msg { return trackInsertNextMsg{track: track} }
 }
 
 func emitQueuePlay(index int) tea.Cmd {

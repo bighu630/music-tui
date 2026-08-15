@@ -751,7 +751,7 @@ func TestPlayFlow(t *testing.T) {
 // 时仍活着），只有自然播完自动连播触发。
 
 // execReturnedChain 执行 update 返回的 cmd，并把产出消息回灌 Update
-//（模拟 bubbletea 事件循环：cmd 执行结果作为下一条消息处理）。
+// （模拟 bubbletea 事件循环：cmd 执行结果作为下一条消息处理）。
 // 返回处理后的模型。
 func execReturnedChain(m Model, cmd tea.Cmd) Model {
 	msgs := execCmds(cmd)
@@ -2412,5 +2412,25 @@ func TestGlobalKeysYieldToFilterHistory(t *testing.T) {
 		if _, ok := msg.(tea.QuitMsg); ok {
 			t.Fatal("过滤聚焦时 q 不应退出")
 		}
+	}
+}
+
+// trackInsertNextMsg 插入到当前曲之后；无当前曲时插队首；不打断播放。
+func TestTrackInsertNextMsg(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, _ = update(m, trackSelectedMsg{track: testTrack("t1")}) // 播放 t1（替换语义）
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})   // 队尾
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})   // 队列 [t1 t2 t3]
+	m, _ = update(m, trackInsertNextMsg{track: testTrack("tx")})
+	got := m.queue.Tracks()
+	if len(got) != 4 || got[0].ID != "t1" || got[1].ID != "tx" || got[2].ID != "t2" || got[3].ID != "t3" {
+		t.Fatalf("Tracks = %+v, want [t1 tx t2 t3]", idsOf(got))
+	}
+	if m.queue.CurrentIndex() != 0 {
+		t.Errorf("CurrentIndex = %d, want 0", m.queue.CurrentIndex())
+	}
+	if fp.playCount() != 1 {
+		t.Errorf("插入不应触发新播放, playCount = %d", fp.playCount())
 	}
 }

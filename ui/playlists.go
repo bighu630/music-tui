@@ -818,11 +818,12 @@ func newPlPicker(pl *playlists.Store, track model.Track) *plPickerModel {
 	return p
 }
 
-// refreshItems 从 store 重建列表项：首项固定"▶ 当前播放队列"（默认选中），
-// 中间各播放列表，末尾固定"＋ 新建列表"。
+// refreshItems 从 store 重建列表项：首项固定"▶ 下一首播放"（默认选中），
+// 第二项"▶ 当前播放队列"（追加到队尾），中间各播放列表，末尾固定"＋ 新建列表"。
 func (p *plPickerModel) refreshItems() {
 	lists := p.pl.Lists()
-	items := make([]list.Item, 0, len(lists)+2)
+	items := make([]list.Item, 0, len(lists)+3)
+	items = append(items, pickerQueueNextItem{})
 	items = append(items, pickerQueueItem{})
 	for _, l := range lists {
 		items = append(items, pickerListItem{name: l.Name})
@@ -831,7 +832,17 @@ func (p *plPickerModel) refreshItems() {
 	p.list.SetItems(items)
 }
 
-// pickerQueueItem 选择器首项：追加到当前播放队列（固定第一项，默认选中）。
+// pickerQueueNextItem 选择器首项：插入到当前曲之后（下一首播放，固定第一项，默认选中）。
+// 样式加粗与末尾粉色新建项区分。
+type pickerQueueNextItem struct{}
+
+func (pickerQueueNextItem) Title() string {
+	return lipgloss.NewStyle().Bold(true).Render("▶ 下一首播放")
+}
+func (pickerQueueNextItem) Description() string { return "插入到当前曲之后" }
+func (pickerQueueNextItem) FilterValue() string { return "下一首播放" }
+
+// pickerQueueItem 选择器第二项：追加到当前播放队列（固定第二项）。
 // 样式加粗与末尾粉色新建项区分。
 type pickerQueueItem struct{}
 
@@ -895,6 +906,11 @@ func (p plPickerModel) Update(msg tea.Msg) (plPickerModel, tea.Cmd) {
 		switch msg.String() {
 		case "enter":
 			switch it := p.list.SelectedItem().(type) {
+			case pickerQueueNextItem:
+				// 插入到当前曲之后（下一首播放）：走全局 trackInsertNextMsg，
+				// 不设 notice（插入无成功 toast，与追加一致）。
+				p.closed = true
+				return p, emitTrackInsertNext(p.track)
 			case pickerQueueItem:
 				// 追加到当前播放队列：走全局 trackAppendMsg（root 已有处理），
 				// 不设 notice（追加无成功 toast，与搜索/历史页直加队列一致）。
