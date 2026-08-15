@@ -1007,15 +1007,15 @@ func TestMpvStartProcessYtdlFormatArg(t *testing.T) {
 	if !strings.Contains(string(data), "--ytdl-raw-options=socket-timeout=15,retries=2") {
 		t.Errorf("mpv 启动参数应含 --ytdl-raw-options=socket-timeout=15,retries=2:\n%s", data)
 	}
-	// 无配置（cookieFile/headers 均空）时不得附加 cookiefile/config-locations：
+	// 无配置（cookieFile/headers 均空）时不得附加 cookies/config-locations：
 	// 行为与旧版完全一致（可选配置不回归）。
-	if strings.Contains(string(data), "cookiefile") || strings.Contains(string(data), "config-locations") {
-		t.Errorf("无配置时不应含 cookiefile/config-locations:\n%s", data)
+	if strings.Contains(string(data), "cookies") || strings.Contains(string(data), "config-locations") {
+		t.Errorf("无配置时不应含 cookies/config-locations:\n%s", data)
 	}
 }
 
 // 配置 cookie + headers 时：--ytdl-raw-options 动态拼接为单一参数
-// socket-timeout=15,retries=2,cookiefile=<path>,config-locations=<path>（顺序固定）；
+// socket-timeout=15,retries=2,cookies=<path>,config-locations=<path>（顺序固定）；
 // 临时配置内容 = 按键排序的 --add-header 行（值含空格引号包裹）；Close() 删除临时配置。
 func TestMpvStartProcessYtdlRawOptionsWithCookieAndHeaders(t *testing.T) {
 	dir := t.TempDir()
@@ -1035,7 +1035,7 @@ func TestMpvStartProcessYtdlRawOptionsWithCookieAndHeaders(t *testing.T) {
 
 	confPath := filepath.Join(os.TempDir(), fmt.Sprintf("music-tui-ytdlp-%d.conf", os.Getpid()))
 	t.Cleanup(func() { os.Remove(confPath) }) // 断言失败也兜底清理
-	wantArg := "--ytdl-raw-options=socket-timeout=15,retries=2,cookiefile=" + cookieFile + ",config-locations=" + confPath
+	wantArg := "--ytdl-raw-options=socket-timeout=15,retries=2,cookies=" + cookieFile + ",config-locations=" + confPath
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("读取日志: %v", err)
@@ -1064,7 +1064,7 @@ func TestMpvStartProcessYtdlRawOptionsWithCookieAndHeaders(t *testing.T) {
 	}
 }
 
-// cookie 路径含逗号 → mpv 选项值双引号包裹（cookiefile="/tmp/a,b/cookies.txt"）；
+// cookie 路径含逗号 → mpv 选项值双引号包裹（cookies="/tmp/a,b/cookies.txt"）；
 // 无 headers 时不生成临时配置（不出现 config-locations）。
 func TestMpvStartProcessYtdlRawOptionsQuotesCommaCookiePath(t *testing.T) {
 	dir := t.TempDir()
@@ -1081,7 +1081,7 @@ func TestMpvStartProcessYtdlRawOptionsQuotesCommaCookiePath(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Close() })
 
-	wantArg := `--ytdl-raw-options=socket-timeout=15,retries=2,cookiefile="/tmp/a,b/cookies.txt"`
+	wantArg := `--ytdl-raw-options=socket-timeout=15,retries=2,cookies="/tmp/a,b/cookies.txt"`
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("读取日志: %v", err)

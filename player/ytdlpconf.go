@@ -112,7 +112,7 @@ func buildYtdlpConf(headers map[string]string, paths ...string) (string, error) 
 }
 
 // quoteMpvOptionValue 按 mpv 列表选项值语法包裹字符串：值含逗号时用双引号
-// 包裹（如 --ytdl-raw-options=cookiefile="/tmp/a,b"），否则原样返回。mpv
+// 包裹（如 --ytdl-raw-options=cookies="/tmp/a,b"），否则原样返回。mpv
 // m_option.c 的 read_subparam 用 bstrcspn 找下一个字面 `"`、引号内不支持
 // 反斜杠转义——mpv 列表值无法表示字面 `"`（含 `,`+`"` 的路径不可用），
 // 故不做转义（转义会让引号区提前终止 → mpv 启动失败）。
