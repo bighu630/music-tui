@@ -1562,8 +1562,8 @@ func TestRootViewToastLayoutStable(t *testing.T) {
 	if got := len(strings.Split(plain, "\n")); got != 24 {
 		t.Fatalf("空态无 toast View 行数 = %d, want 24", got)
 	}
-	if last := strings.Split(plain, "\n")[23]; !strings.Contains(last, "未在播放") {
-		t.Errorf("空态状态栏应在末行, got %q", last)
+	if last := strings.Split(plain, "\n")[23]; strings.TrimSpace(last) != "" {
+		t.Errorf("首页状态栏应留空, got %q", last)
 	}
 
 	m, _ = m.showToast("恢复播放失败: 测试错误", toastError)
@@ -1602,8 +1602,8 @@ func TestRootViewToastLayoutStable(t *testing.T) {
 	if !strings.Contains(l2[22], "播放失败") {
 		t.Errorf("播放态 toast 应覆盖在状态栏上方一行, got %q", l2[22])
 	}
-	if !strings.Contains(l2[23], "顺序") {
-		t.Errorf("播放态状态栏应含模式信息, got %q", l2[23])
+	if strings.TrimSpace(l2[23]) != "" {
+		t.Errorf("首页状态栏应留空（信息与首页控制栏重复）, got %q", l2[23])
 	}
 }
 
@@ -1627,26 +1627,84 @@ func TestRootViewWideToastStaysWithinWidth(t *testing.T) {
 	}
 }
 
-// TestStatusBarLongTitleTruncated 回归：状态栏右侧标题按剩余宽度截断，
-// 窄窗口也不折行（曾按 m.width/2 固定截断，窄窗口 left+right 溢出折行）。
-func TestStatusBarLongTitleTruncated(t *testing.T) {
+// TestStatusBarEmptyStateOtherPage：空态（无播放）非首页状态栏左侧显示
+// "未在播放"（首页留空，此语义仅其他页生效）。
+func TestStatusBarEmptyStateOtherPage(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	m = m.switchPage("2") // 队列页
+	lines := strings.Split(m.View(), "\n")
+	bar := lines[len(lines)-1]
+	if !strings.Contains(bar, "未在播放") {
+		t.Errorf("非首页空态状态栏应显示 未在播放, got %q", bar)
+	}
+	if w := ansi.StringWidth(bar); w > 40 {
+		t.Errorf("状态栏行宽 = %d, want ≤ 40", w)
+	}
+}
+
+// TestStatusBarLayout 回归：状态栏首页留空（信息与首页控制栏重复）、
+// 其他页左侧歌曲名 + 右侧播放顺序；窄窗口下右侧顺序优先、左侧名称截断不折行。
+// （曾为左顺序右标题：标题按剩余宽度动态截断，曾按 m.width/2 固定截断致折行。）
+func TestStatusBarLayout(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("一首名字特别长特别长特别长特别长特别长特别长的歌"))
 	_ = execCmds(cmd)
-	// 21 列：left("⏵ 顺序 · 1/1")=12 格，旧实现 right=Truncate(title, w/2=10)
-	// 后 12+10=22 > 21 折行（40/24 列下 left+right 恰不超宽，复现不了回归）。
 	m, _ = update(m, tea.WindowSizeMsg{Width: 21, Height: 24})
+
+	// 首页：状态栏行留空（布局行恒在）
+	homeLines := strings.Split(m.View(), "\n")
+	if got := len(homeLines); got != 24 {
+		t.Fatalf("首页 View 行数 = %d, want 24", got)
+	}
+	if last := homeLines[len(homeLines)-1]; strings.TrimSpace(last) != "" {
+		t.Errorf("首页状态栏应留空, got %q", last)
+	}
+
+	// 队列页：左 = 歌曲名（截断含 …），右 = 播放顺序（⏵ 顺序 · 1/1）
+	m = m.switchPage("2")
 	lines := strings.Split(m.View(), "\n")
-	if w := ansi.StringWidth(lines[23]); w > 21 {
+	bar := lines[len(lines)-1]
+	if !strings.Contains(bar, "…") {
+		t.Errorf("队列页状态栏左侧名称应截断含省略号, got %q", bar)
+	}
+	if !strings.Contains(bar, "顺序") || !strings.Contains(bar, "1/1") {
+		t.Errorf("队列页状态栏右侧应含播放顺序, got %q", bar)
+	}
+	// 标题在左侧、顺序在右侧（顺序文本出现在名称之后）；锚点用“歌”：
+	// 标题以 "测试歌曲 " 开头，截断后仍保留开头字符（“名”为长 id 中段必被截掉）
+	titleIdx := strings.Index(bar, "歌")
+	seqIdx := strings.Index(bar, "顺序")
+	if titleIdx < 0 || seqIdx < 0 || titleIdx > seqIdx {
+		t.Errorf("状态栏应为左名称右顺序, got %q", bar)
+	}
+	if w := ansi.StringWidth(bar); w > 21 {
 		t.Errorf("窄窗口状态栏行宽 = %d, want ≤ 21", w)
 	}
-	// 截断必须真的发生：标题 68 格远宽于剩余宽度，右侧应含省略号
-	if !strings.Contains(lines[23], "…") {
-		t.Errorf("窄窗口状态栏右侧标题应被截断含省略号, got %q", lines[23])
+}
+
+// TestStatusBarNarrowWindowFits 回归：极端窄窗口（宽度 < 右侧顺序文本）下右侧
+// 截断兜底，状态栏恒 1 行不折行（曾因右侧永不截断致行宽 > 窗口宽度折行）。
+func TestStatusBarNarrowWindowFits(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("一首名字特别长特别长特别长特别长特别长特别长的歌"))
+	_ = execCmds(cmd)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 10, Height: 24})
+	m = m.switchPage("2") // 队列页
+
+	bar := m.statusBarView()
+	if strings.Contains(bar, "\n") {
+		t.Errorf("状态栏必须恒为 1 行不折行, got %q", bar)
 	}
-	if !strings.Contains(lines[23], "顺序") {
-		t.Errorf("窄窗口状态栏应含模式信息, got %q", lines[23])
+	if w := ansi.StringWidth(bar); w > 10 {
+		t.Errorf("极窄窗口(10)状态栏行宽 = %d, want ≤ 10", w)
+	}
+	// 经 View 渲染的末行也不得超出窗口宽度（折行残片会出现在末行）
+	lines := strings.Split(m.View(), "\n")
+	if last := lines[len(lines)-1]; ansi.StringWidth(last) > 10 {
+		t.Errorf("View 末行行宽 = %d, want ≤ 10", ansi.StringWidth(last))
 	}
 }
 
