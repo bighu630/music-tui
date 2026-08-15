@@ -109,13 +109,13 @@ func TestTabBarPlayStateIcon(t *testing.T) {
 }
 
 // 回归：queuePage.setSize 此前从未被调用（列表固定 80x24）；
-// 现在 WindowSizeMsg 应下发尺寸，且高度减 2（Tab 栏 + 分隔线占 2 行）。
+// 现在 WindowSizeMsg 应下发尺寸，且高度减 3（Tab 栏 + 分隔线 2 行 + 底部状态栏 1 行）。
 func TestQueuePageReceivesWindowSize(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	if m.queuePage.width != 100 || m.queuePage.height != 38 {
-		t.Errorf("queuePage 尺寸 = %dx%d, want 100x38（高度减 Tab 栏 + 分隔线 2 行）",
+	if m.queuePage.width != 100 || m.queuePage.height != 37 {
+		t.Errorf("queuePage 尺寸 = %dx%d, want 100x37（高度减 Tab 栏 + 分隔线 2 行 + 状态栏 1 行）",
 			m.queuePage.width, m.queuePage.height)
 	}
 }
