@@ -346,3 +346,11 @@ func TestIdentifyNetworkErrorRetries(t *testing.T) {
 		t.Errorf("连接尝试 %d 次, want 2（网络错误重试一次）", got)
 	}
 }
+
+func TestNewOpenAIClientEmptyBaseURLDefaults(t *testing.T) {
+	// 显式传空 baseURL（配置未填）必须回落官方默认，不得拼出 "/chat/completions"
+	c := NewOpenAIClientWithBaseURL("sk-test", "", "")
+	if c.baseURL != defaultAIBaseURL {
+		t.Errorf("baseURL = %q, want 默认 %q", c.baseURL, defaultAIBaseURL)
+	}
+}

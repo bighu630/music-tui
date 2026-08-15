@@ -151,3 +151,9 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 实现：Fetcher.Fetch 返回 FetchResult{Lyrics, Title, Artist}；AI 路径（live/缓存命中）携带清洗后歌名/歌手 → 控制栏/状态栏/队列当前项展示覆盖 + MPRIS onTrack 同步 + 切歌清空
 - [x] 测试：lyrics 4 个新测试（纯文本拒绝×2、FetchResult 形状、AI 标题携带×2）+ ui 4 个（控制栏/状态栏/队列当前项/MPRIS 回调），全量 build/vet/test -race 全绿
 - [x] 真机验收前置条件就绪（测试全绿；真机确认待用户）；AI 命中后全界面显示清洗标题
+
+## 追加需求（用户 8-15 第二轮）：支持三方 OpenAI 兼容 API
+
+- [x] config 加 base_url（缺省空 = 官方；model 可填三方模型名）+ Load 回落 + roundtrip 测试
+- [x] OpenAIClient 空 baseURL 回落官方默认（此前会拼出 "/chat/completions" 坏 URL，已修）
+- [x] main 接线 NewOpenAIClientWithBaseURL；docs 19.2 更新

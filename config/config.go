@@ -19,10 +19,13 @@ const DefaultMaxEntries = 100
 const DefaultOpenAIModel = "gpt-4o-mini"
 
 // OpenAI 是 OpenAI 增强歌词匹配配置：api_key 为空 = 整个 AI 路径禁用
-// （行为与未启用增强完全一致）；model 为空回落 DefaultOpenAIModel。
+// （行为与未启用增强完全一致）；model 为空回落 DefaultOpenAIModel；
+// base_url 为空 = OpenAI 官方 API（可填任何 OpenAI 协议兼容服务，
+// 如 DeepSeek/自托管网关）。
 type OpenAI struct {
-	APIKey string `json:"api_key"`
-	Model  string `json:"model"`
+	APIKey  string `json:"api_key"`
+	Model   string `json:"model"`
+	BaseURL string `json:"base_url"`
 }
 
 // Config 是顶层配置：缓存设置（嵌入 cache.Options，json tag 即文件格式）
@@ -83,8 +86,9 @@ func Load(path string) (*Config, error) {
 			Dir        *string `json:"dir"`
 		} `json:"cache"`
 		OpenAI struct {
-			APIKey *string `json:"api_key"`
-			Model  *string `json:"model"`
+			APIKey  *string `json:"api_key"`
+			Model   *string `json:"model"`
+			BaseURL *string `json:"base_url"`
 		} `json:"openai"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -107,12 +111,16 @@ func Load(path string) (*Config, error) {
 	if raw.Cache.Dir != nil && *raw.Cache.Dir != "" {
 		c.Cache.Dir = *raw.Cache.Dir
 	}
-	// OpenAI：api_key 缺失/空 → 禁用（保持零值）；model 缺失/空 → 默认
+	// OpenAI：api_key 缺失/空 → 禁用（保持零值）；model 缺失/空 → 默认；
+	// base_url 缺失/空 → 官方默认（客户端回落）
 	if raw.OpenAI.APIKey != nil {
 		c.OpenAI.APIKey = *raw.OpenAI.APIKey
 	}
 	if raw.OpenAI.Model != nil && *raw.OpenAI.Model != "" {
 		c.OpenAI.Model = *raw.OpenAI.Model
+	}
+	if raw.OpenAI.BaseURL != nil {
+		c.OpenAI.BaseURL = *raw.OpenAI.BaseURL
 	}
 	return c, nil
 }

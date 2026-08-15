@@ -37,10 +37,14 @@ func NewOpenAIClient(apiKey, model string) *OpenAIClient {
 }
 
 // NewOpenAIClientWithBaseURL 创建指向自定义基地址的客户端（测试/自托管
-// 兼容服务）；baseURL 尾部斜杠自动去除。
+// 兼容服务）；baseURL 为空回落官方默认（defaultAIBaseURL），
+// 尾部斜杠自动去除。
 func NewOpenAIClientWithBaseURL(apiKey, model, baseURL string) *OpenAIClient {
 	if model == "" {
 		model = DefaultAIModel
+	}
+	if baseURL == "" {
+		baseURL = defaultAIBaseURL
 	}
 	return &OpenAIClient{
 		apiKey:  apiKey,

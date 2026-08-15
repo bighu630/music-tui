@@ -307,3 +307,47 @@ func TestSavePerms0600(t *testing.T) {
 		t.Errorf("重存后权限 = %o, want 600", perm)
 	}
 }
+
+// TestLoadOpenAIBaseURLMissing 三方 base_url 缺省：空 = 走 OpenAI 官方默认。
+func TestLoadOpenAIBaseURLMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"openai":{"api_key":"sk-123"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OpenAI.BaseURL != "" {
+		t.Errorf("BaseURL = %q, want 空（缺省 = 官方默认）", cfg.OpenAI.BaseURL)
+	}
+}
+
+func TestLoadOpenAIBaseURLExplicit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"openai":{"api_key":"sk-123","base_url":"https://api.deepseek.com/v1","model":"deepseek-chat"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OpenAI.BaseURL != "https://api.deepseek.com/v1" || cfg.OpenAI.Model != "deepseek-chat" {
+		t.Errorf("got %+v, want base_url=https://api.deepseek.com/v1 model=deepseek-chat", cfg.OpenAI)
+	}
+}
+
+func TestSaveRoundtripOpenAIBaseURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "config.json")
+	cfg := &Config{OpenAI: OpenAI{APIKey: "sk-789", Model: "gpt-4o-mini", BaseURL: "https://api.thirdparty.com/v1"}}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.OpenAI != cfg.OpenAI {
+		t.Errorf("openai roundtrip 不一致: got %+v, want %+v", got.OpenAI, cfg.OpenAI)
+	}
+}

@@ -758,12 +758,14 @@ cache/
 {
   "cache": { ... },
   "openai": {
-    "api_key": "sk-...",   // 空/缺省 = AI 路径完全禁用（默认）
-    "model": "gpt-4o-mini" // 缺省/空回落 gpt-4o-mini
+    "api_key": "sk-...",                          // 空/缺省 = AI 路径完全禁用（默认）
+    "model": "gpt-4o-mini",                       // 缺省/空回落 gpt-4o-mini；可填三方模型名
+    "base_url": "https://api.deepseek.com/v1"     // 可选：OpenAI 协议兼容服务；缺省 = 官方
   }
 }
 ```
-- `config.OpenAI` 结构 + Load 指针字段回落语义（与 cache 同款）：api_key 缺失/显式空 → 禁用；model 缺失/空 → 默认
+- `config.OpenAI` 结构 + Load 指针字段回落语义（与 cache 同款）：api_key 缺失/显式空 → 禁用；model 缺失/空 → 默认；base_url 缺失/空 → OpenAI 官方
+- **支持任意 OpenAI 协议兼容服务**（DeepSeek/通义/自托管网关等）：base_url 填服务基地址（含 /v1），model 填该服务的模型名；客户端只依赖 chat/completions 标准协议与 temperature/JSON 输出能力
 - main.go：`cfg.OpenAI.APIKey != ""` 时组装 `lyrics.NewEnhancedClient(lc, ai, <缓存目录>/lyrics)` 并替换传给 ui 的歌词服务（`lyrics.Fetcher` 接口：`*Client` 与 `*EnhancedClient` 都实现）；缓存初始化失败仅警告并降级确定性匹配（增强功能不影响主功能，与 loadCache 同哲学）
 - **配置文件写盘权限 0600**：文件含 OpenAI API key，禁止其他本地用户读取（ytm-cookies.txt 同款惯例）；默认模型常量 `config.DefaultOpenAIModel` 与 `lyrics.DefaultAIModel` 有 main 层一致性测试锁住
 
