@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -336,6 +337,8 @@ func TestNamingInputConsumesGlobalKeys(t *testing.T) {
 // 搜索页选中歌曲按 p：picker 出现 → Enter 选择列表 → AddTrack 生效 →
 // notice 显示 → picker 关闭 → 列表页刷新。
 func TestPickTrackFromSearchAddsToPlaylist(t *testing.T) {
+	toastSuccessDuration = time.Millisecond // 快进 toast 定时器（成功提示 cmd 是 tea.Tick）
+	defer func() { toastSuccessDuration = 3 * time.Second }()
 	fp := newFakePlayer()
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1")}}
 	m := newTestModel(t, fp, fa, nil)
@@ -357,8 +360,11 @@ func TestPickTrackFromSearchAddsToPlaylist(t *testing.T) {
 	}
 
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd != nil {
-		t.Errorf("选择器加入不应产生 cmd, got %v", cmd)
+	// cmd 为 toast 消失定时器（成功提示走 toast 通道）：执行后仅产生过期消息
+	for _, msg := range execCmds(cmd) {
+		if _, ok := msg.(toastExpireMsg); !ok {
+			t.Errorf("选择器加入的 cmd 应为 toast 过期消息, got %#v", msg)
+		}
 	}
 	if m.plPicker != nil {
 		t.Fatal("Enter 后选择器应关闭")
@@ -367,8 +373,8 @@ func TestPickTrackFromSearchAddsToPlaylist(t *testing.T) {
 	if len(trs) != 1 || trs[0].ID != "t1" {
 		t.Fatalf("AddTrack 未生效: %+v", trs)
 	}
-	if m.notice != "已添加到「收藏」" {
-		t.Errorf("notice = %q, want 已添加到「收藏」", m.notice)
+	if activeToastText(m) != "已添加到「收藏」" {
+		t.Errorf("toast = %q, want 已添加到「收藏」", activeToastText(m))
 	}
 	if fp.playCount() != 0 {
 		t.Errorf("加入播放列表不应触发播放, playCount = %d", fp.playCount())
@@ -442,8 +448,8 @@ func TestPickerCreateNewListFlow(t *testing.T) {
 	if len(trs) != 1 || trs[0].ID != "t1" {
 		t.Fatalf("新列表应含刚添加的曲目: %+v", trs)
 	}
-	if m.notice != "已添加到「新歌单」" {
-		t.Errorf("notice = %q", m.notice)
+	if activeToastText(m) != "已添加到「新歌单」" {
+		t.Errorf("toast = %q", activeToastText(m))
 	}
 }
 
@@ -516,8 +522,8 @@ func TestPickerEscCancels(t *testing.T) {
 	if trs := m.pl.Tracks("收藏"); len(trs) != 0 {
 		t.Errorf("取消不应加入曲目: %+v", trs)
 	}
-	if m.notice != "" {
-		t.Errorf("取消不应有成功提示, notice = %q", m.notice)
+	if activeToastText(m) != "" {
+		t.Errorf("取消不应有成功提示, toast = %q", activeToastText(m))
 	}
 }
 
@@ -528,8 +534,8 @@ func TestPickWithoutSelectionShowsError(t *testing.T) {
 	if m.plPicker != nil {
 		t.Error("无选中歌曲不应打开选择器")
 	}
-	if !strings.Contains(m.lastError, "当前没有可添加的歌曲") {
-		t.Errorf("lastError = %q", m.lastError)
+	if !strings.Contains(activeToastText(m), "当前没有可添加的歌曲") {
+		t.Errorf("toast = %q", activeToastText(m))
 	}
 }
 
@@ -575,12 +581,12 @@ func TestPickTrackFromHistory(t *testing.T) {
 
 // ---- 尺寸与提示 ----
 
-// WindowSizeMsg 应下发到播放列表页与选择器。
+// WindowSizeMsg 应下发到播放列表页与选择器（高度减 Tab 栏 + 分隔线 2 行 + 状态栏 1 行）。
 func TestPlaylistsPageReceivesWindowSize(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	if m.plPage.width != 100 || m.plPage.height != 38 {
-		t.Errorf("plPage 尺寸 = %dx%d, want 100x38（高度减 Tab 栏 + 分隔线 2 行）",
+	if m.plPage.width != 100 || m.plPage.height != 37 {
+		t.Errorf("plPage 尺寸 = %dx%d, want 100x37（高度减 Tab 栏 + 分隔线 2 行 + 状态栏 1 行）",
 			m.plPage.width, m.plPage.height)
 	}
 
@@ -590,13 +596,14 @@ func TestPlaylistsPageReceivesWindowSize(t *testing.T) {
 	m2 = searchAndPick(t, m2, fa)
 	m2, _ = update(m2, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
 	m2, _ = update(m2, tea.WindowSizeMsg{Width: 100, Height: 40})
-	if m2.plPicker.width != 100 || m2.plPicker.height != 38 {
-		t.Errorf("picker 尺寸 = %dx%d, want 100x38", m2.plPicker.width, m2.plPicker.height)
+	if m2.plPicker.width != 100 || m2.plPicker.height != 37 {
+		t.Errorf("picker 尺寸 = %dx%d, want 100x37", m2.plPicker.width, m2.plPicker.height)
 	}
 }
 
-// 成功提示在下一次按键分发时清除。
-func TestNoticeClearedOnNextKey(t *testing.T) {
+// toast 生命周期只由定时器管理：新按键分发不再清除活跃 toast（旧 notice 语义），
+// 只有过期消息（id 匹配）才清除。
+func TestToastNotClearedByKeyDispatch(t *testing.T) {
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1")}}
 	m := newTestModel(t, newFakePlayer(), fa, nil)
 	if _, err := m.pl.Create("收藏"); err != nil {
@@ -606,12 +613,21 @@ func TestNoticeClearedOnNextKey(t *testing.T) {
 	m = searchAndPick(t, m, fa)
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
-	if m.notice == "" {
-		t.Fatal("前置失败: 应有成功提示")
+	if activeToastText(m) == "" {
+		t.Fatal("前置失败: 应有成功 toast")
 	}
+	// 按键分发不再清除 toast（生命周期只由定时器管理）
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	if m.notice != "" {
-		t.Errorf("新按键分发应清除 notice, got %q", m.notice)
+	if activeToastText(m) == "" {
+		t.Error("按键分发不应清除 toast（生命周期只由定时器管理）")
+	}
+	if m.toast == nil {
+		t.Fatal("前置失败: 应有活跃 toast")
+	}
+	// 过期消息（id 匹配）才清除
+	m, _ = update(m, toastExpireMsg{id: m.toast.id})
+	if activeToastText(m) != "" {
+		t.Errorf("过期消息（id 匹配）应清除 toast, got %q", activeToastText(m))
 	}
 }
 
@@ -719,8 +735,8 @@ func TestYTBrowserLoginEmitsAndSaves(t *testing.T) {
 		t.Fatalf("提交后 mode=%v, want plOverview", m.plPage.mode)
 	}
 	m, cmd = update(m, lg)
-	if m.notice != "已保存登录配置，验证中…" {
-		t.Errorf("notice = %q, want 已保存登录配置，验证中…", m.notice)
+	if activeToastText(m) != "已保存登录配置，验证中…" {
+		t.Errorf("toast = %q, want 已保存登录配置，验证中…", activeToastText(m))
 	}
 	if m.ytLogin.Method != ytm.MethodBrowser || m.ytLogin.Browser != "chrome" {
 		t.Errorf("ytLogin = %+v, want MethodBrowser/chrome", m.ytLogin)
@@ -732,6 +748,8 @@ func TestYTBrowserLoginEmitsAndSaves(t *testing.T) {
 
 // 设置输入子层：cookies.txt 路径输入流程 → ytLoginFileMsg → 异步验证成功。
 func TestYTCookiesFileLoginFlow(t *testing.T) {
+	toastSuccessDuration = time.Millisecond // 快进 toast 定时器（BatchMsg 展开会执行 tick）
+	defer func() { toastSuccessDuration = 3 * time.Second }()
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	cookiesFile := filepath.Join(t.TempDir(), "cookies.txt")
 	if err := os.WriteFile(cookiesFile,
@@ -764,20 +782,16 @@ func TestYTCookiesFileLoginFlow(t *testing.T) {
 		t.Fatalf("提交后应回概览, mode=%v", m.plPage.mode)
 	}
 
-	// root：保存配置 → 验证中 notice → 异步验证成功
+	// root：保存配置 → 验证中 toast → 异步验证成功
 	m, cmd = update(m, lf)
-	if m.notice != "已保存登录配置，验证中…" {
-		t.Errorf("notice = %q", m.notice)
+	if activeToastText(m) != "已保存登录配置，验证中…" {
+		t.Errorf("toast = %q", activeToastText(m))
 	}
-	var vd ytVerifyDoneMsg
-	for _, msg := range execCmds(cmd) {
-		if vm, ok := msg.(ytVerifyDoneMsg); ok {
-			vd = vm
-		}
-	}
-	m, _ = update(m, vd)
-	if m.notice != "YT Music 登录有效" {
-		t.Errorf("notice = %q, want YT Music 登录有效", m.notice)
+	// cmd = tea.Batch(toast 定时器, ytVerifyCmd)：回灌 BatchMsg 由 Update 展开
+	//（测试驱动方式，真实 bubbletea 运行时由事件循环处理 BatchMsg）。
+	m, _ = update(m, cmd().(tea.BatchMsg))
+	if activeToastText(m) != "YT Music 登录有效" {
+		t.Errorf("toast = %q, want YT Music 登录有效", activeToastText(m))
 	}
 	if m.ytLogin.Method != ytm.MethodCookiesFile || m.ytLogin.CookiesPath != cookiesFile {
 		t.Errorf("ytLogin = %+v", m.ytLogin)
@@ -803,8 +817,8 @@ func TestYTCookiesFileUnreadable(t *testing.T) {
 		}
 	}
 	m, _ = update(m, lf)
-	if !strings.Contains(m.lastError, "cookies.txt 不可读") {
-		t.Errorf("lastError = %q, want 含 cookies.txt 不可读", m.lastError)
+	if !strings.Contains(activeToastText(m), "cookies.txt 不可读") {
+		t.Errorf("toast = %q, want 含 cookies.txt 不可读", activeToastText(m))
 	}
 	if m.ytLogin.Method != ytm.MethodNone {
 		t.Errorf("不可读路径不应保存配置: %+v", m.ytLogin)
@@ -813,6 +827,8 @@ func TestYTCookiesFileUnreadable(t *testing.T) {
 
 // 粘贴 Cookie 流程：输入 → ytLoginPasteMsg → 落盘 cookies 文件 + 配置 → 验证成功。
 func TestYTPasteLoginFlow(t *testing.T) {
+	toastSuccessDuration = time.Millisecond // 快进 toast 定时器（BatchMsg 展开会执行 tick）
+	defer func() { toastSuccessDuration = 3 * time.Second }()
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m := env.m
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
@@ -839,8 +855,8 @@ func TestYTPasteLoginFlow(t *testing.T) {
 	}
 
 	m, cmd = update(m, lp)
-	if m.notice != "已保存登录配置，验证中…" {
-		t.Errorf("notice = %q", m.notice)
+	if activeToastText(m) != "已保存登录配置，验证中…" {
+		t.Errorf("toast = %q", activeToastText(m))
 	}
 	if m.ytLogin.Method != ytm.MethodPasted {
 		t.Fatalf("ytLogin = %+v, want MethodPasted", m.ytLogin)
@@ -857,20 +873,18 @@ func TestYTPasteLoginFlow(t *testing.T) {
 		t.Errorf("cookies 文件权限应 0600: %v %v", fi, err)
 	}
 
-	var vd ytVerifyDoneMsg
-	for _, msg := range execCmds(cmd) {
-		if vm, ok := msg.(ytVerifyDoneMsg); ok {
-			vd = vm
-		}
-	}
-	m, _ = update(m, vd)
-	if m.notice != "YT Music 登录有效" {
-		t.Errorf("notice = %q, want YT Music 登录有效", m.notice)
+	// cmd = tea.Batch(toast 定时器, ytVerifyCmd)：回灌 BatchMsg 由 Update 展开
+	//（测试驱动方式，真实 bubbletea 运行时由事件循环处理 BatchMsg）。
+	m, _ = update(m, cmd().(tea.BatchMsg))
+	if activeToastText(m) != "YT Music 登录有效" {
+		t.Errorf("toast = %q, want YT Music 登录有效", activeToastText(m))
 	}
 }
 
 // 粘贴验证失败：HTTP 403（失效）与 logged_in=0（未登录）映射为友好文案。
 func TestYTPasteLoginVerifyFailures(t *testing.T) {
+	toastSuccessDuration = time.Millisecond // 快进 toast 定时器（BatchMsg 展开会执行 tick）
+	defer func() { toastSuccessDuration = 3 * time.Second }()
 	for _, tc := range []struct {
 		name string
 		rt   ytRoundTripper
@@ -898,18 +912,11 @@ func TestYTPasteLoginVerifyFailures(t *testing.T) {
 				}
 			}
 			m, cmd = update(m, lp)
-			var vd ytVerifyDoneMsg
-			for _, msg := range execCmds(cmd) {
-				if vm, ok := msg.(ytVerifyDoneMsg); ok {
-					vd = vm
-				}
-			}
-			m, _ = update(m, vd)
-			if m.lastError != tc.want {
-				t.Errorf("lastError = %q, want %q", m.lastError, tc.want)
-			}
-			if m.notice != "" {
-				t.Errorf("失败后不应有 notice: %q", m.notice)
+			// cmd = tea.Batch(toast 定时器, ytVerifyCmd)：回灌 BatchMsg 由 Update 展开
+			//（测试驱动方式，真实 bubbletea 运行时由事件循环处理 BatchMsg）。
+			m, _ = update(m, cmd().(tea.BatchMsg))
+			if activeToastText(m) != tc.want {
+				t.Errorf("toast = %q, want %q", activeToastText(m), tc.want)
 			}
 			// M5：验证失败后状态区降级展示「已登录（验证失败）」（配置仍在）
 			got := stripANSI(m.plPage.view())
@@ -926,6 +933,8 @@ func TestYTPasteLoginVerifyFailures(t *testing.T) {
 // M5：验证失败 → 状态区/设置页降级「已登录（验证失败）」；
 // 重新登录并验证成功 → 恢复「已登录」；初始加载未验证 → 维持「已登录」。
 func TestYTVerifyFailureDegradesStatus(t *testing.T) {
+	toastSuccessDuration = time.Millisecond // 快进 toast 定时器（BatchMsg 展开会执行 tick）
+	defer func() { toastSuccessDuration = 3 * time.Second }()
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	env.client.SetHTTPClient(&http.Client{Transport: ytRoundTripper{code: 403, body: ""}})
 	m := env.m
@@ -944,13 +953,9 @@ func TestYTVerifyFailureDegradesStatus(t *testing.T) {
 		}
 	}
 	m, cmd = update(m, lp)
-	var vd ytVerifyDoneMsg
-	for _, msg := range execCmds(cmd) {
-		if vm, ok := msg.(ytVerifyDoneMsg); ok {
-			vd = vm
-		}
-	}
-	m, _ = update(m, vd) // 验证失败（403）
+	// cmd = tea.Batch(toast 定时器, ytVerifyCmd)：回灌 BatchMsg 由 Update 展开
+	//（测试驱动方式，真实 bubbletea 运行时由事件循环处理 BatchMsg）。
+	m, _ = update(m, cmd().(tea.BatchMsg)) // 验证失败（403）
 
 	if !m.ytInvalid {
 		t.Fatal("验证失败后 ytInvalid 应为 true")
@@ -981,12 +986,8 @@ func TestYTVerifyFailureDegradesStatus(t *testing.T) {
 		}
 	}
 	m, cmd = update(m, lp2)
-	for _, msg := range execCmds(cmd) {
-		if vm, ok := msg.(ytVerifyDoneMsg); ok {
-			vd = vm
-		}
-	}
-	m, _ = update(m, vd) // 验证成功
+	// 同上：回灌 BatchMsg 展开（toast 定时器 + ytVerifyCmd）
+	m, _ = update(m, cmd().(tea.BatchMsg)) // 验证成功
 	if m.ytInvalid {
 		t.Error("验证成功后 ytInvalid 应为 false")
 	}
@@ -1067,8 +1068,8 @@ func TestYTLogoutFlow(t *testing.T) {
 		}
 	}
 	m, _ = update(m, lo)
-	if m.notice != "已退出 YT Music 登录" {
-		t.Errorf("notice = %q", m.notice)
+	if activeToastText(m) != "已退出 YT Music 登录" {
+		t.Errorf("toast = %q", activeToastText(m))
 	}
 	if m.ytLogin.Method != ytm.MethodNone {
 		t.Errorf("退出后 ytLogin = %+v, want MethodNone", m.ytLogin)
@@ -1128,8 +1129,8 @@ func TestYTURLImportSuccess(t *testing.T) {
 		}
 	}
 	m, _ = update(m, id)
-	if m.notice != "已导入「导入歌单」2 首" {
-		t.Errorf("notice = %q, want 已导入「导入歌单」2 首", m.notice)
+	if activeToastText(m) != "已导入「导入歌单」2 首" {
+		t.Errorf("toast = %q, want 已导入「导入歌单」2 首", activeToastText(m))
 	}
 	if m.ytSyncing {
 		t.Error("导入完成后 syncing 应复位")
@@ -1183,8 +1184,8 @@ func TestYTURLImportFailure(t *testing.T) {
 		}
 	}
 	m, _ = update(m, id)
-	if !strings.Contains(m.lastError, "导入失败") {
-		t.Errorf("lastError = %q, want 含导入失败", m.lastError)
+	if !strings.Contains(activeToastText(m), "导入失败") {
+		t.Errorf("toast = %q, want 含导入失败", activeToastText(m))
 	}
 	if m.ytSyncing {
 		t.Error("失败后 syncing 应复位")
@@ -1252,8 +1253,8 @@ func TestYTSyncAllFlow(t *testing.T) {
 		t.Fatalf("SyncAll 应成功: %v", sd.err)
 	}
 	m, _ = update(m, sd)
-	if m.notice != "已同步 2 个歌单 · 共 4 首" {
-		t.Errorf("notice = %q, want 已同步 2 个歌单 · 共 4 首", m.notice)
+	if activeToastText(m) != "已同步 2 个歌单 · 共 4 首" {
+		t.Errorf("toast = %q, want 已同步 2 个歌单 · 共 4 首", activeToastText(m))
 	}
 	if m.ytSyncing {
 		t.Error("同步完成后 syncing 应复位")
@@ -1294,8 +1295,8 @@ func TestYTSyncAllNotLoggedIn(t *testing.T) {
 		}
 	}
 	m, _ = update(m, sd)
-	if !strings.Contains(m.lastError, "同步失败") || !strings.Contains(m.lastError, "登录") {
-		t.Errorf("lastError = %q, want 含同步失败与登录提示", m.lastError)
+	if !strings.Contains(activeToastText(m), "同步失败") || !strings.Contains(activeToastText(m), "登录") {
+		t.Errorf("toast = %q, want 含同步失败与登录提示", activeToastText(m))
 	}
 	if m.ytSyncing {
 		t.Error("失败后 syncing 应复位")
@@ -1461,8 +1462,8 @@ func TestYTRefreshSyncList(t *testing.T) {
 		}
 	}
 	m, _ = update(m, rd)
-	if m.notice != "已刷新「YT: 我的最爱」2 首" {
-		t.Errorf("notice = %q, want 已刷新「YT: 我的最爱」2 首", m.notice)
+	if activeToastText(m) != "已刷新「YT: 我的最爱」2 首" {
+		t.Errorf("toast = %q, want 已刷新「YT: 我的最爱」2 首", activeToastText(m))
 	}
 	if got := idsOf(m.pl.Tracks("YT: 我的最爱")); len(got) != 2 || got[0] != "v1" || got[1] != "v2" {
 		t.Errorf("刷新后曲目 = %v, want [v1 v2]（旧曲替换）", got)
@@ -1491,12 +1492,10 @@ func TestYTRefreshNonSyncList(t *testing.T) {
 		}
 	}
 	m, cmd = update(m, rm)
-	if m.lastError != "该列表不是 YT Music 同步列表" {
-		t.Errorf("lastError = %q", m.lastError)
+	if activeToastText(m) != "该列表不是 YT Music 同步列表" {
+		t.Errorf("toast = %q", activeToastText(m))
 	}
-	if cmd != nil {
-		t.Errorf("非同步列表不应触发同步 cmd: %v", cmd)
-	}
+	_ = cmd // cmd 为 toast 消失定时器（错误提示走 toast 通道）；无同步/刷新 cmd
 	if m.ytSyncing {
 		t.Error("非同步列表不应置 syncing")
 	}

@@ -25,7 +25,7 @@ type tabSeg struct {
 	page  page
 	label string
 	style lipgloss.Style
-	col   int // 0-based 起始列（与 bubbletea MouseMsg.X 同基准）
+	col   int // 0-based 起始列，未含居中偏移（与 bubbletea MouseMsg.X 同基准）
 	width int // 渲染后可见宽度（ANSI 剥离，中文按 2 列）
 }
 
@@ -60,11 +60,13 @@ func (m Model) tabSegments() []tabSeg {
 }
 
 // tabBar 渲染顶部标签栏：标签行（五页标题 + 当前页高亮 + 首页播放状态图标 +
-// 队列数量标记 + 悬停下划线）后追加一条横贯全宽的分隔线
+// 队列数量标记 + 悬停下划线）在窗口宽度内水平居中（偏移 m.tabPad()，
+// 宽度未知或窗口过窄时左对齐）；随后追加一条横贯全宽的分隔线
 // （宽度 m.width 由 WindowSizeMsg 下发；为 0 时不输出，避免空行）。
 // 纯函数（无状态），由 View 拼在页面内容上方。
 func (m Model) tabBar() string {
 	var sb strings.Builder
+	sb.WriteString(strings.Repeat(" ", m.tabPad()))
 	for i, seg := range m.tabSegments() {
 		if i > 0 {
 			sb.WriteString("  ")
@@ -77,9 +79,32 @@ func (m Model) tabBar() string {
 	return sb.String()
 }
 
+// tabPad 返回标签行居中起始列（0-based）：窗口宽度 m.width 已知且大于
+// 标签总宽（tabSegments 裸列号布局的最后一列+宽度）时，返回
+// (m.width - totalWidth) / 2；否则（宽度未知或窗口过窄）返回 0 不居中。
+// 渲染（tabBar）与命中检测（tabHitAt）共用此偏移，保证鼠标点击列
+// （MouseMsg.X）与视觉位置一致。
+func (m Model) tabPad() int {
+	if m.width <= 0 {
+		return 0
+	}
+	segs := m.tabSegments()
+	last := segs[len(segs)-1]
+	totalWidth := last.col + last.width
+	if totalWidth >= m.width {
+		return 0
+	}
+	return (m.width - totalWidth) / 2
+}
+
 // tabHitAt 返回点击列 x（0-based，同 bubbletea MouseMsg.X）命中的标签页；
-// 命中标签间分隔/空白时返回 false。
+// 命中标签间分隔/空白时返回 false。先减去居中偏移 m.tabPad()（与 tabBar
+// 渲染偏移一致），落在左侧留白（x < 0）直接判定未命中。
 func (m Model) tabHitAt(x int) (page, bool) {
+	x -= m.tabPad()
+	if x < 0 {
+		return 0, false
+	}
 	for _, seg := range m.tabSegments() {
 		if x >= seg.col && x < seg.col+seg.width {
 			return seg.page, true

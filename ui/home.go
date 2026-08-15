@@ -65,7 +65,7 @@ func emitToggleMode() tea.Cmd {
 // ---- 底部按钮行布局 ----
 
 // 按钮行三栏布局（渲染与鼠标命中共用）：左 = 歌曲信息（截断），
-// 中 = 控制按钮 |< >|（列内居中），右 = 播放模式 + 队列位置（右对齐）。
+// 中 = 控制按钮 |< >|（屏幕水平居中），右 = 播放模式 + 队列位置（右对齐）。
 //
 // 中栏用确定宽度字符（ASCII + 中文）而非 ⏮⏯⏭🔁 等 Ambiguous 宽度字符：
 // 后者 ansi 按 1 宽、CJK 终端按 2 宽渲染，布局与命中必然偏移
@@ -83,9 +83,13 @@ const (
 	btnToggleRel = 4  // || / >  （2 宽）
 	btnNextRel   = 8  // >|
 	btnHitWidth  = 3  // 命中区 = 图标 2 宽 + 1 容差
+	leftMinW     = 10 // 左栏最小宽（窄窗口弹性退化时保留）
 )
 
 // controlBarLayout 计算按钮行三栏列区间（渲染与命中同源，防漂移）。
+// 中栏优先在屏幕水平居中（操作键始终位于屏幕正中，不随标题/模式文本
+// 宽度漂移）；窗口过窄、中栏与两侧（左栏最小宽/右栏）间距不足时，
+// 退化为在左右栏之间弹性居中（极窄窗口仍不与右栏重叠）。
 func (m homeModel) controlBarLayout(width int) controlBarLayout {
 	centerW := centerBarW
 	rightW := ansi.StringWidth(m.modeRightText())
@@ -94,17 +98,22 @@ func (m homeModel) controlBarLayout(width int) controlBarLayout {
 	if rightStart < 0 {
 		rightStart = 0
 	}
-	// 左栏可用宽 = 右栏起点 - 中栏 - 左右间距各 2 列
-	leftW := rightStart - centerW - 4
-	if leftW < 10 {
-		leftW = 10
+	// 中栏优先屏幕水平居中
+	centerStart := (width - centerW) / 2
+	const minGap = 2 // 中栏与左/右栏的最小间距
+	leftMin := leftMinW + minGap
+	if centerStart < leftMin {
+		centerStart = leftMin
 	}
-	// 中栏在 [leftW+2, rightStart-2) 内居中（左右各留 2 列间距）
-	midStart := leftW + 2
-	midEnd := rightStart - 2
-	centerStart := midStart + (midEnd-midStart-centerW)/2
-	if centerStart < midStart {
-		centerStart = midStart
+	// 中栏右缘 + 间距放不下右栏时：退化为在 [leftMin, rightStart-minGap) 内
+	// 弹性居中（原“左右栏之间居中”语义，极窄窗口仍不重叠）。
+	if centerStart+centerW+minGap > rightStart {
+		midStart := leftMin
+		midEnd := rightStart - minGap
+		centerStart = midStart + (midEnd-midStart-centerW)/2
+		if centerStart < midStart {
+			centerStart = midStart
+		}
 	}
 	return controlBarLayout{centerStart: centerStart, rightStart: rightStart}
 }
@@ -612,20 +621,30 @@ func (m homeModel) controlBarView() string {
 	right := m.modeRightText()
 	rightW := ansi.StringWidth(right)
 	lay := m.controlBarLayout(width)
-	leftW := lay.rightStart - centerBarW - 4 // 与布局同源
-	if leftW < 10 {
-		leftW = 10
+	leftW := lay.centerStart - 2 // 左栏可用宽：中栏屏幕居中后，左缘到中栏间距 2
+	if leftW < leftMinW {
+		leftW = leftMinW
 	}
 	left := ansi.Truncate(t.Title+" - "+t.Artist, leftW, "…")
-	padLeft := lay.centerStart - leftW - 2 // 中栏起点前的补位
-	if padLeft < 0 {
-		padLeft = 0
+	// 补位按 left 实际显示宽计算（而非 leftW 上限）：标题短于左栏宽/截断符
+	// 使 left 不足 leftW 时，差额不补齐会导致中栏/右栏整体贴左偏移——
+	// 渲染与命中区间（controlBarLayout）错位，且右侧大片空白。
+	leftPad := lay.centerStart - ansi.StringWidth(left) - 2
+	if leftPad < 0 {
+		leftPad = 0
+	}
+	// 中栏→右栏间距同样取自 layout（rightStart - 中栏终点）：右栏右对齐
+	// 到 rightStart（右缘留 2 列），gap 随窗口宽度变化；若按固定 2+边距
+	// 计算会与命中区间错位 2 列（回归：右栏渲染右移、行尾无留白）。
+	gapRight := lay.rightStart - (lay.centerStart + centerBarW)
+	if gapRight < 0 {
+		gapRight = 0
 	}
 	padRight := width - lay.rightStart - rightW
 	if padRight < 0 {
 		padRight = 0
 	}
-	return left + strings.Repeat(" ", 2+padLeft) + center + strings.Repeat(" ", 2+padRight) + right
+	return left + strings.Repeat(" ", 2+leftPad) + center + strings.Repeat(" ", gapRight) + right + strings.Repeat(" ", padRight)
 }
 
 // modeIcon 三态播放模式图标。
