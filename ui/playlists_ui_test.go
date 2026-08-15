@@ -1513,7 +1513,7 @@ func TestPlaylistLocalAddFlow(t *testing.T) {
 		t.Fatalf("l 后应进入本地路径输入: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
 	}
 	got := stripANSI(m.plPage.view())
-	if !strings.Contains(got, "输入本地路径（音频文件或目录），Enter 扫描") {
+	if !strings.Contains(got, "输入本地音乐目录路径，Enter 扫描") {
 		t.Error("本地路径输入占位缺失")
 	}
 	if !strings.Contains(got, "Enter 扫描 · Esc 返回") {

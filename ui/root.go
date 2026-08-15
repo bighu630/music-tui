@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -636,18 +637,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case plLocalAddMsg:
-		// 本地路径导入：同步扫描路径（文件/目录）并把歌曲加入概览选中的列表。
-		// 同步执行（毫秒级，测试亦依赖同步语义）；大型目录/NFS 等慢挂载下可能
-		// 短暂冻结 UI，属有意取舍。成功退出输入框并刷新列表页；
-		// 失败（路径不存在/无音频/AddTracks 错误）仅 toastError——页面提交后
-		// 留在输入模式，用户可直接改路径重试（对比 u 导入：失败需重新按 u）。
+		// 本地目录导入：输入目录路径 → 自动新建「本地-<目录名>」列表并导入
+		// （不依赖概览选中列表）。同步执行（毫秒级，测试亦依赖同步语义）；
+		// 大型目录/NFS 等慢挂载下可能短暂冻结 UI，属有意取舍。成功退出输入框
+		// 并刷新列表页；失败（路径不存在/非目录/扫描失败/列表重名/AddTracks
+		// 错误）仅 toastError——页面提交后留在输入模式，用户可直接改路径重试
+		// （对比 u 导入：失败需重新按 u）。
 		path := strings.TrimSpace(msg.path)
 		if path == "" {
 			return m, nil
 		}
-		item, ok := m.plPage.overview.SelectedItem().(overviewItem)
-		if !ok {
-			m, cmd := m.showToast("请先在概览选择要添加的播放列表（Esc 返回概览选中后重试）", toastError)
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				m, cmd := m.showToast(fmt.Sprintf("路径不存在: %s", path), toastError)
+				return m, cmd
+			}
+			m, cmd := m.showToast(err.Error(), toastError)
+			return m, cmd
+		}
+		if !info.IsDir() {
+			m, cmd := m.showToast(fmt.Sprintf("仅支持目录路径: %s", path), toastError)
 			return m, cmd
 		}
 		tracks, err := local.Scan(path)
@@ -655,13 +665,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m, cmd := m.showToast(err.Error(), toastError)
 			return m, cmd
 		}
-		if err := m.pl.AddTracks(item.list.Name, tracks); err != nil {
+		// Clean 先处理尾部斜杠（如 "/a/b/" → base="b"）
+		listName := "本地-" + filepath.Base(filepath.Clean(path))
+		if _, err := m.pl.Create(listName); err != nil {
+			// 已存在同名列表：报错留在输入框，用户换路径/改名重试
+			m, cmd := m.showToast(err.Error(), toastError)
+			return m, cmd
+		}
+		if err := m.pl.AddTracks(listName, tracks); err != nil {
 			m, cmd := m.showToast("添加失败: "+err.Error(), toastError)
 			return m, cmd
 		}
 		m.plPage = m.plPage.exitLocalAdd()
 		m.plPage = m.plPage.setLists(m.pl.Lists())
-		m, cmd := m.showToast(fmt.Sprintf("已从 %s 添加 %d 首到「%s」", path, len(tracks), item.list.Name), toastSuccess)
+		m, cmd := m.showToast(fmt.Sprintf("已从 %s 添加 %d 首到「%s」", path, len(tracks), listName), toastSuccess)
 		return m, cmd
 
 	// ---- YT Music 同步编排 ----

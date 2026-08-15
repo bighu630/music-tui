@@ -3329,16 +3329,12 @@ func TestResumeLocalTrackSkipsCacheLookup(t *testing.T) {
 	}
 }
 
-// ---- 播放列表本地路径导入（root 编排：plLocalAddMsg → local.Scan → AddTracks） ----
+// ---- 播放列表本地路径导入（root 编排：plLocalAddMsg → 目录校验 → Create → Scan → AddTracks） ----
 
-// 本地路径导入成功：扫描目录 → 歌曲加入选中列表 → 成功 toast + 列表页刷新 + 退出输入。
+// 本地目录导入成功：输入目录 → 自动新建「本地-<目录名>」列表 + 歌曲入库 +
+// 成功 toast + 退出输入 + 概览出现新列表（不再依赖选中列表）。
 func TestPlaylistLocalAddMsgSuccess(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	if _, err := m.pl.Create("本地歌单"); err != nil {
-		t.Fatal(err)
-	}
-	m.plPage = m.plPage.setLists(m.pl.Lists())
-
 	dir := t.TempDir()
 	for _, f := range []string{"a.mp3", "b.flac", "c.mp3"} {
 		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o644); err != nil {
@@ -3349,6 +3345,7 @@ func TestPlaylistLocalAddMsgSuccess(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	listName := "本地-" + filepath.Base(dir)
 	// 模拟真实流程：先按 l 进入输入模式（成功后退出输入由 root 完成）
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
@@ -3356,80 +3353,141 @@ func TestPlaylistLocalAddMsgSuccess(t *testing.T) {
 		t.Fatal("l 后应进入本地路径输入模式")
 	}
 	m, _ = update(m, plLocalAddMsg{path: dir}) // toast 过期 tick cmd 忽略（同既有测试）
-	if got := activeToastText(m); got != fmt.Sprintf("已从 %s 添加 3 首到「本地歌单」", dir) {
-		t.Errorf("toast = %q, want 已从 %s 添加 3 首到「本地歌单」", got, dir)
+	if got := activeToastText(m); got != fmt.Sprintf("已从 %s 添加 3 首到「%s」", dir, listName) {
+		t.Errorf("toast = %q, want 已从 %s 添加 3 首到「%s」", got, dir, listName)
 	}
-	trs := m.pl.Tracks("本地歌单")
+	trs := m.pl.Tracks(listName)
 	if len(trs) != 3 || trs[0].Source != model.SourceLocal {
 		t.Fatalf("添加后歌曲 = %+v, want 3 首本地来源", trs)
 	}
 	if m.plPage.mode != plOverview || m.plPage.typing() {
 		t.Errorf("成功后应退出输入回概览: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
 	}
-	// 概览计数刷新
-	if !strings.Contains(stripANSI(m.plPage.view()), "3 首") {
-		t.Errorf("列表页应显示 3 首, got %q", stripANSI(m.plPage.view()))
+	// 概览自动出现新列表且计数刷新
+	view := stripANSI(m.plPage.view())
+	if !strings.Contains(view, listName) {
+		t.Errorf("概览应出现自动新建的列表 %q, got %q", listName, view)
+	}
+	if !strings.Contains(view, "3 首") {
+		t.Errorf("列表页应显示 3 首, got %q", view)
 	}
 }
 
-// 本地路径导入：单文件路径 → 1 首入库。
-func TestPlaylistLocalAddMsgSingleFile(t *testing.T) {
+// 本地目录导入：单文件路径 → 拒绝（仅支持目录）+ 不新建列表 + 留在输入框可重试。
+func TestPlaylistLocalAddMsgFileRejected(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	if _, err := m.pl.Create("本地歌单"); err != nil {
-		t.Fatal(err)
-	}
-	m.plPage = m.plPage.setLists(m.pl.Lists())
 	file := filepath.Join(t.TempDir(), "solo.mp3")
 	if err := os.WriteFile(file, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m, _ = update(m, plLocalAddMsg{path: file})
-	if got := activeToastText(m); got != fmt.Sprintf("已从 %s 添加 1 首到「本地歌单」", file) {
-		t.Errorf("toast = %q, want 已从 %s 添加 1 首到「本地歌单」", got, file)
-	}
-	if trs := m.pl.Tracks("本地歌单"); len(trs) != 1 || trs[0].URL != file {
-		t.Fatalf("添加后歌曲 = %+v, want 1 首（URL=文件绝对路径）", trs)
-	}
-}
-
-// 本地路径导入失败：路径不存在 → toastError、不加歌、留在输入模式（可重试）。
-func TestPlaylistLocalAddMsgFailure(t *testing.T) {
-	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	if _, err := m.pl.Create("本地歌单"); err != nil {
-		t.Fatal(err)
-	}
-	m.plPage = m.plPage.setLists(m.pl.Lists())
-	missing := filepath.Join(t.TempDir(), "不存在.mp3")
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
-	m, _ = update(m, plLocalAddMsg{path: missing})
-	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "路径不存在") {
-		t.Errorf("toast = %+v, want toastError 且含路径不存在", m.toast)
+	m, _ = update(m, plLocalAddMsg{path: file})
+	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "仅支持目录路径") {
+		t.Errorf("toast = %+v, want toastError 且含「仅支持目录路径」", m.toast)
 	}
-	if len(m.pl.Tracks("本地歌单")) != 0 {
-		t.Error("失败不应添加歌曲")
+	if len(m.pl.Lists()) != 0 {
+		t.Errorf("单文件被拒绝不应新建列表: %+v", m.pl.Lists())
 	}
 	if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
 		t.Errorf("失败应留在输入框可重试: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
 	}
 }
 
-// 本地路径导入无目标列表：无选中项 → toastError、不加歌。
-func TestPlaylistLocalAddMsgNoSelection(t *testing.T) {
+// 本地目录导入失败：路径不存在 → toastError、不新建列表、留在输入模式（可重试）。
+func TestPlaylistLocalAddMsgFailure(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	// 未创建任何列表（概览无选中项）
+	missing := filepath.Join(t.TempDir(), "不存在")
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, plLocalAddMsg{path: missing})
+	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "路径不存在") {
+		t.Errorf("toast = %+v, want toastError 且含路径不存在", m.toast)
+	}
+	if len(m.pl.Lists()) != 0 {
+		t.Error("失败不应新建列表")
+	}
+	if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
+		t.Errorf("失败应留在输入框可重试: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+}
+
+// 本地目录导入重名：已存在「本地-<目录名>」→ toastError 含「已存在同名列表」、
+// 留在输入框、不重复添加。
+func TestPlaylistLocalAddMsgDuplicateName(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.mp3"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	listName := "本地-" + filepath.Base(dir)
+	if _, err := m.pl.Create(listName); err != nil {
+		t.Fatal(err)
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 	m, _ = update(m, plLocalAddMsg{path: dir})
-	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "选择") {
-		t.Errorf("toast = %+v, want toastError 且提示先选择列表", m.toast)
+	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "已存在同名列表") {
+		t.Errorf("toast = %+v, want toastError 且含「已存在同名列表」", m.toast)
+	}
+	if trs := m.pl.Tracks(listName); len(trs) != 0 {
+		t.Errorf("重名失败不应添加歌曲, got %+v", trs)
+	}
+	if len(m.pl.Lists()) != 1 {
+		t.Errorf("重名失败不应新建列表, got %+v", m.pl.Lists())
 	}
 	if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
-		t.Errorf("无目标应留在输入框: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+		t.Errorf("失败应留在输入框可重试: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+}
+
+// 本地目录导入：目录路径带尾部斜杠 → filepath.Clean 生效，列表名仍为「本地-<目录名>」。
+func TestPlaylistLocalAddMsgTrailingSlash(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	base := "music"
+	dir := filepath.Join(t.TempDir(), base)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.mp3"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withSlash := dir + string(os.PathSeparator)
+	m, _ = update(m, plLocalAddMsg{path: withSlash})
+	listName := "本地-" + base
+	if got := activeToastText(m); got != fmt.Sprintf("已从 %s 添加 1 首到「%s」", withSlash, listName) {
+		t.Errorf("toast = %q, want 已从 %s 添加 1 首到「%s」", got, withSlash, listName)
+	}
+	if trs := m.pl.Tracks(listName); len(trs) != 1 {
+		t.Fatalf("添加后歌曲 = %+v, want 1 首", trs)
+	}
+	if m.plPage.mode != plOverview {
+		t.Errorf("成功后应退出输入回概览: mode=%v", m.plPage.mode)
+	}
+}
+
+// 本地目录导入：目录名含空格/中文 → 列表名完整保留「本地-<目录名>」。
+func TestPlaylistLocalAddMsgChineseDirName(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	base := "我的 音乐"
+	dir := filepath.Join(t.TempDir(), base)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.mp3"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = update(m, plLocalAddMsg{path: dir})
+	listName := "本地-" + base
+	if got := activeToastText(m); got != fmt.Sprintf("已从 %s 添加 1 首到「%s」", dir, listName) {
+		t.Errorf("toast = %q, want 已从 %s 添加 1 首到「%s」", got, dir, listName)
+	}
+	if trs := m.pl.Tracks(listName); len(trs) != 1 {
+		t.Fatalf("添加后歌曲 = %+v, want 1 首", trs)
+	}
+	if m.plPage.mode != plOverview {
+		t.Errorf("成功后应退出输入回概览: mode=%v", m.plPage.mode)
 	}
 }
 
