@@ -196,7 +196,7 @@ func (m *Manager) CacheAsync(track model.Track) {
 // YouTube 对音频直链有概率性 403 风控：同一直链重试无意义（换 URL 才换结果），
 // 因此失败整进程重跑 = 重新运行 yt-dlp = 重新提取新 URL；预算内最多
 // MaxDownloadAttempts 次（每次尝试有 DownloadAttemptTimeout 子超时，总超时
-// DownloadTimeout 封顶）。任一步失败仅 log.Printf；结束必清除 inflight 标记。
+// DownloadTimeout 封顶）。任一步失败仅记日志；结束必清除 inflight 标记。
 func (m *Manager) download(track model.Track) {
 	defer func() {
 		m.mu.Lock()
