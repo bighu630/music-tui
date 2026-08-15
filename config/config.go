@@ -31,6 +31,8 @@ type OpenAI struct {
 // Ytdlp 是 yt-dlp 全局附加参数配置：Headers 非空时以 --add-header 附加到
 // 每次 yt-dlp 调用（cookie 文件由 ytm.Store 管理，不在配置文件中）。
 // Headers 为 nil/空 = 未配置（行为与不附加完全一致）。
+// header 名须匹配 [\w-]+（字母数字与连字符）：非法键（如含空格）会让
+// 整次 yt-dlp 调用报错。
 type Ytdlp struct {
 	Headers map[string]string `json:"headers"`
 }

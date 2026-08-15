@@ -43,7 +43,7 @@ type MpvPlayer struct {
 
 	// 取流附加配置（可选，均空时行为与旧版完全一致）：cookieFile 经
 	// --ytdl-raw-options=cookiefile= 传给 yt-dlp；headers 生成临时配置文件
-	// 经 config-location= 指向（见 buildYtdlpConf）。ytdlpConfPath 由
+	// 经 config-locations= 指向（见 buildYtdlpConf）。ytdlpConfPath 由
 	// startProcess 写入/Close 删除（stateMu 保护）。
 	cookieFile    string
 	headers       map[string]string
@@ -93,7 +93,7 @@ type MpvPlayer struct {
 
 // NewMpvPlayer 创建播放器实例。binPath 为 mpv 可执行文件路径。
 // cookieFile/headers 可选：附加到 mpv 的 --ytdl-raw-options（cookiefile=/
-// config-location=），均空时不改变既有行为。
+// config-locations=），均空时不改变既有行为。
 func NewMpvPlayer(binPath, socketPath string, cookieFile string, headers map[string]string) *MpvPlayer {
 	return &MpvPlayer{
 		binPath:    binPath,
@@ -123,9 +123,9 @@ func (p *MpvPlayer) startProcess() error {
 	_ = os.Remove(p.socketPath) // 清理上次残留的 socket 文件
 	// --ytdl-raw-options 动态拼接：打底 socket-timeout=15,retries=2（yt-dlp 取流
 	// 收紧：403/网络黑洞快速失败），cookieFile/headers 非空时追加 cookiefile= 与
-	// config-location=（mpv 语法：选项值含逗号/双引号时双引号包裹并转义内部
-	// 双引号）。headers 生成临时配置失败仅 log 警告并跳过 config-location 段——
-	// 绝不因 header 配置问题导致 mpv 启动失败（取流功能降级不崩溃）。
+	// config-locations=（mpv 列表值语法：值含逗号时双引号包裹，内部 `"` 无法
+	// 转义表示）。headers 生成临时配置失败仅 log 警告并跳过 config-locations
+	// 段——绝不因 header 配置问题导致 mpv 启动失败（取流功能降级不崩溃）。
 	ytdlRawOpts := "socket-timeout=15,retries=2"
 	if p.cookieFile != "" {
 		ytdlRawOpts += ",cookiefile=" + quoteMpvOptionValue(p.cookieFile)
@@ -133,12 +133,12 @@ func (p *MpvPlayer) startProcess() error {
 	if len(p.headers) > 0 {
 		confPath, err := buildYtdlpConf(p.headers)
 		if err != nil {
-			log.Printf("生成 yt-dlp 临时配置失败，跳过 config-location（取流降级继续）: %v", err)
+			log.Printf("生成 yt-dlp 临时配置失败，跳过 config-locations（取流降级继续）: %v", err)
 		} else {
 			p.stateMu.Lock()
 			p.ytdlpConfPath = confPath // 幂等：每次重新生成（覆盖写同一路径，重连场景）
 			p.stateMu.Unlock()
-			ytdlRawOpts += ",config-location=" + quoteMpvOptionValue(confPath)
+			ytdlRawOpts += ",config-locations=" + quoteMpvOptionValue(confPath)
 		}
 	}
 	args := []string{
