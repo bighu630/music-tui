@@ -194,6 +194,85 @@ func TestRemoveTrack(t *testing.T) {
 	}
 }
 
+// TestAddTracks 批量追加：保序一次性写入；列表不存在返回错误（含空切片）。
+func TestAddTracks(t *testing.T) {
+	s, _ := newTestStore(t)
+	if _, err := s.Create("a"); err != nil {
+		t.Fatal(err)
+	}
+	tracks := []model.Track{testTrack("t1"), testTrack("t2"), testTrack("t3")}
+	if err := s.AddTracks("a", tracks); err != nil {
+		t.Fatal(err)
+	}
+	trs := s.Tracks("a")
+	if len(trs) != 3 || trs[0].ID != "t1" || trs[1].ID != "t2" || trs[2].ID != "t3" {
+		t.Fatalf("AddTracks 后 = %+v, want [t1 t2 t3]（保序）", trs)
+	}
+	// 与已有歌曲衔接追加
+	if err := s.AddTracks("a", []model.Track{testTrack("t4")}); err != nil {
+		t.Fatal(err)
+	}
+	if trs := s.Tracks("a"); len(trs) != 4 || trs[3].ID != "t4" {
+		t.Fatalf("追加后 = %+v, want 4 首且 t4 在末尾", trs)
+	}
+	// 列表不存在：返回错误（空切片也不放行）
+	if err := s.AddTracks("不存在", tracks); err == nil {
+		t.Error("向不存在的列表批量添加应报错")
+	}
+	if err := s.AddTracks("不存在", nil); err == nil {
+		t.Error("向不存在的列表批量添加空切片也应报错（列表存在性优先）")
+	}
+	// 失败不落盘：store 内容不变
+	if err := s.AddTracks("不存在", tracks); err == nil {
+		t.Fatal("再次向不存在的列表添加应报错")
+	}
+}
+
+// TestAddTracksEmptyIsNoOp 空切片是 no-op：返回 nil、不写盘、不加歌。
+func TestAddTracksEmptyIsNoOp(t *testing.T) {
+	s, path := newTestStore(t)
+	if _, err := s.Create("a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddTracks("a", nil); err != nil {
+		t.Fatalf("空切片应为 no-op 返回 nil: %v", err)
+	}
+	if err := s.AddTracks("a", []model.Track{}); err != nil {
+		t.Fatalf("空切片（非 nil）同样 no-op: %v", err)
+	}
+	if got := s.Tracks("a"); len(got) != 0 {
+		t.Errorf("空切片不应添加任何歌曲: %v", got)
+	}
+	// no-op 不触发写盘：磁盘文件保持空列表状态
+	s2, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lists := s2.Lists(); len(lists) != 1 || len(lists[0].Tracks) != 0 {
+		t.Fatalf("重载后 = %+v, want 1 个空列表", lists)
+	}
+}
+
+// TestAddTracksPersists 批量添加原子落盘：重载后歌曲完整保留。
+func TestAddTracksPersists(t *testing.T) {
+	s, path := newTestStore(t)
+	if _, err := s.Create("a"); err != nil {
+		t.Fatal(err)
+	}
+	tracks := []model.Track{testTrack("t1"), testTrack("t2")}
+	if err := s.AddTracks("a", tracks); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trs := s2.Tracks("a")
+	if len(trs) != 2 || trs[0].ID != "t1" || trs[1].ID != "t2" {
+		t.Fatalf("重载后歌曲 = %+v, want [t1 t2]", trs)
+	}
+}
+
 // TestPersistenceReload 落盘后可重新加载：CRUD 结果跨实例保留。
 func TestPersistenceReload(t *testing.T) {
 	s, path := newTestStore(t)

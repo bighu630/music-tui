@@ -3328,3 +3328,107 @@ func TestResumeLocalTrackSkipsCacheLookup(t *testing.T) {
 		t.Error("本地曲目恢复后 playingFromCache 应为 false")
 	}
 }
+
+// ---- 播放列表本地路径导入（root 编排：plLocalAddMsg → local.Scan → AddTracks） ----
+
+// 本地路径导入成功：扫描目录 → 歌曲加入选中列表 → 成功 toast + 列表页刷新 + 退出输入。
+func TestPlaylistLocalAddMsgSuccess(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := m.pl.Create("本地歌单"); err != nil {
+		t.Fatal(err)
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+
+	dir := t.TempDir()
+	for _, f := range []string{"a.mp3", "b.flac", "c.mp3"} {
+		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 无关扩展名被 local.Scan 过滤
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟真实流程：先按 l 进入输入模式（成功后退出输入由 root 完成）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if m.plPage.mode != plLocalAdd {
+		t.Fatal("l 后应进入本地路径输入模式")
+	}
+	m, _ = update(m, plLocalAddMsg{path: dir}) // toast 过期 tick cmd 忽略（同既有测试）
+	if got := activeToastText(m); got != fmt.Sprintf("已从 %s 添加 3 首到「本地歌单」", dir) {
+		t.Errorf("toast = %q, want 已从 %s 添加 3 首到「本地歌单」", got, dir)
+	}
+	trs := m.pl.Tracks("本地歌单")
+	if len(trs) != 3 || trs[0].Source != model.SourceLocal {
+		t.Fatalf("添加后歌曲 = %+v, want 3 首本地来源", trs)
+	}
+	if m.plPage.mode != plOverview || m.plPage.typing() {
+		t.Errorf("成功后应退出输入回概览: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+	// 概览计数刷新
+	if !strings.Contains(stripANSI(m.plPage.view()), "3 首") {
+		t.Errorf("列表页应显示 3 首, got %q", stripANSI(m.plPage.view()))
+	}
+}
+
+// 本地路径导入：单文件路径 → 1 首入库。
+func TestPlaylistLocalAddMsgSingleFile(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := m.pl.Create("本地歌单"); err != nil {
+		t.Fatal(err)
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+	file := filepath.Join(t.TempDir(), "solo.mp3")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = update(m, plLocalAddMsg{path: file})
+	if got := activeToastText(m); got != fmt.Sprintf("已从 %s 添加 1 首到「本地歌单」", file) {
+		t.Errorf("toast = %q, want 已从 %s 添加 1 首到「本地歌单」", got, file)
+	}
+	if trs := m.pl.Tracks("本地歌单"); len(trs) != 1 || trs[0].URL != file {
+		t.Fatalf("添加后歌曲 = %+v, want 1 首（URL=文件绝对路径）", trs)
+	}
+}
+
+// 本地路径导入失败：路径不存在 → toastError、不加歌、留在输入模式（可重试）。
+func TestPlaylistLocalAddMsgFailure(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := m.pl.Create("本地歌单"); err != nil {
+		t.Fatal(err)
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+	missing := filepath.Join(t.TempDir(), "不存在.mp3")
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, plLocalAddMsg{path: missing})
+	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "路径不存在") {
+		t.Errorf("toast = %+v, want toastError 且含路径不存在", m.toast)
+	}
+	if len(m.pl.Tracks("本地歌单")) != 0 {
+		t.Error("失败不应添加歌曲")
+	}
+	if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
+		t.Errorf("失败应留在输入框可重试: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+}
+
+// 本地路径导入无目标列表：无选中项 → toastError、不加歌。
+func TestPlaylistLocalAddMsgNoSelection(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	// 未创建任何列表（概览无选中项）
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.mp3"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, plLocalAddMsg{path: dir})
+	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "选择") {
+		t.Errorf("toast = %+v, want toastError 且提示先选择列表", m.toast)
+	}
+	if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
+		t.Errorf("无目标应留在输入框: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+}

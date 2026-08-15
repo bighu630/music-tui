@@ -128,6 +128,22 @@ func (s *Store) AddTrack(name string, track model.Track) error {
 	return s.saveLocked()
 }
 
+// AddTracks 把整批歌曲一次性追加到指定列表（单次原子写盘）；
+// 列表不存在返回错误（存在性优先，空切片同样报错）；空切片是 no-op（返回 nil，不写盘）。
+func (s *Store) AddTracks(name string, tracks []model.Track) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := s.indexLocked(name)
+	if idx < 0 {
+		return fmt.Errorf("列表「%s」不存在", name)
+	}
+	if len(tracks) == 0 {
+		return nil // no-op：不触发写盘
+	}
+	s.lists[idx].Tracks = append(s.lists[idx].Tracks, tracks...)
+	return s.saveLocked()
+}
+
 // RemoveTrack 从指定列表移除第 index 首歌曲（0 基）；
 // 列表不存在或下标越界返回错误。
 func (s *Store) RemoveTrack(name string, index int) error {

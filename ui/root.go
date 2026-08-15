@@ -17,6 +17,7 @@ import (
 	"music-tui/cache"
 	"music-tui/cover"
 	"music-tui/history"
+	"music-tui/local"
 	"music-tui/logger"
 	"music-tui/lyrics"
 	"music-tui/lyricshm"
@@ -633,6 +634,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.plPage = m.plPage.setLists(m.pl.Lists())
 		return m, nil
+
+	case plLocalAddMsg:
+		// 本地路径导入：同步扫描路径（文件/目录）并把歌曲加入概览选中的列表。
+		// 本地磁盘扫描毫秒级，同步执行即可。成功退出输入框并刷新列表页；
+		// 失败（路径不存在/无音频/AddTracks 错误）仅 toastError——页面提交后
+		// 留在输入模式，用户可直接改路径重试（对比 u 导入：失败需重新按 u）。
+		path := strings.TrimSpace(msg.path)
+		if path == "" {
+			return m, nil
+		}
+		item, ok := m.plPage.overview.SelectedItem().(overviewItem)
+		if !ok {
+			m, cmd := m.showToast("请先在概览选择要添加的播放列表", toastError)
+			return m, cmd
+		}
+		tracks, err := local.Scan(path)
+		if err != nil {
+			m, cmd := m.showToast(err.Error(), toastError)
+			return m, cmd
+		}
+		if err := m.pl.AddTracks(item.list.Name, tracks); err != nil {
+			m, cmd := m.showToast("添加失败: "+err.Error(), toastError)
+			return m, cmd
+		}
+		m.plPage = m.plPage.exitLocalAdd()
+		m.plPage = m.plPage.setLists(m.pl.Lists())
+		m, cmd := m.showToast(fmt.Sprintf("已从 %s 添加 %d 首到「%s」", path, len(tracks), item.list.Name), toastSuccess)
+		return m, cmd
 
 	// ---- YT Music 同步编排 ----
 
