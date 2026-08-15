@@ -121,6 +121,23 @@ func (q *Queue) Next() (model.Track, bool) {
 	return q.tracks[q.currentIdx], true
 }
 
+// PeekNext 返回 Next 将推进到的下一首但不改变状态（预加载预读用：
+// 播放当前曲时提前看“下一首是谁”，无需推进队列）。与 Next 同语义：
+// 空队列 false；无当前曲目（currentIdx==-1）返回队首；末尾回绕到队首；
+// 单曲队列回绕返回自身（此时目标已缓存，CacheAsync no-op，天然安全）。
+func (q *Queue) PeekNext() (model.Track, bool) {
+	if len(q.tracks) == 0 {
+		return model.Track{}, false
+	}
+	if q.currentIdx == -1 {
+		return q.tracks[0], true
+	}
+	if q.currentIdx+1 >= len(q.tracks) {
+		return q.tracks[0], true
+	}
+	return q.tracks[q.currentIdx+1], true
+}
+
 // Prev 回退到上一首并返回；空队列返回 false。
 // 无当前曲目时指向末尾；当前为首位时回绕到末尾；否则逐首回退。
 func (q *Queue) Prev() (model.Track, bool) {

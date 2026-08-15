@@ -26,7 +26,7 @@
 func (q *Queue) PeekNext() (model.Track, bool)
 ```
 
-单曲队列回绕返回自身——此时目标已缓存（TrackStarted 预热过），CacheAsync no-op，天然安全。
+实现注记（审查偏离#1）：UI 层对回绕返回的"当前曲自身"不设目标（SetTarget(nil)）——TrackStarted 预热已覆盖当前曲；且 TrackStarted 前的刷新点（startPlay/跳转等）若预载自身会与 mpv 并发访问同 URL 放大 403 风控。多曲队列中重复 ID 同样跳过预载，与缓存按 ID 键控的语义一致。
 
 ### 2. `cache` 包：`CacheAsync` 返回完成信号
 
@@ -49,16 +49,18 @@ type CacheClient interface {
 type Scheduler struct { ... } // 互斥锁保护目标槽位 + 后台 worker 循环 + wake/stop channel
 
 func New(c CacheClient) *Scheduler
-func (s *Scheduler) SetTarget(t *model.Track) // nil=停止；与在途同 ID 由 CacheAsync no-op 去重；新 ID 记为目标
-func (s *Scheduler) Stop()                    // 停止 worker（测试/退出用）
+func (s *Scheduler) SetTarget(t *model.Track) // nil=停止并重置去重状态；同 ID（含新指针）视为已处理不重复调用；新 ID 记为目标
+func (s *Scheduler) Stop()                    // 停止 worker（测试/退出用；在途不等待，best-effort）
 func (s *Scheduler) Target() *model.Track     // 当前最新目标（测试断言用）
 ```
 
 worker 循环语义：
-- 取最新目标；nil → 阻塞等 wake/stop。
-- 非 nil → `done := cache.CacheAsync(*t)`；`done == nil`（已缓存/禁用/在途）→ 立即处理新目标，不死等；否则 `<-done` 串行等完成。
+- 取最新目标（"读取目标 + 认领登记 last"同一临界区）；nil → 阻塞等 wake/stop。
+- 非 nil → `done := cache.CacheAsync(*t)`；`done == nil`（已缓存/禁用/在途）→ 等 wake/stop（不死等、不回环空转）；否则 `<-done` 串行等完成。
 - 同一时刻至多一个下载在途（串行天然保证）。
 - 失败静默：调度器不感知下载结果。
+
+实现注记（审查修复）：去重在调度器层按 **ID 比较**（lastProcessed + 原子认领）而非依赖 CacheAsync no-op——UI 每次传新指针（`&next` 局部变量），指针比较形同虚设。无 nil 间隔的同 ID 重设（含下载失败后）不重试，与"失败静默"一致；SetTarget(nil) 重置 last，先清空再重设同 ID = 显式重试。Stop 竞态为 best-effort：停止后仍可能有一个已发起的下载在后台完成（产物是有效缓存，无害）。
 
 ### 4. `ui/root.go` 集成：`refreshPreload()` 辅助
 
@@ -67,12 +69,14 @@ worker 循环语义：
 func (m Model) refreshPreload()
 ```
 
-调用点（所有队列形态/播放状态变更处）：
+调用点（所有队列形态/播放状态变更处，实现含审查偏离#2 的两个额外点）：
 - `TrackStartedEvent`（现有预热当前曲之后）
 - `trackAppendMsg` / `queuePlayMsg` / `prevTrackMsg` / `nextTrackMsg` / `queueDeleteMsg` / `queueClearMsg`
 - `cycleMode`（toggleModeMsg 与 queueModeMsg 共用）
 - `plLoadMsg` / `startPlay`
-- `stopAfterEnd`、`ErrorEvent` 收尾（ended=true → 清空目标）
+- `skipFailedTrack`（跳过失败曲后立即重算，避免目标短暂指向被跳曲目）
+- `retryPlayMsg` 队列已空分支（ended=true → 清空目标）
+- `stopAfterEnd`；`ErrorEvent` 细分：跳过分支立即重算、ended 分支清空目标
 
 RepeatOne 跳过：mpv 层无缝循环同曲，queue 指针照常推进——预载"下一首"是浪费（当前曲 TrackStarted 时已缓存）。
 
@@ -84,17 +88,21 @@ RepeatOne 跳过：mpv 层无缝循环同曲，queue 指针照常推进——预
 
 ## 测试
 
-- `queue`：PeekNext 空队列/无当前/中间/回绕/单曲。
-- `cache`：done channel 语义（禁用/已缓存/在途 → nil；成功/失败耗尽 → 关闭）。
+- `queue`：PeekNext 空队列/无当前/中间/回绕/单曲/状态不变。
+- `cache`：done channel 语义（禁用/已缓存/在途 → nil；成功/失败耗尽 → 关闭；close 时注册已完成）。
 - `preload`：
-  - fake client 单测：nil 目标不下载、触发下载、在途同 ID 去重、在途换目标串行、在途清空后不再下载、CacheAsync 返回 nil 不死等、Stop 退出。
-  - 集成测试：真实 cache.Manager + 假 yt-dlp 脚本（复用 cache 包 fakeYtDlpBody 模式）→ SetTarget → 轮询 Lookup 命中 → 文件落盘 + 索引注册。
-- `ui/root`：TrackStarted 后 `preloader.Target()` 断言为下一首；RepeatOne/清空/删除/ended 门控断言；现有测试不回归。
+  - fake client 单测：nil 目标不下载、触发下载、在途同 ID 新指针去重、在途换目标串行、在途清空后不再下载、CacheAsync 返回 nil 不死等、Stop 空闲/在途退出、SetTarget(nil) 重置后同 ID 重设重新触发、cache nil 安全。
+  - 集成测试：真实 cache.Manager + 假 yt-dlp 脚本（复制 cache 包 fakeYtDlpBody 模式，helper 未导出）→ SetTarget → 轮询 Lookup 命中 → 文件落盘 + 索引注册。
+- `ui/root`：TrackStarted 后 `preloader.Target()` 断言为下一首；RepeatOne/清空/删除/ended/无当前/单曲回绕门控断言；模式切换恢复；跳转/前后切/整表替换联动。
+- 回归注记（审查偏离#3）：预热回归测试 TestTrackStartedTriggersCacheWarmup 断言改为"下载计数==2（预热 1 + 预载 1）"、不再断言切歌播放网络 URL——预载完成后切歌命中缓存播本地文件是预期行为（断言播放路径会惩罚特性）。
 
 ## Git 纪律
 
 - 在 `.worktrees/preload`（分支 `feat/preload`）开发。
 - 只 git add 自己负责的文件，不用 `git add -A`，commit 前 git status 检查。
+
+## 已知设计内接受项
+- 失败跳过后预载目标撞回刚失败曲目（failedTracks 成员）：会发起一轮有界重试突发（5 次×2s 退避），静默、不与 mpv 并发同 URL——设计内接受的浪费，与"失败静默"一致。
 
 ## 验收标准
 

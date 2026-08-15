@@ -22,6 +22,7 @@ import (
 	"music-tui/model"
 	"music-tui/player"
 	"music-tui/playlists"
+	"music-tui/preload"
 	"music-tui/queue"
 	"music-tui/search"
 	"music-tui/session"
@@ -245,6 +246,9 @@ type Model struct {
 
 	cache            *cache.Manager // 音频缓存（命中优先本地文件；未命中后台下载）
 	playingFromCache bool           // 当前曲目是否播放自缓存文件（LoadFailed 时据此移除损坏条目）
+	// preloader 预加载调度器：队列播放时自动预下载"即将播放的下一首"到缓存
+	//（TrackStarted 后触发，队列/模式/播放状态变更时联动重算；缓存未配置时 no-op）
+	preloader *preload.Scheduler
 
 	state    model.PlaybackState
 	current  page
@@ -328,6 +332,9 @@ func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cove
 		queuePage:       newQueueModel(),
 		plPage:          newPlaylistModel(),
 	}
+	// 预加载调度器随模型创建：cm 可为 nil（未配置缓存），Scheduler 内部已
+	// 做 nil 安全 no-op（SetTarget 直接返回，worker 恒无目标）。
+	m.preloader = preload.New(cm)
 	// 续播恢复：会话存在且队列有当前曲目才恢复；否则丢弃会话从空态开始
 	if st := sess.State(); st != nil {
 		m.queue.Restore(st.Queue)
@@ -377,6 +384,35 @@ func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cove
 	return m
 }
 
+// refreshPreload 重新计算并更新预加载目标：仅在"有当前曲目、未结束、非单曲循环"
+// 时预载队列下一首（PeekNext）；其余情况（无当前/ended/RepeatOne/空队列）SetTarget(nil)。
+//
+// 额外门控——PeekNext 回绕返回当前曲自身（单曲队列）时不设目标：同 ID 曲目的
+// 缓存已由当前曲 TrackStarted 的预热覆盖，预载纯属重复；且在 TrackStarted 之前
+//（startPlay/切歌后立即刷新）预载当前曲会与 mpv 取流并发访问同一 URL，放大
+// 403 风控（与"预热移后到 TrackStarted"同一回归动机）。
+//
+// 调用点：TrackStartedEvent（预热当前曲之后）、全部队列形态变更（增/删/清/跳转/
+// 替换）、模式切换（cycleMode）、播放停止（stopAfterEnd、ErrorEvent 置 ended 分支）、
+// 失败跳过（skipFailedTrack 成功后立即）、重试期间队列被清空（retryPlayMsg 空队列
+// 分支）——即所有"下一首候选"或"播放状态"可能变化之处。注意 Model 为值接收者：本方法只
+// 更新 preloader（指针字段）的目标槽位，不依赖调用方副本的后续状态，
+// 因此在"分支返回前"调用即可生效（scheduler 是共享指针）。
+func (m Model) refreshPreload() {
+	if m.ended || m.state.Track == nil || m.queue.Mode() == queue.RepeatOne {
+		// 无当前曲/已结束/单曲循环：不预载（RepeatOne 下 mpv 无缝循环同曲，
+		// queue 指针照常推进——预载"下一首"是浪费，当前曲 TrackStarted 已缓存）
+		m.preloader.SetTarget(nil)
+		return
+	}
+	if next, ok := m.queue.PeekNext(); ok && next.ID != m.state.Track.ID {
+		m.preloader.SetTarget(&next)
+		return
+	}
+	// 空队列或回绕到当前曲自身：无有效预载目标
+	m.preloader.SetTarget(nil)
+}
+
 // Init 启动两个常驻 cmd：播放器事件监听 + spinner 全局 tick；
 // 存在已保存会话时追加续播恢复 cmd（PlayPaused 静默加载并定位）。
 // （不用包级 spinner.Tick：bubbles v1.0.0 的包级 Tick 无延时，会形成忙循环。）
@@ -401,6 +437,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case trackAppendMsg:
 		// 追加到队尾：不打断当前播放，也不自动开播（队列为空时同样只入队）
 		m.queue.Add(msg.track)
+		// 队列形态变化：下一首候选已变，重新计算预加载目标
+		m.refreshPreload()
 		return m.syncQueueViews(), nil
 
 	case queuePlayMsg:
@@ -412,7 +450,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.retryCount = 0    // 手动跳转播放：全新重试预算
 		m.queueSkip = false // 跳转即重新对齐，解除删除解耦标记
 		m.current = pageHome
-		return m.playQueueTrack()
+		m2, cmd := m.playQueueTrack()
+		// 跳转 = 当前曲变更：在返回的新副本上重算预加载目标
+		//（scheduler 为指针，目标槽位更新对副本同样生效）
+		m2.refreshPreload()
+		return m2, cmd
 
 	case prevTrackMsg:
 		// 上一首（首页 , 键 / ⏮ 按钮）：手动操作重置重试预算并解除删除解耦标记
@@ -420,7 +462,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.retryCount = 0
 			m.queueSkip = false
 			m.current = pageHome
-			return m.beginPlay(tr)
+			m2, cmd := m.beginPlay(tr)
+			m2.refreshPreload() // 切歌后重算预加载目标（返回副本上生效）
+			return m2, cmd
 		}
 		return m, nil
 
@@ -430,7 +474,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.retryCount = 0
 			m.queueSkip = false
 			m.current = pageHome
-			return m.beginPlay(tr)
+			m2, cmd := m.beginPlay(tr)
+			m2.refreshPreload() // 切歌后重算预加载目标（返回副本上生效）
+			return m2, cmd
 		}
 		return m, nil
 
@@ -447,11 +493,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.queueSkip = true
 		}
 		m.queue.Remove(msg.index)
+		m.refreshPreload() // 删除后下一首候选可能变化：重新计算预加载目标
 		return m.syncQueueViews(), nil
 
 	case queueClearMsg:
 		m.queue.Clear()
 		m.queueSkip = false
+		m.refreshPreload() // 队列清空：无下一首可预载（当前曲若仍在播则清空目标）
 		return m.syncQueueViews(), nil
 
 	case queueModeMsg:
@@ -479,7 +527,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.queueSkip = false // 替换即重新对齐，解除删除解耦标记
 		m.current = pageHome
 		m = m.syncQueueViews()
-		return m.playQueueTrack()
+		m2, cmd := m.playQueueTrack()
+		m2.refreshPreload() // 整列表替换 = 队列形态变更：重新计算预加载目标
+		return m2, cmd
 
 	case plCreateMsg:
 		if _, err := m.pl.Create(msg.name); err != nil {
@@ -741,6 +791,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 重试等待期间队列被清空/删光：无曲可播，停止重试
 			//（避免“正在自动重试”toast 悬挂）。
 			m.ended = true
+			m.refreshPreload() // ended 门控：清空预加载目标
 			m, cmd := m.showToast("播放失败：队列已清空，已停止自动重试", toastError)
 			m.state.Playing = false
 			m.home = m.home.syncState(m.state)
@@ -1157,6 +1208,10 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		if m.cache != nil && m.state.Track != nil {
 			m.cache.CacheAsync(*m.state.Track)
 		}
+		// 预加载：当前曲确认开始后预下载队列下一首（门控见 refreshPreload；
+		// 回绕同 ID 时 refreshPreload 不设目标：同曲缓存已由上方预热覆盖，预载
+		// 纯属重复；且此时预载会与 mpv 取流并发访问同一 URL，放大 403 风控）。
+		m.refreshPreload()
 		// 仅在拿到真实时长时覆盖：Duration=0 表示 observe 与 Get 兜底
 		// 均失败（直播/特殊流），此时保留搜索元数据提供的时长，避免被抹零。
 		if ev.Duration > 0 {
@@ -1274,11 +1329,19 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 				// 走下方停止路径，避免无限交替重播（回归：TestLoadFailAllTracksFailStopsLoop）。
 				logger.Warn("重试耗尽，跳过失败曲目继续连播: %s - %s (id=%s)", skip.Title, skip.Artist, skip.ID)
 				m2, cmd := m.skipFailedTrack(*skip, hint)
+				// 跳过 = 播放状态变更（新当前曲）：立即重算预加载目标，不必等下次
+				// TrackStarted——否则目标仍指向刚跳到的当前曲，预载会与 mpv 取流并发
+				// 访问同一 URL 放大 403 风控。回绕后目标可能撞回刚失败曲目
+				//（failedTracks 成员）：对其发起有界预载重试（MaxDownloadAttempts 次 ×
+				// DownloadRetryBackoff 退避 ≈ 数秒）是设计内接受的浪费——失败静默、
+				// 不与 mpv 并发同 URL（失败曲目已停止取流），与"失败静默"策略一致。
+				m2.refreshPreload()
 				return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
 			}
 			// 单曲重试耗尽：停止播放，等待用户操作（空格重播同曲）
 			logger.Error("播放失败，重试 %d 次耗尽，停止播放: %v", maxPlayRetries, ev.Err)
 			m.ended = true
+			m.refreshPreload() // ended 门控：清空预加载目标
 			m, cmd := m.showToast(fmt.Sprintf("播放失败：%s，已重试 %d 次。请稍后重试或更换歌曲", hint, maxPlayRetries), toastError)
 			m.state.Playing = false
 			m.home = m.home.syncState(m.state)
@@ -1287,6 +1350,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.retryCount = 0
 		logger.Warn("播放器错误: %v", ev.Err)
 		m.ended = true
+		m.refreshPreload() // ended 门控：清空预加载目标
 		m, cmd := m.showToast(ev.Err.Error(), toastError)
 		m.state.Playing = false
 		m.home = m.home.syncState(m.state)
@@ -1370,6 +1434,7 @@ func (m Model) skipFailedTrack(tr model.Track, hint string) (Model, tea.Cmd) {
 // stopAfterEnd 播放结束且无下一首：停在当前位置等待用户操作（空格重播同曲）。
 func (m Model) stopAfterEnd() (Model, tea.Cmd) {
 	m.ended = true
+	m.refreshPreload() // 播放停止：清空预加载目标（ended 下无下一首可预载）
 	m.loadingSince = time.Time{} // 已停止：无加载中提示
 	m.state.Playing = false
 	m.home = m.home.syncState(m.state)
@@ -1385,7 +1450,9 @@ func (m Model) startPlay(track model.Track) (Model, tea.Cmd) {
 	m.retryCount = 0    // 手动播放：全新重试预算
 	m.queueSkip = false // 替换即重新对齐，解除删除解耦标记
 	m.current = pageHome
-	return m.playQueueTrack()
+	m2, cmd := m.playQueueTrack()
+	m2.refreshPreload() // 替换语义 = 队列形态变更：重新计算预加载目标
+	return m2, cmd
 }
 
 // playQueueTrack 播放队列当前曲目（不修改队列结构）。
@@ -1566,6 +1633,8 @@ func (m Model) cycleMode() (Model, tea.Cmd) {
 		next = queue.Sequential
 	}
 	m.queue.SetMode(next)
+	// 模式影响预加载门控（RepeatOne 跳过预载）：切换后立即重算目标
+	m.refreshPreload()
 	if err := m.player.SetLoop(next == queue.RepeatOne); err != nil {
 		m, cmd := m.showToast("设置循环失败: "+err.Error(), toastError)
 		return m.syncQueueViews(), cmd
