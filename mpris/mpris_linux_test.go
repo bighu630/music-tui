@@ -968,3 +968,113 @@ func TestIntegrationCloseWaitsForPump(t *testing.T) {
 		t.Fatal("Close 后 Start 应被拒绝")
 	}
 }
+
+// ---- 死锁与注入时序回归测试 ----
+
+// syncController 模拟 main.go 真实接线：controller.SetMode 触发 SyncMode
+//（ui 侧 applyMode→notifyModeChanged→SyncMode）。关键：SyncMode 必须等
+// 回包之后执行——修复前 ui 在 applyMode（含 SyncMode→SetMust）完成前不
+// 回包，而 SetMust 要抢 D-Bus 侧 prop.Set 持有的锁，循环等待死锁；修复后
+// 先回包（callback 返回、prop.Set 释放锁）再执行 SyncMode。此处用独立
+// goroutine 模拟 bubbletea 的异步执行，SetMode 立即返回（对应 dispatch 回包）；
+// 若在回调内同步触发 SyncMode，SetMust 会自锁（本包内无法由 ui 修复打破）。
+type syncController struct {
+	inner    *fakeController
+	srv      *Server
+	syncDone chan struct{} // 每次 SetMode 触发一次同步完成信号（测试等它再断言）
+}
+
+func (c *syncController) PlayNext() error     { return c.inner.PlayNext() }
+func (c *syncController) PlayPrevious() error { return c.inner.PlayPrevious() }
+func (c *syncController) SetMode(m queue.Mode) {
+	c.inner.SetMode(m)
+	go func() {
+		c.srv.SyncMode(m)
+		c.syncDone <- struct{}{}
+	}()
+}
+func (c *syncController) Mode() queue.Mode { return c.inner.Mode() }
+func (c *syncController) Len() int         { return c.inner.Len() }
+
+// TestLoopStatusSetNoDeadlock 全链路回归：客户端写 LoopStatus 时 controller.SetMode
+// 触发 SyncMode（main.go 真实接线），不得死锁。修复前 props.Set 永挂
+//（prop 锁 ↔ bubbletea reply 循环等待，reviewer 实证复现）：ui 在 applyMode
+//（→notifyModeChanged→SyncMode→SetMust）完成前不回包，D-Bus 侧 prop.Set
+// 持锁等 reply，SetMust 抢同一把锁——循环等待。修复后先回包释放锁，
+// SyncMode 在 bubbletea goroutine 执行时锁已空闲。
+func TestLoopStatusSetNoDeadlock(t *testing.T) {
+	conn, err := dbus.SessionBusPrivateNoAutoStartup()
+	if err != nil {
+		t.Skipf("无 session bus: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.Auth(nil); err != nil {
+		t.Skipf("session bus 认证失败: %v", err)
+	}
+	if err := conn.Hello(); err != nil {
+		t.Skipf("session bus Hello 失败: %v", err)
+	}
+
+	s := &Server{p: newFakePlayer(), conn: &fakeBus{}}
+	props, err := prop.Export(conn, "/org/mpris/MediaPlayer2/TestNoDeadlock", s.propertyMap())
+	if err != nil {
+		t.Fatalf("导出属性失败: %v", err)
+	}
+	s.props = props
+	fc := newFakeController()
+	fc.mode = queue.Sequential
+	sc := &syncController{inner: fc, srv: s, syncDone: make(chan struct{}, 1)}
+	s.SetController(sc)
+
+	done := make(chan error, 1)
+	go func() {
+		// 注意：props.Set 返回 *dbus.Error（静态类型），直接发到 error 通道会
+		// 退化为“非 nil 接口包装 nil 指针”，断言处误报失败——先判 nil 再发。
+		if derr := props.Set(ifacePlayer, "LoopStatus", dbus.MakeVariant("Track")); derr != nil {
+			done <- fmt.Errorf("Set 失败: %s", derr.Name)
+			return
+		}
+		done <- nil
+	}()
+	select {
+	case derr := <-done:
+		if derr != nil {
+			t.Fatalf("写 LoopStatus 失败: %v", derr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("死锁：props.Set(LoopStatus) 3 秒未返回（prop 锁 ↔ bubbletea reply 循环等待）")
+	}
+	// Set 返回后回调链路已结束：等 SyncMode（模拟的 bubbletea 侧）完成，
+	// 再断言写生效与同步结果（并发可预期：锁已释放，SetMust 必然放行）。
+	select {
+	case <-sc.syncDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("SyncMode 未完成（回包后锁应已释放，SetMust 不应再阻塞）")
+	}
+	if got := props.GetMust(ifacePlayer, "LoopStatus"); got != "Track" {
+		t.Errorf("LoopStatus = %v, want Track（写已生效）", got)
+	}
+}
+
+// TestSetControllerBeforeStartSyncsLater SetController 在 Start 前调用时，
+// props 建立后 syncFromController 补齐初始投影（LoopStatus/Shuffle/CanGoNext）。
+func TestSetControllerBeforeStartSyncsLater(t *testing.T) {
+	s := &Server{p: newFakePlayer()} // props 未建（模拟 Start 前）
+	fc := newFakeController()
+	fc.mode = queue.RepeatOne
+	fc.len = 3
+	s.SetController(fc)
+	// 模拟 Start 导出 props 后补同步
+	s.props = newFakeProps()
+	s.syncFromController()
+	fpr := s.props.(*fakeProps)
+	if got := fpr.GetMust(ifacePlayer, "LoopStatus"); got != "Track" {
+		t.Errorf("LoopStatus = %v, want Track", got)
+	}
+	if got := fpr.GetMust(ifacePlayer, "Shuffle"); got != false {
+		t.Errorf("Shuffle = %v, want false", got)
+	}
+	if got := fpr.GetMust(ifacePlayer, "CanGoNext"); got != true {
+		t.Errorf("CanGoNext = %v, want true（Len=3>1）", got)
+	}
+}

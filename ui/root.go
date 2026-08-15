@@ -1666,6 +1666,11 @@ func addHistoryCmd(h *history.Store, track model.Track) tea.Cmd {
 // 所有分支都必须回写 reply（D-Bus goroutine 同步等待）并重新订阅请求流
 // （cmd 链不丢，同 TrackEnded 分支约束）。
 func (m Model) handleMprisReq(req mprisReq) (Model, tea.Cmd) {
+	// 防御：无控制器桥（测试手搭 Model 未走 NewModel）时回包并忽略请求
+	if m.mprisCtrl == nil {
+		req.reply <- nil
+		return m, nil
+	}
 	switch req.kind {
 	case reqNext:
 		if tr, ok := m.queue.Next(); ok {
@@ -1692,8 +1697,11 @@ func (m Model) handleMprisReq(req mprisReq) (Model, tea.Cmd) {
 		req.reply <- queue.ErrEmpty
 		return m, subscribeMprisReqs(m.mprisCtrl.reqs)
 	case reqSetMode:
-		m2, cmd := m.applyMode(req.mode)
+		// 必须先回包再切模式：D-Bus 侧 prop.Set 持锁等待 reply，applyMode 内的
+		// notifyModeChanged→SyncMode 要抢同一把 prop 锁——先回包让 Set 返回
+		// 释放锁，避免循环等待死锁（reviewer 实证复现，回归测试见 mpris 包）。
 		req.reply <- nil
+		m2, cmd := m.applyMode(req.mode)
 		return m2, tea.Batch(cmd, subscribeMprisReqs(m.mprisCtrl.reqs))
 	}
 	req.reply <- nil
@@ -1706,6 +1714,10 @@ func (m Model) handleMprisReq(req mprisReq) (Model, tea.Cmd) {
 // notifyModeChanged 注释约定一致）；SetLoop 失败仅 toast 不阻断（模式已切换，
 // 与 s 键原行为一致）。
 func (m Model) applyMode(mode queue.Mode) (Model, tea.Cmd) {
+	// 同模式 no-op：不 SetLoop、不通知（与 queue.SetMode 同模式返回一致）
+	if m.queue.Mode() == mode {
+		return m, nil
+	}
 	prev := m.queue.Mode()
 	m.queue.SetMode(mode)
 	// 模式影响预加载门控（RepeatOne 跳过预载）：切换后立即重算目标

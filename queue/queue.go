@@ -232,7 +232,9 @@ func (q *Queue) SetMode(m Mode) {
 		return
 	}
 	if q.currentIdx == -1 {
-		rand.Shuffle(len(q.tracks), func(i, j int) {
+		// 无当前曲目：洗牌全部（同 ReplaceAll/尾部洗牌用 shuffleFn，
+		// 可注入确定性置换供测试）
+		shuffleFn(len(q.tracks), func(i, j int) {
 			q.tracks[i], q.tracks[j] = q.tracks[j], q.tracks[i]
 		})
 		return

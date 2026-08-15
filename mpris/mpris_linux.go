@@ -88,10 +88,20 @@ type propsStore interface {
 	GetMust(iface, name string) any
 }
 
+// ctrlRef 是 controller 的原子容器：atomic.Pointer 的 Load/Store 签名是 *T，
+// 接口类型不能直接作为类型参数（会退化为“指向接口的指针”），故用持有
+// 具体接口值的结构体包装；未注入时为 nil 指针（Store 前的零值，天然安全）。
+type ctrlRef struct{ c controller }
+
 // Server 是 MPRIS D-Bus 服务端：播放器事件推送属性，D-Bus 方法转调播放器。
 type Server struct {
-	p    playerLike
-	ctrl controller // 队列控制注入（main 经 SetController 注入；nil = 未注入）
+	p playerLike
+	// ctrl 队列控制注入（main 经 SetController 注入；nil = 未注入）。
+	// atomic.Pointer：SetController（main goroutine）与 D-Bus 回调/方法
+	// goroutine（Next/Previous/LoopStatus/Shuffle 回调、refreshNav）并发读写。
+	// 不用 s.mu 保护：回调在 prop 锁内执行，s.mu 与 prop 锁存在反向获取路径
+	// （handleEvent 先 s.mu 后 prop 锁 vs 回调先 prop 锁后 s.mu），会引入新死锁。
+	ctrl atomic.Pointer[ctrlRef]
 
 	conn     bus
 	props    propsStore
@@ -159,6 +169,9 @@ func (s *Server) Start() error {
 	if v, err := s.p.Volume(); err == nil {
 		s.props.SetMust(ifacePlayer, "Volume", clamp01(v/100))
 	}
+	// 补同步：SetController 在 Start 前调用时（main 先注入后 Start），
+	// 初始投影（LoopStatus/Shuffle/CanGoNext）在此补齐，不丢失。
+	s.syncFromController()
 
 	s.closeCh = make(chan struct{})
 	s.pumpDone = make(chan struct{})
@@ -199,14 +212,22 @@ func (s *Server) SetTrack(t *model.Track) {
 
 // SetController 注入队列控制器并初始化队列相关属性（LoopStatus/Shuffle/
 // CanGoNext/CanGoPrevious 按当前模式与队列长度投影）。幂等，可重复调用；
-// Start 前后均可调用（Start 前调用时属性存储未建，同步延后到 Start 后首次
-// 事件/操作）。未注入（nil）时 Next/Previous 返回 NotSupported、写回调 Failed。
+// Start 前后均可调用（Start 前调用时属性存储未建，Start 导出 props 后由
+// syncFromController 补同步）。未注入（nil）时 Next/Previous 返回
+// NotSupported、写回调 Failed。
 func (s *Server) SetController(ctrl controller) {
-	s.ctrl = ctrl
-	if ctrl == nil || s.props == nil {
+	s.ctrl.Store(&ctrlRef{c: ctrl})
+	s.syncFromController()
+}
+
+// syncFromController 按已注入 controller 的当前状态同步属性（Start 导出
+// props 后补同步：SetController 在 Start 前调用时初始投影不丢失；幂等）。
+func (s *Server) syncFromController() {
+	r := s.ctrl.Load()
+	if r == nil || r.c == nil || s.props == nil {
 		return
 	}
-	s.syncMode(ctrl.Mode())
+	s.syncMode(r.c.Mode())
 	s.refreshNav()
 }
 
@@ -227,10 +248,11 @@ func (s *Server) syncMode(m queue.Mode) {
 // 单曲/空队列均不可）。调用时机：SetController、每次播放事件后、
 // 每次 Next/Previous 转调后。
 func (s *Server) refreshNav() {
-	if s.props == nil || s.ctrl == nil {
+	r := s.ctrl.Load()
+	if s.props == nil || r == nil || r.c == nil {
 		return
 	}
-	can := s.ctrl.Len() > 1
+	can := r.c.Len() > 1
 	s.props.SetMust(ifacePlayer, "CanGoNext", can)
 	s.props.SetMust(ifacePlayer, "CanGoPrevious", can)
 }
@@ -341,10 +363,11 @@ func (s *Server) loopStatusCallback(c *prop.Change) *dbus.Error {
 	if !ok || (v != "None" && v != "Track" && v != "Playlist") {
 		return dbus.NewError("org.freedesktop.DBus.Error.InvalidArgs", nil)
 	}
-	if s.ctrl == nil {
+	r := s.ctrl.Load()
+	if r == nil || r.c == nil {
 		return dbus.MakeFailedError(errors.New("MPRIS 控制器未注入"))
 	}
-	s.ctrl.SetMode(modeForLoopStatus(v, s.ctrl.Mode()))
+	r.c.SetMode(modeForLoopStatus(v, r.c.Mode()))
 	return nil
 }
 
@@ -355,10 +378,11 @@ func (s *Server) shuffleCallback(c *prop.Change) *dbus.Error {
 	if !ok {
 		return dbus.NewError("org.freedesktop.DBus.Error.InvalidArgs", nil)
 	}
-	if s.ctrl == nil {
+	r := s.ctrl.Load()
+	if r == nil || r.c == nil {
 		return dbus.MakeFailedError(errors.New("MPRIS 控制器未注入"))
 	}
-	s.ctrl.SetMode(modeForShuffle(v, s.ctrl.Mode()))
+	r.c.SetMode(modeForShuffle(v, r.c.Mode()))
 	return nil
 }
 
@@ -442,10 +466,11 @@ func (h *playerHandler) SetPosition(trackId dbus.ObjectPath, position int64) *db
 // Next 转调队列控制器播放下一首（与首页 , 键同一编排路径）；
 // 空队列返回 NotSupported。
 func (h *playerHandler) Next() *dbus.Error {
-	if h.s.ctrl == nil {
+	r := h.s.ctrl.Load()
+	if r == nil || r.c == nil {
 		return notSupported()
 	}
-	if err := h.s.ctrl.PlayNext(); err != nil {
+	if err := r.c.PlayNext(); err != nil {
 		if errors.Is(err, queue.ErrEmpty) {
 			return notSupported()
 		}
@@ -458,10 +483,11 @@ func (h *playerHandler) Next() *dbus.Error {
 // Previous 转调队列控制器播放上一首（与首页 . 键同一编排路径）；
 // 空队列返回 NotSupported。
 func (h *playerHandler) Previous() *dbus.Error {
-	if h.s.ctrl == nil {
+	r := h.s.ctrl.Load()
+	if r == nil || r.c == nil {
 		return notSupported()
 	}
-	if err := h.s.ctrl.PlayPrevious(); err != nil {
+	if err := r.c.PlayPrevious(); err != nil {
 		if errors.Is(err, queue.ErrEmpty) {
 			return notSupported()
 		}

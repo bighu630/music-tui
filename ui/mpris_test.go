@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"music-tui/model"
 	"music-tui/queue"
@@ -89,6 +90,46 @@ func TestMprisReqSetModeSwitchesAndNotifies(t *testing.T) {
 	defer fp.mu.Unlock()
 	if len(fp.loops) == 0 || fp.loops[len(fp.loops)-1] != false {
 		t.Errorf("SetLoop 调用 = %v, want 末尾 false", fp.loops)
+	}
+}
+
+// TestMprisReqSetModeRepliesBeforeSync 死锁回归（对应 mpris 包
+// TestLoopStatusSetNoDeadlock 的 ui 侧）：reqSetMode 必须先回包再执行
+// applyMode。模拟真实接线：D-Bus 侧 prop.Set 持锁等待 reply，sink
+//（SyncMode→SetMust）在 reply 被消费前无法完成——修复前 applyMode 先于
+// 回包，sink 永等 reply → 循环等待死锁；修复后回包先行，sink 立即放行。
+// 修复前本测试 3 秒超时失败（handleMprisReq 永不返回）。
+func TestMprisReqSetModeRepliesBeforeSync(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	reply := make(chan error, 1)
+	lockReleased := make(chan struct{}) // 模拟 D-Bus 侧消费 reply 后释放 prop 锁
+	sinkDone := make(chan struct{})
+
+	m.mprisCtrl.SetModeSink(func(mode queue.Mode) {
+		<-lockReleased // 模拟 SetMust 等待 prop 锁（锁在 reply 消费后才释放）
+		close(sinkDone)
+	})
+
+	// D-Bus 侧：消费 reply（dispatch 返回 → callback 返回 → prop.Set 释放 p.mut）
+	go func() {
+		<-reply
+		close(lockReleased)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		update(m, mprisReqMsg{req: mprisReq{kind: reqSetMode, mode: queue.Shuffle, reply: reply}})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("死锁：reqSetMode 在回包前执行了 applyMode（sink 等待 reply 消费）")
+	}
+	<-sinkDone
+	if got := m.queue.Mode(); got != queue.Shuffle {
+		t.Errorf("模式 = %v, want Shuffle", got)
 	}
 }
 
