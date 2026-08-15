@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"music-tui/cache"
+	"music-tui/logger"
 )
 
 // DefaultMaxEntries 是缓存歌曲数上限默认值。
@@ -37,12 +38,19 @@ type Ytdlp struct {
 	Headers map[string]string `json:"headers"`
 }
 
+// Log 是日志配置：Level 为 "debug"/"info"/"warn"/"error"，
+// 缺失/空/非法回落 "info"（默认级别）。
+type Log struct {
+	Level string `json:"level"`
+}
+
 // Config 是顶层配置：缓存设置（嵌入 cache.Options，json tag 即文件格式）
-// + OpenAI 增强歌词配置 + yt-dlp 附加参数配置。
+// + OpenAI 增强歌词配置 + yt-dlp 附加参数配置 + 日志配置。
 type Config struct {
 	Cache  cache.Options `json:"cache"`
 	OpenAI OpenAI        `json:"openai"`
 	Ytdlp  Ytdlp         `json:"ytdlp"`
+	Log    Log           `json:"log"`
 }
 
 // Default 返回默认配置：缓存开启、上限 DefaultMaxEntries、
@@ -58,6 +66,8 @@ func Default() (*Config, error) {
 		Dir:        filepath.Join(dir, "music-tui"),
 	}, OpenAI: OpenAI{
 		Model: DefaultOpenAIModel,
+	}, Log: Log{
+		Level: "info",
 	}}, nil
 }
 
@@ -104,6 +114,9 @@ func Load(path string) (*Config, error) {
 		Ytdlp struct {
 			Headers map[string]string `json:"headers"`
 		} `json:"ytdlp"`
+		Log struct {
+			Level *string `json:"level"`
+		} `json:"log"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("解析配置文件: %w", err)
@@ -115,6 +128,8 @@ func Load(path string) (*Config, error) {
 		Dir:        d.Cache.Dir,
 	}, OpenAI: OpenAI{
 		Model: DefaultOpenAIModel,
+	}, Log: Log{
+		Level: "info",
 	}}
 	if raw.Cache.Enabled != nil {
 		c.Cache.Enabled = *raw.Cache.Enabled
@@ -135,6 +150,10 @@ func Load(path string) (*Config, error) {
 	}
 	if raw.OpenAI.BaseURL != nil {
 		c.OpenAI.BaseURL = *raw.OpenAI.BaseURL
+	}
+	// Log：level 缺失 → 默认 "info"；显式值经 logger 规范化（非法回落 "info"）
+	if raw.Log.Level != nil {
+		c.Log.Level = logger.NormalizeLevel(*raw.Log.Level)
 	}
 	// Ytdlp：map 字段天然区分「缺失/null → nil」与「显式 {} → 空 map」；
 	// nil 与空 map 语义一致，均为未配置（不附加任何参数）。

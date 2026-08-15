@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"music-tui/cache"
@@ -465,5 +466,53 @@ func TestSaveRoundtripYtdlp(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Ytdlp, cfg.Ytdlp) {
 		t.Errorf("ytdlp roundtrip 不一致: got %+v, want %+v", got.Ytdlp, cfg.Ytdlp)
+	}
+}
+
+// ── Log 配置节 ─────────────────────────────────────────────────
+
+func TestLogLevelDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	cfg, err := Load(path) // 文件不存在 → 生成默认
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Log.Level != "info" {
+		t.Errorf("默认 Log.Level = %q, want info", cfg.Log.Level)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"level": "info"`) {
+		t.Errorf("默认配置文件应含 log.level: %s", data)
+	}
+}
+
+func TestLogLevelParse(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{`{"log": {"level": "debug"}}`, "debug"},
+		{`{"log": {"level": "warn"}}`, "warn"},
+		{`{"log": {"level": "error"}}`, "error"},
+		{`{"log": {"level": "bogus"}}`, "info"},   // 非法回落
+		{`{"log": {"level": ""}}`, "info"},        // 空回落
+		{`{"cache": {"enabled": false}}`, "info"}, // 缺失回落（不破坏既有字段）
+	}
+	for _, c := range cases {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(c.in), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%s): %v", c.in, err)
+		}
+		if cfg.Log.Level != c.want {
+			t.Errorf("Load(%s) Log.Level = %q, want %q", c.in, cfg.Log.Level, c.want)
+		}
 	}
 }
