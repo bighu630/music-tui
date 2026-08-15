@@ -952,7 +952,10 @@ func (m Model) statusBarView() string {
 	left := "⏹ 未在播放"
 	if m.state.Track != nil {
 		icon := "⏵"
-		if !m.state.Playing {
+		switch {
+		case m.ended:
+			icon = "⏹" // 播放结束/出错停止：重播同曲语义，与空格行为一致
+		case !m.state.Playing:
 			icon = "⏸"
 		}
 		pos := 0
@@ -963,18 +966,27 @@ func (m Model) statusBarView() string {
 	}
 	right := ""
 	if m.state.Track != nil {
-		right = ansi.Truncate(m.state.Track.Title+" - "+m.state.Track.Artist, m.width/2, "…")
+		right = m.state.Track.Title + " - " + m.state.Track.Artist
 	}
 	style := lipgloss.NewStyle().Faint(true)
 	if m.width <= 0 {
 		return style.Render(left)
 	}
-	rightW := ansi.StringWidth(style.Render(right))
-	pad := m.width - ansi.StringWidth(style.Render(left)) - rightW
+	leftRendered := style.Render(left)
+	leftW := ansi.StringWidth(leftRendered)
+	// 右侧标题按剩余宽度动态截断（曾按 m.width/2 固定截断：窄窗口下
+	// left+right 超宽 → pad 钳 0 仍折行，状态栏被撑成两行）。
+	rightMax := m.width - leftW - 1
+	if rightMax < 0 {
+		rightMax = 0
+	}
+	right = ansi.Truncate(right, rightMax, "…")
+	rightRendered := style.Render(right)
+	pad := m.width - leftW - ansi.StringWidth(rightRendered)
 	if pad < 0 {
 		pad = 0
 	}
-	return style.Render(left) + strings.Repeat(" ", pad) + style.Render(right)
+	return leftRendered + strings.Repeat(" ", pad) + rightRendered
 }
 
 // toastText 按类型渲染 toast 文案（图标 + 颜色，与 lipgloss 主题一致）。
@@ -993,7 +1005,8 @@ func (m Model) toastText(t toast) string {
 
 // overlayToast 把活跃 toast 覆盖到完整输出（tabBar+body+statusBar）中状态栏
 // 上方一行的右端：行数不变、其余内容不变 → 出现/消失排版零跳动。
-// 无 toast 或行数不足时原样返回。超宽 toast 按窗口宽度截断。
+// 无 toast 或行数不足时原样返回。超宽 toast 按 m.width-2 截断（预留分隔符
+// 空间），覆盖行恒不超窗口宽度，不会触发终端折行把 Tab 栏滚出屏幕。
 func (m Model) overlayToast(out string) string {
 	if m.toast == nil || out == "" {
 		return out
@@ -1005,19 +1018,33 @@ func (m Model) overlayToast(out string) string {
 	idx := len(lines) - 2 // 状态栏上方一行
 	text := m.toastText(*m.toast)
 	tw := ansi.StringWidth(text)
-	if m.width > 0 && tw > m.width {
-		text = ansi.Truncate(text, m.width, "…")
+	// 截断基准 m.width-2（预留 "  " 分隔符 2 格）：覆盖行 = 截断 toast + "  "
+	// 恒 ≤ m.width，不折行。截断保留尾部语义——失败原因/后续动作（如
+	// “已重试 N 次，跳过继续播放”）在句尾，头部歌曲名在状态栏/队列已可见。
+	// 注意 ansi.TruncateLeft 的 n 是“从左侧删掉多少格”而非目标宽度
+	// （result = tw - n + prefixW，… 占 1 格）；且跨界字符整簇保留，结果可比
+	// tw - n + 1 再宽 1 格（CJK 宽字符），故 n 多给 1 格余量保证 ≤ m.width-2。
+	if m.width > 2 && tw > m.width-2 {
+		text = ansi.TruncateLeft(text, tw-m.width+4, "…")
 		tw = ansi.StringWidth(text)
 	}
 	keep := m.width - tw - 2
 	if keep < 0 {
 		keep = 0
 	}
+	// 截断后追加 reset，防止未闭合样式渗透进 toast（ansi.Truncate 截断 styled
+	// 行时样式 reset 可能落在 keep 点之后）
 	line := ""
 	if keep > 0 {
-		line = ansi.Truncate(lines[idx], keep, "")
+		line = ansi.Truncate(lines[idx], keep, "") + "\x1b[0m"
 	}
-	lines[idx] = line + "  " + text
+	if m.width <= 2 {
+		// 极端窄窗口：仅输出 toast 文本（无分隔符），避免 keep 钳 0 后
+		// line + "  " + text 仍超宽
+		lines[idx] = text
+	} else {
+		lines[idx] = line + "  " + text
+	}
 	return strings.Join(lines, "\n")
 }
 

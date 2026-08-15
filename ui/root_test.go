@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"music-tui/cache"
 	"music-tui/cover"
@@ -1603,6 +1604,43 @@ func TestRootViewToastLayoutStable(t *testing.T) {
 	}
 	if !strings.Contains(l2[23], "顺序") {
 		t.Errorf("播放态状态栏应含模式信息, got %q", l2[23])
+	}
+}
+
+// TestRootViewWideToastStaysWithinWidth 回归：超宽 toast 截断后覆盖行宽恒 ≤ 窗口
+// 宽度——曾按 m.width 截断后仍追加分隔符导致覆盖行 m.width+2 格、终端折行超屏。
+func TestRootViewWideToastStaysWithinWidth(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	long := "「这是一首名字特别特别特别特别特别特别特别特别特别特别长的歌」播放失败：YouTube 拒绝访问（风控/限流），可稍后重试，已重试 2 次，跳过继续播放"
+	m, _ = m.showToast(long, toastWarning)
+	out := m.View()
+	if got := len(strings.Split(out, "\n")); got != 24 {
+		t.Fatalf("超宽 toast View 行数 = %d, want 24（不超屏）", got)
+	}
+	lines := strings.Split(out, "\n")
+	if w := ansi.StringWidth(lines[22]); w > 80 {
+		t.Errorf("覆盖行宽 = %d, want ≤ 80", w)
+	}
+	if !strings.Contains(lines[22], "跳过继续播放") {
+		t.Errorf("超宽 toast 应从右侧截断保留尾部语义, got %q", lines[22])
+	}
+}
+
+// TestStatusBarLongTitleTruncated 回归：状态栏右侧标题按剩余宽度截断，
+// 窄窗口也不折行（曾按 m.width/2 固定截断，窄窗口 left+right 溢出折行）。
+func TestStatusBarLongTitleTruncated(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("一首名字特别长特别长特别长特别长特别长特别长的歌"))
+	_ = execCmds(cmd)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	lines := strings.Split(m.View(), "\n")
+	if w := ansi.StringWidth(lines[23]); w > 40 {
+		t.Errorf("窄窗口状态栏行宽 = %d, want ≤ 40", w)
+	}
+	if !strings.Contains(lines[23], "顺序") {
+		t.Errorf("窄窗口状态栏应含模式信息, got %q", lines[23])
 	}
 }
 
