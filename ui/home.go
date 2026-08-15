@@ -451,10 +451,6 @@ func (m homeModel) lyricLineCount() int {
 // lyricsHeight 歌词视口高度：歌词行数已知且少于中间区高时收缩到行数
 // （歌词列内容垂直居中，而非顶部对齐）；行数未知/超多时占满中间区
 // （viewport 滚动 + scrollLyricsTo 当前行居中）。
-// lyricMaxLines 歌词视口最大行数：当前行恒居中（上 10 下 10）。
-// 窄窗口（中间区高 < 21）时视口收缩到中间区高。
-const lyricMaxLines = 21
-
 func (m homeModel) lyricsHeight() int {
 	midH := m.middleHeight()
 	maxH := midH
