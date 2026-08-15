@@ -107,6 +107,33 @@ func TestInitFailureDegrades(t *testing.T) {
 	SetLevel(LevelInfo)
 }
 
+func TestRotation(t *testing.T) {
+	path := setup(t)
+	MaxFileSize = 140
+	for i := 0; i < 5; i++ {
+		Info("%s", strings.Repeat(string(rune('A'+i)), 30))
+	}
+	content := readFile(t, path)
+	// 主文件：第二次轮转后写入的最新行（E）
+	if !strings.Contains(content, "EEEE") {
+		t.Errorf("轮转后主文件应含最新行 E: %q", content)
+	}
+	if strings.Contains(content, "AAAA") {
+		t.Errorf("轮转后主文件不应含首行 A: %q", content)
+	}
+	old, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("轮转文件缺失: %v", err)
+	}
+	// .1：第二次轮转的 chunk（C、D），最早 chunk（A、B）已被替换
+	if !strings.Contains(string(old), "CCCC") || !strings.Contains(string(old), "DDDD") {
+		t.Errorf(".1 应含 C、D: %q", string(old))
+	}
+	if strings.Contains(string(old), "AAAA") {
+		t.Errorf(".1 不应含最早的 A（旧 .1 应被替换）: %q", string(old))
+	}
+}
+
 func TestConcurrentWrites(t *testing.T) {
 	path := setup(t)
 	const goroutines = 8
