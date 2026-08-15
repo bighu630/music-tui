@@ -436,6 +436,7 @@ func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cove
 // 缓存已由当前曲 TrackStarted 的预热覆盖，预载纯属重复；且在 TrackStarted 之前
 //（startPlay/切歌后立即刷新）预载当前曲会与 mpv 取流并发访问同一 URL，放大
 // 403 风控（与"预热移后到 TrackStarted"同一回归动机）。
+// 本地曲目（Source=local）不设目标：本地文件无需预下载，网络缓存对本地文件无意义。
 //
 // 调用点：TrackStartedEvent（预热当前曲之后）、全部队列形态变更（增/删/清/跳转/
 // 替换）、模式切换（cycleMode）、播放停止（stopAfterEnd、ErrorEvent 置 ended 分支）、
@@ -450,11 +451,11 @@ func (m Model) refreshPreload() {
 		m.preloader.SetTarget(nil)
 		return
 	}
-	if next, ok := m.queue.PeekNext(); ok && next.ID != m.state.Track.ID {
+	if next, ok := m.queue.PeekNext(); ok && next.ID != m.state.Track.ID && next.Source != model.SourceLocal {
 		m.preloader.SetTarget(&next)
 		return
 	}
-	// 空队列或回绕到当前曲自身：无有效预载目标
+	// 空队列、回绕到当前曲自身或下一首为本地曲目：无有效预载目标
 	m.preloader.SetTarget(nil)
 }
 
@@ -1322,7 +1323,9 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		// 缓存预热：mpv 取流成功后才启动后台下载——避免与 mpv 内置 yt-dlp
 		// 并发访问同一 URL 放大 403 风控（回归：连播未缓存下一首卡住）。
 		// CacheAsync 对 Disabled/已存在/在途条目均为 no-op，playingFromCache 时安全。
-		if m.cache != nil && m.state.Track != nil {
+		// 本地曲目不参与缓存（本地文件无需下载，缓存无意义）：CacheAsync 层另有
+		// Source=local no-op 防御，此处显式跳过避免无效调用。
+		if m.cache != nil && m.state.Track != nil && m.state.Track.Source != model.SourceLocal {
 			m.cache.CacheAsync(*m.state.Track)
 		}
 		// 预加载：当前曲确认开始后预下载队列下一首（门控见 refreshPreload；
@@ -1674,23 +1677,33 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 	m.home = m.home.resetForTrack(&track)
 	m.queuePage = m.queuePage.setAITrack("", "") // 切歌：AI 展示覆盖作废
 	target := track.URL
-	if path, ok := m.cache.Lookup(track.ID); ok {
-		target = path
-		m.playingFromCache = true
-		logger.Info("播放(缓存命中): %s - %s (id=%s) 文件=%s", track.Title, track.Artist, track.ID, path)
-	} else {
-		m.playingFromCache = false
-		logger.Info("播放: %s - %s (id=%s) url=%s", track.Title, track.Artist, track.ID, track.URL)
-		// 缓存预热不在 beginPlay 触发（见上方注释）：TrackStarted 统一启动
-	}
-	// 缓存兜底监听（仅 URL 路径）：本曲已有在途下载（preload 预载/预热）时注册监听——
-	// 下载完成若 mpv 仍未开始播放（TrackStarted 未到），自动改用本地缓存文件（用户需求：
-	// “下载完成后如果 mpv 还是没有播放就改用下载的文件播放”）。只监听不启动：
-	// 启动下载会与 mpv 内置 yt-dlp 并发访问同一 URL 放大 403 风控（6440188 教训），
-	// 下载启动统一由 TrackStarted 预热/兜底分支负责。
+	// 本地曲目不参与网络缓存：mpv 直接 loadfile 本地路径即可（缓存对本地文件
+	// 无意义），跳过 Lookup（不查询/刷新缓存索引）与 WaitDone 兜底监听（本地
+	// 文件不存在“下载完成切本地”的兜底场景）。网络曲目：命中 → 播缓存文件
+	//（playingFromCache 置位，后续 LoadFailed 时据此移除损坏条目）；未命中 →
+	// 播网络 URL（缓存预热统一在 TrackStarted 触发）。
 	var cacheDoneCmd tea.Cmd
-	if done := m.cache.WaitDone(track.ID); done != nil {
-		cacheDoneCmd = waitCacheDone(m.cache, track.ID, m.playGen, done)
+	if track.Source == model.SourceLocal {
+		m.playingFromCache = false
+		logger.Info("播放(本地文件): %s - %s path=%s", track.Title, track.Artist, track.URL)
+	} else {
+		if path, ok := m.cache.Lookup(track.ID); ok {
+			target = path
+			m.playingFromCache = true
+			logger.Info("播放(缓存命中): %s - %s (id=%s) 文件=%s", track.Title, track.Artist, track.ID, path)
+		} else {
+			m.playingFromCache = false
+			logger.Info("播放: %s - %s (id=%s) url=%s", track.Title, track.Artist, track.ID, track.URL)
+			// 缓存预热不在 beginPlay 触发（见上方注释）：TrackStarted 统一启动
+		}
+		// 缓存兜底监听（仅 URL 路径）：本曲已有在途下载（preload 预载/预热）时注册监听——
+		// 下载完成若 mpv 仍未开始播放（TrackStarted 未到），自动改用本地缓存文件（用户需求：
+		// “下载完成后如果 mpv 还是没有播放就改用下载的文件播放”）。只监听不启动：
+		// 启动下载会与 mpv 内置 yt-dlp 并发访问同一 URL 放大 403 风控（6440188 教训），
+		// 下载启动统一由 TrackStarted 预热/兜底分支负责。
+		if done := m.cache.WaitDone(track.ID); done != nil {
+			cacheDoneCmd = waitCacheDone(m.cache, track.ID, m.playGen, done)
+		}
 	}
 	if err := m.player.Play(target); err != nil {
 		logger.Error("播放命令失败: %s - %s (id=%s): %v", track.Title, track.Artist, track.ID, err)
@@ -1765,6 +1778,8 @@ func (m Model) saveSession() {
 // 见 mpv.go PlayPaused）。命中缓存 → 播本地文件（fromCache 标记回填至
 // playingFromCache，异步 LoadFailedError 时据此移除损坏条目）；未命中 →
 // 播网络 URL（缓存预热在 TrackStartedEvent 后触发，见下）。
+// 本地曲目（Source=local）跳过 Lookup：缓存对本地文件无意义，fromCache 恒
+// false，直接 PlayPaused 本地路径。
 // IPC 层失败（PlayPaused 命令被拒）与缓存文件无关，不删条目。
 // 缓存预热统一在 TrackStartedEvent 后触发（与 beginPlay 一致）：PlayPaused
 // 的 IPC 成功只代表命令被接受，mpv 取流成功（file-loaded）后才启动后台
@@ -1775,9 +1790,13 @@ func resumeCmd(m Model) tea.Cmd {
 	return func() tea.Msg {
 		target := track.URL
 		fromCache := false
-		if path, ok := m.cache.Lookup(track.ID); ok {
-			target = path
-			fromCache = true
+		// 本地曲目不参与网络缓存：mpv 直接播放本地路径（缓存对本地文件无意义），
+		// 跳过 Lookup（不查询/刷新缓存索引，fromCache 恒 false）。
+		if track.Source != model.SourceLocal {
+			if path, ok := m.cache.Lookup(track.ID); ok {
+				target = path
+				fromCache = true
+			}
 		}
 		logger.Info("续播恢复: %s - %s (id=%s) pos=%.1f fromCache=%v", track.Title, track.Artist, track.ID, pos, fromCache)
 		if err := m.player.PlayPaused(target, pos); err != nil {

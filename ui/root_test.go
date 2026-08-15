@@ -3192,3 +3192,139 @@ func TestCacheFallbackPauseCancelRefreshesPreload(t *testing.T) {
 		t.Errorf("取消兜底后预加载目标应清空: got %+v, want nil", m.preloader.Target())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 本地曲目（Source=local）播放链路完全绕过网络缓存
+// ---------------------------------------------------------------------------
+// 本地文件已在磁盘，缓存命中/下载/兜底对本地曲目无意义：beginPlay 不查
+// Lookup、不注册 WaitDone 兜底监听；TrackStarted 不预热；预加载不预载本地
+// 下一首；续播恢复不查 Lookup。cache 层 CacheAsync 另有 Source=local no-op
+// 防御（cache/cache_test.go TestCacheAsyncLocalTrackNoOp）。
+
+// localTestTrack 构造本地曲目：ID/URL 均为绝对路径（与 local 包扫描产物
+// 同构），播放链路应直接交给 mpv 播放、完全不触碰网络缓存。
+func localTestTrack() model.Track {
+	return model.Track{
+		ID:       "/data/music/测试本地歌曲.mp3",
+		Title:    "测试本地歌曲",
+		Artist:   "测试歌手",
+		Duration: 200,
+		URL:      "/data/music/测试本地歌曲.mp3",
+		Source:   model.SourceLocal,
+		CoverURL: "",
+	}
+}
+
+// beginPlay 本地曲目：不查 Lookup（playingFromCache 恒 false，mpv 直接播放
+// 本地绝对路径）、不注册 WaitDone 兜底监听。验证手法：预置同名 ID 的在途下载
+//（假 yt-dlp 50ms 后落盘成功）——若 beginPlay 误注册 WaitDone 监听，下载完成
+// 信号到达后缓存兜底分支会命中缓存并重播本地文件（playCount=2 + “已改用缓存
+// 文件” toast）；正确实现则无监听、无重播（防未来调用点对本地曲目启动下载的
+// 极端场景）。
+func TestBeginPlayLocalTrackSkipsCache(t *testing.T) {
+	m, fp, cm, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpOK(t))
+	tr := localTestTrack()
+
+	// 伪造同名 ID 的在途下载（Source=youtube，仅 ID 与本地曲目相同）：
+	// beginPlay 若误查 WaitDone 会拿到该信号并注册兜底监听
+	done := cm.CacheAsync(model.Track{ID: tr.ID, URL: "https://youtube.com/watch?v=x"})
+	if done == nil {
+		t.Fatal("前置：应在途下载")
+	}
+	if cm.WaitDone(tr.ID) == nil {
+		t.Fatal("前置：inflight 应已注册")
+	}
+
+	m, cmd := m.startPlay(tr)
+	// 展开 batch 并回灌结果（测试驱动方式，与既有缓存测试一致）：
+	// 若本地曲目误注册了 WaitDone 监听，这里会等到下载完成并触发缓存兜底重播
+	m, _ = update(m, cmd().(tea.BatchMsg))
+	if fp.playCount() != 1 || fp.lastPlayed() != tr.URL {
+		t.Fatalf("本地曲目应直接播放本地绝对路径且不触发缓存兜底重播: playCount=%d lastPlayed=%q, want 1/%q", fp.playCount(), fp.lastPlayed(), tr.URL)
+	}
+	if m.playingFromCache {
+		t.Error("本地曲目 playingFromCache 应为 false（跳过 Lookup）")
+	}
+	if strings.Contains(activeToastText(m), "已改用缓存文件") {
+		t.Errorf("本地曲目不应注册 WaitDone 兜底监听: toast = %q", activeToastText(m))
+	}
+}
+
+// TrackStartedEvent 预热：本地曲目不触发 CacheAsync（网络缓存对本地文件无意义）。
+// 假 yt-dlp 脚本记录调用：播放本地曲目 + TrackStarted 后不得有任何下载调用，
+// 也不得产生 inflight 条目。
+func TestTrackStartedLocalSkipsCacheWarmup(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	logPath := filepath.Join(t.TempDir(), "ytdlp.log")
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, writeFakeYtDlpScript(t, logPath), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newTestModelBaseWithCache(t, fp, fa, nil, nil, cm)
+	tr := localTestTrack()
+
+	m, cmd := m.startPlay(tr)
+	_ = execCmds(cmd)
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	time.Sleep(200 * time.Millisecond) // 若误触发下载，假脚本会立即执行
+	if got := ytDlpCallCount(logPath); got != 0 {
+		t.Fatalf("本地曲目 TrackStarted 后不应触发缓存预热下载, calls = %d", got)
+	}
+	if done := cm.WaitDone(tr.ID); done != nil {
+		t.Fatalf("本地曲目不应产生 inflight 下载条目")
+	}
+}
+
+// refreshPreload：队列下一首是本地曲目时不 SetTarget——本地文件无需预下载
+//（预载目标保持空，不跳过本地曲目向后找下一首网络曲目）。
+func TestPreloadLocalNextSkipsTarget(t *testing.T) {
+	fp := newFakePlayer()
+	m := preloadTestModel(t, fp)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	// 追加本地曲目为下一首 + TrackStarted：PeekNext 命中本地曲目 → 不设目标
+	m, _ = update(m, trackAppendMsg{track: localTestTrack()})
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	if got := targetID(m); got != "" {
+		t.Fatalf("本地下一首不应设置预加载目标, got %q, want 空", got)
+	}
+	// 再追加一首网络曲目：下一首仍为本地曲目 → 目标保持空（不跳过本地向后找）
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
+	if got := targetID(m); got != "" {
+		t.Fatalf("下一首为本地曲目时预加载目标应保持空, got %q", got)
+	}
+}
+
+// 续播恢复：本地曲目跳过缓存 Lookup（fromCache 恒 false，直接 PlayPaused
+// 本地绝对路径）——即使缓存中预置了同名条目也不得命中（本地文件不参与缓存，
+// 命中会错误地把播放目标替换成缓存文件路径）。
+func TestResumeLocalTrackSkipsCacheLookup(t *testing.T) {
+	tr := localTestTrack()
+	q := queue.New()
+	q.Replace(tr)
+	q.Add(testTrack("c")) // 下一首：保证队列非空，恢复路径正常建立
+	st := &session.State{Queue: q.Snapshot(), Position: 10, Ended: false}
+	m, fp, cm, dir := newCacheTestModelWithYtdlp(t, st, "/nonexistent/yt-dlp")
+
+	// 预置同名缓存条目：若 resumeCmd 误查 Lookup 会命中并播放缓存文件
+	presetCache(t, cm, dir, tr.ID)
+
+	msgs := execCmds(resumeCmd(m))
+	var res resumeResultMsg
+	for _, msg := range msgs {
+		if r, ok := msg.(resumeResultMsg); ok {
+			res = r
+		}
+	}
+	if res.fromCache {
+		t.Fatal("本地曲目恢复 fromCache 应为 false（跳过 Lookup）")
+	}
+	if fp.pausedCount() != 1 || fp.lastPaused() != tr.URL {
+		t.Fatalf("恢复应 PlayPaused 本地绝对路径: paused=%d last=%q, want %q", fp.pausedCount(), fp.lastPaused(), tr.URL)
+	}
+	m, _ = update(m, msgs[0])
+	if m.playingFromCache {
+		t.Error("本地曲目恢复后 playingFromCache 应为 false")
+	}
+}
