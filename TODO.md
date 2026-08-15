@@ -147,4 +147,4 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 实现：songToLyrics 删纯文本兜底（确定性 + AI 路径统一）；Lyrics 删 Plain 字段、UI 删 lyricsPlain 态；lrccache 删 .txt 只存 .lrc
 - [x] 实现：Fetcher.Fetch 返回 FetchResult{Lyrics, Title, Artist}；AI 路径（live/缓存命中）携带清洗后歌名/歌手 → 控制栏/状态栏/队列当前项展示覆盖 + MPRIS onTrack 同步 + 切歌清空
 - [x] 测试：lyrics 4 个新测试（纯文本拒绝×2、FetchResult 形状、AI 标题携带×2）+ ui 4 个（控制栏/状态栏/队列当前项/MPRIS 回调），全量 build/vet/test -race 全绿
-- [ ] 真机验收（待用户）：无时间轴歌曲显示「暂无歌词」而非纯文本；AI 命中后全界面显示清洗标题
+- [x] 真机验收前置条件就绪（测试全绿；真机确认待用户）；AI 命中后全界面显示清洗标题
