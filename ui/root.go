@@ -1031,9 +1031,6 @@ func (m Model) overlayToast(out string) string {
 		return out
 	}
 	lines := strings.Split(out, "\n")
-	if len(lines) < 1 {
-		return out
-	}
 	idx := len(lines) - 1 // 最后一行 = 状态栏行
 	text := m.toastText(*m.toast)
 	if m.width > 0 {
