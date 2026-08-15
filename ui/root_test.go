@@ -2012,6 +2012,21 @@ func TestStatusBarLyricCenter(t *testing.T) {
 	if w := ansi.StringWidth(last); w > 80 {
 		t.Errorf("状态栏行宽 = %d, want ≤ 80", w)
 	}
+
+	// 超长歌词行：中间段截断含省略号，行宽恒 ≤ 80
+	ly2, err := lyrics.ParseLRC([]byte("[00:10.00]" + strings.Repeat("很长的歌词", 20) + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly2})
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12}})
+	last = strings.Split(m.View(), "\n")[len(strings.Split(m.View(), "\n"))-1]
+	if !strings.Contains(stripAnsiForTest(last), "…") {
+		t.Errorf("超长歌词行应中间截断含省略号, got %q", last)
+	}
+	if w := ansi.StringWidth(last); w > 80 {
+		t.Errorf("超长歌词行状态栏行宽 = %d, want ≤ 80", w)
+	}
 }
 
 // TestToastLifecycle 集成：showToast 覆盖语义 + 过期消息 id 匹配/不匹配。

@@ -1077,8 +1077,8 @@ func (m Model) statusBarView() string {
 			midRendered = strings.Repeat(" ", midPad) + midRendered
 		}
 	}
-	// 组装：left + 1 空格 + mid（居中）+ 1 空格 + right；总宽恒 = m.width。
-	// midW 被截 0 时左右间距也置 0（防极端窄窗口下 1 格溢出折行）。
+	// 组装：left + 1 空格 + mid（居中）+ 1 空格 + right。
+	// 一侧无内容时该侧间距归零（总宽 = m.width 或 m.width-1，恒不超宽不折行）。
 	midRendered += strings.Repeat(" ", midW-ansi.StringWidth(midRendered))
 	padL := 1
 	if leftW == 0 || midW == 0 {
