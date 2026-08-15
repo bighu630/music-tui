@@ -202,8 +202,8 @@ func (s searchModel) view() string {
 	sb.WriteString(s.input.View())
 	sb.WriteString("\n\n")
 	switch s.state {
-	case searchIdle:
-		sb.WriteString(lipgloss.NewStyle().Faint(true).Render("输入关键词后按 Enter 搜索"))
+	// case searchIdle:
+	// 	sb.WriteString(lipgloss.NewStyle().Faint(true).Render("输入关键词后按 Enter 搜索"))
 	case searchLoading:
 		sb.WriteString(s.spinner.View() + " 搜索中…")
 	case searchDone:
