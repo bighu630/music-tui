@@ -84,11 +84,15 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("加载配置失败: %w", err)
 	}
-	cm := loadCache(cfg.Cache, ytdlpPath)
+	// yt-dlp 全局 cookie：复用 YT Music 登录配置（未登录则无 cookie）。
+	// 启动时快照：浏览器 cookie 过期需重启应用刷新（与 mpv 取流参数限制一致）。
+	cookieFile, _ := ytStore.CookieFile() // 未登录/不可读 → 无 cookie，不阻止启动
+	ytdlpHeaders := cfg.Ytdlp.Headers
+	cm := loadCache(cfg.Cache, ytdlpPath, cookieFile, ytdlpHeaders)
 
 	// 3. 启动 mpv（defer 保证退出时清理进程与 socket）
 	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("music-tui-%d.sock", os.Getpid()))
-	mpv := player.NewMpvPlayer(mpvPath, sockPath)
+	mpv := player.NewMpvPlayer(mpvPath, sockPath, cookieFile, ytdlpHeaders)
 	if err := mpv.Start(); err != nil {
 		return fmt.Errorf("启动 mpv 失败: %w", err)
 	}
@@ -105,6 +109,7 @@ func run() error {
 
 	// 4. 组装服务并启动 TUI（退出后 run 返回，defer 清理 mpv）
 	searchAdapter := search.NewYouTubeAdapter(ytdlpPath)
+	searchAdapter.SetGlobalYTDlp(cookieFile, ytdlpHeaders)
 	lc := lyrics.NewClient(userAgent)
 	var lyClient lyrics.Fetcher = lc
 	if cfg.OpenAI.APIKey != "" {
@@ -129,6 +134,7 @@ func run() error {
 		cm,
 		ytm.NewClient(ytStore, searchAdapter),
 		mprisSrv.SetTrack,
+		cookieFile != "" || len(ytdlpHeaders) > 0,
 	)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	if _, err := p.Run(); err != nil {
@@ -196,8 +202,8 @@ func loadConfig(path string) (*config.Config, error) {
 
 // loadCache 初始化音频缓存：索引文件损坏（崩溃/断电截断）时备份后重试一次；
 // 仍失败仅警告并降级为禁用态缓存——缓存绝不影响播放主功能（不阻止启动）。
-func loadCache(opts cache.Options, ytdlpPath string) *cache.Manager {
-	cm, err := cache.New(opts, ytdlpPath)
+func loadCache(opts cache.Options, ytdlpPath, cookieFile string, headers map[string]string) *cache.Manager {
+	cm, err := cache.New(opts, ytdlpPath, cookieFile, headers)
 	if err == nil {
 		return cm
 	}
@@ -208,7 +214,7 @@ func loadCache(opts cache.Options, ytdlpPath string) *cache.Manager {
 			backup := fmt.Sprintf("%s.corrupt-%d", idxPath, time.Now().UnixNano())
 			if berr := os.Rename(idxPath, backup); berr == nil {
 				fmt.Fprintf(os.Stderr, "music-tui: 警告：缓存索引损坏，已备份至 %s 并重建\n", backup)
-				if cm, retryErr := cache.New(opts, ytdlpPath); retryErr == nil {
+				if cm, retryErr := cache.New(opts, ytdlpPath, cookieFile, headers); retryErr == nil {
 					return cm
 				}
 			}
