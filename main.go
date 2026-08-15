@@ -18,6 +18,7 @@ import (
 	"music-tui/history"
 	"music-tui/logger"
 	"music-tui/lyrics"
+	"music-tui/lyricshm"
 	"music-tui/mpris"
 	"music-tui/player"
 	"music-tui/playlists"
@@ -144,6 +145,7 @@ func run() error {
 		ytm.NewClient(ytStore, searchAdapter),
 		mprisSrv.SetTrack,
 		cookieFile != "" || len(ytdlpHeaders) > 0,
+		lyricshm.New(lyricshm.DefaultPath),
 	)
 	// MPRIS 队列控制注入：ui 侧桥实现 mpris 包的 controller 接口（编译期检查）；
 	// 模式变更经 sink 同步回 MPRIS 属性（LoopStatus/Shuffle 投影 + PropertiesChanged）。

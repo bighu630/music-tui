@@ -19,6 +19,7 @@ import (
 	"music-tui/history"
 	"music-tui/logger"
 	"music-tui/lyrics"
+	"music-tui/lyricshm"
 	"music-tui/model"
 	"music-tui/player"
 	"music-tui/playlists"
@@ -346,9 +347,10 @@ type Model struct {
 // onTrack 在播放状态变化时同步回调当前曲目（nil 表示无曲目；可为 nil）。
 // ytdlpConfigured 表示已配置 yt-dlp cookie/headers（未配置且取流风控类失败时，
 // 失败提示附加 YT Music 登录 cookie 配置引导）。
-// 若 sess 存在已保存会话（队列 + 进度），同步恢复队列与播放状态（暂停态），
+// 若 sess 存在已保存会话(队列 + 进度),同步恢复队列与播放状态(暂停态),
 // mpv 的静默加载由 Init 返回的 resumeCmd 完成。
-func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, cm *cache.Manager, yt *ytm.Client, onTrack func(*model.Track), ytdlpConfigured bool) Model {
+// lyricFile 为歌词行实时写入器(nil = 不启用,如测试环境)。
+func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, cm *cache.Manager, yt *ytm.Client, onTrack func(*model.Track), ytdlpConfigured bool, lyricFile *lyricshm.Writer) Model {
 
 	m := Model{
 		player:          p,
@@ -371,6 +373,7 @@ func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cove
 		queuePage:       newQueueModel(),
 		plPage:          newPlaylistModel(),
 	}
+	m.home.lyricFile = lyricFile
 	// 预加载调度器随模型创建：cm 可为 nil（未配置缓存），Scheduler 内部已
 	// 做 nil 安全 no-op（SetTarget 直接返回，worker 恒无目标）。
 	m.preloader = preload.New(cm)
