@@ -142,7 +142,7 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 实现：lyrics/ai.go（REST 客户端 + prompt + 解析）、client.go（FetchForQuery + 3s 严格阈值）、aicache.go（JSONL 负缓存 + single-flight）、lrccache.go（LRC 文件缓存）、enhanced.go（混合流程编排）、config OpenAI 节（0600 权限）、ui Fetcher 接口 + 「AI 匹配」标识、main 接线 ✅（commit 287f514 + 12a3ddc + 23bf396）
 - [x] 审查：reviewer 两轮批准（5 项 🟡 修复：视口高度预留/0600/超长行续扫/single-flight/重试分类 + 4 项加固）✅
 - [x] 测试：新增 65 个（ai 19 + 严格阈值 6 + aicache 10 + lrccache 9 + enhanced 12 + config 7 + ui 2 + main 1，含 -count=5 -race 稳定性），全量 build/vet/test -race 全绿
-- [ ] 真机验收（待用户）：配置 api_key 后播放噪声标题曲目 → 歌词经 AI 兜底命中且显示「AI 匹配」；二次播放零请求（缓存命中）；无配置行为不变
+- [ ] 真机验收（待用户）：配置 api_key 后播放噪声标题曲目 → 歌词经 AI 兜底命中且清洗标题生效（「AI 匹配」标识已于 8-15 按用户要求移除，不再显示）；二次播放零请求（缓存命中）；无配置行为不变
 
 ## 追加需求（用户 8-15 反馈）：sync-only 歌词 + AI 标题全局展示覆盖
 

@@ -1003,8 +1003,8 @@ func TestHomeResizeRelayout(t *testing.T) {
 	}
 }
 
-// TestHomeLyricsAISourceTag AI 来源歌词渲染「AI 匹配」标识，
-// 确定性来源不显示。
+// TestHomeLyricsAISourceTag AI 来源歌词不再显示「AI 匹配」标识（用户要求
+// 移除，home.go 中对应渲染块已注释），确定性来源同样不显示。
 func TestHomeLyricsAISourceTag(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -1017,11 +1017,11 @@ func TestHomeLyricsAISourceTag(t *testing.T) {
 	}
 	ly.Source = lyrics.LyricsSourceAI
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
-	if !strings.Contains(m.home.view(), "AI 匹配") {
-		t.Error("AI 来源歌词应显示「AI 匹配」标识")
+	if strings.Contains(m.home.view(), "AI 匹配") {
+		t.Error("AI 来源歌词不应显示「AI 匹配」标识（已移除）")
 	}
 
-	// 确定性来源（Source 空）：不显示标识
+	// 确定性来源（Source 空）：同样不显示
 	ly2, _ := lyrics.ParseLRC([]byte("[00:10.00]第二行\n"))
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly2})
 	if strings.Contains(m.home.view(), "AI 匹配") {
@@ -1029,8 +1029,8 @@ func TestHomeLyricsAISourceTag(t *testing.T) {
 	}
 }
 
-// TestHomeLyricsHeightReservesAITag AI 来源标识占 1 行：padding 模型下视口
-// 自带上下留白（H = midH−4），AI 标识行 + 视口内容 ≤ midH，不推挤底部控制栏。
+// TestHomeLyricsHeightReservesAITag 歌词高度与来源无关（AI 标识已移除）：
+// padding 模型下视口自带上下留白（H = midH−4），不推挤底部控制栏。
 func TestHomeLyricsHeightReservesAITag(t *testing.T) {
 	build := func(source string, lineCount int) homeModel {
 		ly, _ := lyrics.ParseLRC([]byte(strings.Repeat("[00:01.00]行\n", lineCount)))
