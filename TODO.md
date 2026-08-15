@@ -182,3 +182,4 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 测试：logger 8 个（过滤/格式/轮转/并发/降级/大小写）+ config 2 个，全量 build/vet/test -race 全绿
 - [x] 用法：tail -f /tmp/music-tui.log（排查问题临时把 config.json 的 log.level 改 "debug"）
 - [x] 状态栏中间段显示当前歌词行（用户反馈）：三段式 左名称 + 中歌词行（居中，无歌词留空）+ 右播放顺序；首页留空 ✅（commit 64e183f/595338b，已合并 master 7660640）
+- [x] 状态栏歌词行高亮与首页歌词区一致（用户反馈）：提取共享 lyricActiveStyle（加粗 + 粉色 212），rebuildLyrics 与状态栏中间段共用 ✅（commit 092cde9，已合并 master）
