@@ -184,6 +184,17 @@ func TestTabBarCentered(t *testing.T) {
 	if gotPad != 0 {
 		t.Errorf("Width=20（小于标签总宽 %d）时不应居中，前缀空格 = %d", totalWidth, gotPad)
 	}
+
+	// 窗口宽度恰等于标签总宽：不居中（pad=0）且首行满宽
+	m, _ = update(m, tea.WindowSizeMsg{Width: totalWidth, Height: 24})
+	lines = strings.Split(stripANSI(m.View()), "\n")
+	gotPad = len(lines[0]) - len(strings.TrimLeft(lines[0], " "))
+	if gotPad != 0 {
+		t.Errorf("Width=标签总宽 %d 时不应居中，前缀空格 = %d", totalWidth, gotPad)
+	}
+	if ansi.StringWidth(lines[0]) != totalWidth {
+		t.Errorf("Width=标签总宽时首行应满宽 %d 列，实际 %d 列", totalWidth, ansi.StringWidth(lines[0]))
+	}
 }
 
 // ---- 鼠标交互（点击切换 + hover 高亮） ----
@@ -356,6 +367,15 @@ func TestMouseClickCenteredTabBar(t *testing.T) {
 		t.Errorf("点击左侧留白 (x=%d) 不应切页, current = %v", pad-1, m2.current)
 	}
 
+	// 点击标签行右侧留白（标签行右缘之后）→ 不切页
+	rightPad := pad + last.col + ansi.StringWidth(last.text)
+	m2, _ = update(m, tea.MouseMsg{
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: rightPad, Y: 0,
+	})
+	if m2.current != pageHome {
+		t.Errorf("点击右侧留白 (x=%d) 不应切页, current = %v", rightPad, m2.current)
+	}
+
 	// 悬停居中"队列"标签 → 下划线高亮
 	hx := pad + seps[1].col + 1
 	m2, _ = update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: hx, Y: 0})
@@ -364,6 +384,15 @@ func TestMouseClickCenteredTabBar(t *testing.T) {
 	}
 	if !strings.Contains(m2.View(), tabHoverStyle.Render("队列")) {
 		t.Error("悬停的居中标签应显示下划线高亮")
+	}
+
+	// 悬停后移出到左侧留白 → 清除悬停
+	m2, _ = update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: 0, Y: 0})
+	if m2.hoverTab != -1 {
+		t.Errorf("移出到留白后 hoverTab = %d, want -1", m2.hoverTab)
+	}
+	if strings.Contains(m2.View(), tabHoverStyle.Render("队列")) {
+		t.Error("移出后不应再有下划线高亮")
 	}
 }
 
