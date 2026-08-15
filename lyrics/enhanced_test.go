@@ -659,3 +659,208 @@ func TestEnhancedNoAIPassesThroughNonNotFound(t *testing.T) {
 		t.Fatalf("err = %v, want 非 NotFound 原样透传", err)
 	}
 }
+
+// ── 中文歌词源链（lrclib 严格 → 网易云 → QQ → 确定性兜底）─────────
+
+// newCNEnv 组装含网易云/QQ mock 的增强客户端；netease/qq 为 nil 时不启用
+// 对应源（返回各自的 httptest server URL 供断言）。
+func newCNEnv(t *testing.T, neteaseHandler, qqHandler func(http.ResponseWriter, *http.Request)) (*EnhancedClient, func(string) string) {
+	t.Helper()
+	var neteaseURL, qqURL string
+	if neteaseHandler != nil {
+		s := httptest.NewServer(http.HandlerFunc(neteaseHandler))
+		t.Cleanup(s.Close)
+		neteaseURL = s.URL
+	}
+	if qqHandler != nil {
+		s := httptest.NewServer(http.HandlerFunc(qqHandler))
+		t.Cleanup(s.Close)
+		qqURL = s.URL
+	}
+	c, _, _ := newEnhancedTestEnv(t, lrclibNotFound, aiOK)
+	if neteaseURL != "" {
+		c.EnableCNSources(NewNeteaseClientWithBaseURL(neteaseURL))
+	}
+	if qqURL != "" {
+		c.EnableCNSources(NewQQMusicClientWithBaseURL(qqURL))
+	}
+	return c, func(_ string) string { return "" }
+}
+
+// neteaseHit 返回网易云命中 mock（search 返回 280s 病态 + lyric 返回 LRC）。
+func neteaseHit(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.URL.Path {
+	case "/api/search/get":
+		_, _ = w.Write([]byte(`{"code":200,"result":{"songs":[
+			{"id":1374056687,"name":"病态","artists":[{"name":"薛之谦"}],"duration":280000}]}}`))
+	case "/api/song/lyric":
+		_, _ = w.Write([]byte(`{"code":200,"lrc":{"lyric":"[00:31.032]这星球像一颗胚胎\n"}}`))
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// qqHit 返回 QQ 音乐命中 mock。
+func qqHit(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.URL.Path {
+	case "/soso/fcgi-bin/client_search_cp":
+		_, _ = w.Write([]byte(`{"code":0,"data":{"song":{"list":[
+			{"songmid":"001HKVU52wokMA","songname":"病态","singer":[{"name":"薛之谦"}],"interval":279}]}}}`))
+	case "/lyric/fcgi-bin/fcg_query_lyric_new.fcg":
+		_, _ = w.Write([]byte(`{"code":0,"lyric":"[00:00.00]病态 - 薛之谦\n[00:33.99]这星球像一颗胚胎\n"}`))
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// TestEnhancedCNHitsAfterLrclibMiss lrclib 严格未命中 → 网易云命中。
+func TestEnhancedCNHitsAfterLrclibMiss(t *testing.T) {
+	c, _ := newCNEnv(t, neteaseHit, nil)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(res.Lyrics.Lines) != 1 || res.Lyrics.Lines[0].Text != "这星球像一颗胚胎" {
+		t.Errorf("应返回网易云歌词, got %+v", res.Lyrics.Lines)
+	}
+	if res.Lyrics.Source != LyricsSourceAI || res.Title != "晴天" {
+		t.Errorf("Source/Title = %q/%q, want ai/晴天（AI mock 固定值）", res.Lyrics.Source, res.Title)
+	}
+}
+
+// TestEnhancedCNFallsToQQ 网易云未命中（空结果）→ QQ 命中。
+func TestEnhancedCNFallsToQQ(t *testing.T) {
+	neteaseEmpty := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/search/get" {
+			_, _ = w.Write([]byte(`{"code":200,"result":{"songs":[]}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}
+	c, _ := newCNEnv(t, neteaseEmpty, qqHit)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(res.Lyrics.Lines) != 2 || res.Lyrics.Lines[1].Text != "这星球像一颗胚胎" {
+		t.Errorf("应返回 QQ 歌词, got %+v", res.Lyrics.Lines)
+	}
+}
+
+// TestEnhancedCNTimeRule 网易云候选时长差 >3s → 跳过 → QQ 命中
+// （时长规则同样约束中文源）。
+func TestEnhancedCNTimeRule(t *testing.T) {
+	neteaseWrongDur := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/search/get" {
+			_, _ = w.Write([]byte(`{"code":200,"result":{"songs":[
+				{"id":999,"name":"病态","artists":[{"name":"薛之谦"}],"duration":300000}]}}`)) // Δ=20s
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}
+	c, _ := newCNEnv(t, neteaseWrongDur, qqHit)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(res.Lyrics.Lines) != 2 {
+		t.Errorf("时长差 20s 的网易云候选应被跳过，走 QQ: got %+v", res.Lyrics.Lines)
+	}
+}
+
+// TestEnhancedCNErrorContinues 网易云服务端错误 → 继续 QQ。
+func TestEnhancedCNErrorContinues(t *testing.T) {
+	neteaseErr := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}
+	c, _ := newCNEnv(t, neteaseErr, qqHit)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(res.Lyrics.Lines) != 2 {
+		t.Errorf("网易云错误应继续走 QQ: got %+v", res.Lyrics.Lines)
+	}
+}
+
+// TestEnhancedCNAllMissFallsBackToDeterministic 两个中文源都未命中 →
+// 确定性兜底（lrclib 原始标题 30s）。
+func TestEnhancedCNAllMissFallsBackToDeterministic(t *testing.T) {
+	empty := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"result":{"songs":[]}}`))
+	}
+	detHit := false
+	c, _ := newCNEnv(t, empty, empty)
+	// 确定性兜底：换 lrclib mock 让确定性命中
+	c.lrclib = NewClientWithBaseURL(httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			if isDetQuery(r) {
+				detHit = true
+				_ = json.NewEncoder(w).Encode(lrclibSong{TrackName: "病态", ArtistName: "薛之謙", Duration: 279.0, SyncedLyrics: "[00:01.00]确定性兜底"})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]lrclibSong{})
+	})).URL, testUA)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if !detHit {
+		t.Error("中文源全未命中应走确定性兜底")
+	}
+	if len(res.Lyrics.Lines) != 1 || res.Lyrics.Lines[0].Text != "确定性兜底" {
+		t.Errorf("got %+v", res.Lyrics.Lines)
+	}
+}
+
+// TestEnhancedCNCached 网易云命中入 LRC 缓存：二次播放零网络。
+func TestEnhancedCNCached(t *testing.T) {
+	neteaseCalls := 0
+	netease := func(w http.ResponseWriter, r *http.Request) {
+		neteaseCalls++
+		neteaseHit(w, r)
+	}
+	c, _ := newCNEnv(t, netease, nil)
+	track := model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0}
+	if _, err := c.Fetch(context.Background(), track); err != nil {
+		t.Fatalf("首次 Fetch: %v", err)
+	}
+	first := neteaseCalls
+	if _, err := c.Fetch(context.Background(), track); err != nil {
+		t.Fatalf("二次 Fetch: %v", err)
+	}
+	if neteaseCalls != first {
+		t.Errorf("网易云请求 %d → %d, want 不变（歌词缓存命中）", first, neteaseCalls)
+	}
+}
+
+// TestEnhancedCNPlainRejected 中文源返回纯文本歌词 → 视为未命中
+// （sync-only 规则约束所有源）。
+func TestEnhancedCNPlainRejected(t *testing.T) {
+	neteasePlain := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/search/get":
+			_, _ = w.Write([]byte(`{"code":200,"result":{"songs":[
+				{"id":1,"name":"病态","artists":[{"name":"薛之谦"}],"duration":280000}]}}`))
+		case "/api/song/lyric":
+			_, _ = w.Write([]byte(`{"code":200,"lrc":{"lyric":"这星球像一颗胚胎\n没有时间轴\n"}}`))
+		}
+	}
+	c, _ := newCNEnv(t, neteasePlain, qqHit)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(res.Lyrics.Lines) != 2 {
+		t.Errorf("网易云纯文本应被拒，走 QQ: got %+v", res.Lyrics.Lines)
+	}
+}
