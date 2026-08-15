@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"time"
 
@@ -29,6 +30,16 @@ type EnhancedClient struct {
 	ai       *OpenAIClient // nil = AI 禁用
 	aiCache  *aiCache
 	lrcCache *lrcCache
+
+	// cnSources 中文歌词源链（网易云/QQ 音乐，匿名接口）：AI 识别成功且
+	// lrclib 严格重查未命中后按序查询（用户确认顺序：lrclib → 网易云 → QQ）；
+	// 命中同样入 LRC 缓存。默认空（需 EnableCNSources 显式启用，测试注入 mock）。
+	cnSources []cnLyricSource
+}
+
+// EnableCNSources 启用中文歌词源（main 层调用；测试注入 mock 基地址）。
+func (e *EnhancedClient) EnableCNSources(srcs ...cnLyricSource) {
+	e.cnSources = append(e.cnSources, srcs...)
 }
 
 // NewEnhancedClient 组装增强客户端；cacheDir 存放 ai.jsonl 与 LRC 文件
@@ -89,7 +100,14 @@ func (e *EnhancedClient) Fetch(ctx context.Context, track model.Track) (FetchRes
 	if !errors.Is(err, ErrNotFound) {
 		return FetchResult{}, err // 服务端故障透传，兜底只会再撞一次
 	}
-	// 严格重查未命中 → 确定性多候选兜底（30s 阈值，命中率互补）
+	// 中文歌词源链（网易云 → QQ）：匿名接口，命中入 LRC 缓存；
+	// 源错误只记日志继续（一个源挂了不影响链）。
+	if ly, ok := e.fetchCN(ctx, res.Title, res.Artist, track.Duration); ok {
+		e.lrcCache.Put(res.Title, res.Artist, ly)
+		ly.Source = LyricsSourceAI
+		return FetchResult{Lyrics: ly, Title: res.Title, Artist: res.Artist}, nil
+	}
+	// 严格重查与中文源均未命中 → 确定性多候选兜底（30s 阈值，命中率互补）
 	det, err := e.lrclib.Fetch(ctx, track)
 	if err != nil {
 		return FetchResult{}, err
@@ -98,6 +116,35 @@ func (e *EnhancedClient) Fetch(ctx context.Context, track model.Track) (FetchRes
 	e.lrcCache.Put(res.Title, res.Artist, ly)
 	ly.Source = LyricsSourceAI
 	return FetchResult{Lyrics: ly, Title: res.Title, Artist: res.Artist}, nil
+}
+
+// fetchCN 按序查询中文歌词源（网易云 → QQ）：候选时长与目标差距 >3s
+// 跳过（用户时长规则同样约束中文源）；纯文本/空歌词视为未命中；
+// 源请求失败记日志继续下一源。全部未命中返回 (nil, false)。
+func (e *EnhancedClient) fetchCN(ctx context.Context, title, artist string, duration float64) (*Lyrics, bool) {
+	for _, src := range e.cnSources {
+		songs, err := src.Search(ctx, title, artist)
+		if err != nil {
+			log.Printf("歌词源搜索失败（继续下一源）: %v", err)
+			continue
+		}
+		for _, s := range songs {
+			// 时长规则与 lrclib 严格路径一致：候选时长未知（0）或与目标
+			// 差距 >3s → 视为不同曲目，跳过（宁缺毋滥）。
+			if s.Duration == 0 || math.Abs(s.Duration-duration) > maxAIDurationDelta {
+				continue
+			}
+			ly, err := src.Lyric(ctx, s.ID)
+			if err != nil {
+				log.Printf("歌词源取词失败（继续下一候选）: %v", err)
+				continue
+			}
+			if ly != nil {
+				return ly, true
+			}
+		}
+	}
+	return nil, false
 }
 
 // identify 识别标题（AI 结果缓存优先，single-flight 合并并发重复识别）；
