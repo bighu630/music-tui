@@ -4,7 +4,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 	"music-tui/config"
 	"music-tui/cover"
 	"music-tui/history"
+	"music-tui/logger"
 	"music-tui/lyrics"
 	"music-tui/mpris"
 	"music-tui/player"
@@ -41,6 +41,10 @@ func main() {
 }
 
 func run() error {
+	// 0. 日志初始化：先默认 info（config 损坏/未加载也有日志），
+	// config 加载成功后调整级别
+	logger.Init(logger.LevelInfo)
+
 	// 1. 运行时依赖检测（缺失即报错退出，附平台安装命令）
 	mpvPath, err := requireTool("mpv")
 	if err != nil {
@@ -84,6 +88,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("加载配置失败: %w", err)
 	}
+	logger.SetLevel(logger.ParseLevel(cfg.Log.Level))
 	// yt-dlp 全局 cookie：复用 YT Music 登录配置（未登录则无 cookie）。
 	// 启动时快照：浏览器 cookie 过期需重启应用刷新（与 mpv 取流参数限制一致）。
 	cookieFile, _ := ytStore.CookieFile() // 未登录/不可读 → 无 cookie，不阻止启动
@@ -102,7 +107,7 @@ func run() error {
 	// 连接/注册失败仅警告，绝不影响播放器主功能。
 	mprisSrv := mpris.NewServer(mpv)
 	if err := mprisSrv.Start(); err != nil {
-		log.Printf("MPRIS 服务不可用（不影响播放器）: %v", err)
+		logger.Warn("MPRIS 服务不可用（不影响播放器）: %v", err)
 	} else {
 		defer mprisSrv.Close()
 	}
@@ -119,6 +124,7 @@ func run() error {
 		enhanced, err := lyrics.NewEnhancedClient(lc, ai, filepath.Join(cfg.Cache.Dir, "lyrics"))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "music-tui: 警告：AI 歌词缓存初始化失败，已降级确定性匹配: %v\n", err)
+			logger.Warn("AI 歌词缓存初始化失败，已降级确定性匹配: %v", err)
 		} else {
 			// 中文歌词源链（用户确认顺序：lrclib → 网易云 → QQ）：
 			// 匿名接口无需登录，仅在 lrclib 严格重查未命中后查询。
@@ -158,6 +164,7 @@ func loadHistory(path string) (*history.Store, error) {
 		return nil, err // 备份失败（如权限问题），按原样返回错误
 	}
 	fmt.Fprintf(os.Stderr, "music-tui: 警告：历史文件损坏，已备份至 %s 并重建\n", backup)
+	logger.Warn("历史文件损坏，已备份至 %s 并重建", backup)
 	store, retryErr := history.NewStore(path)
 	if retryErr != nil {
 		return nil, retryErr
@@ -177,6 +184,7 @@ func loadPlaylists(path string) (*playlists.Store, error) {
 		return nil, err // 备份失败（如权限问题），按原样返回错误
 	}
 	fmt.Fprintf(os.Stderr, "music-tui: 警告：播放列表文件损坏，已备份至 %s 并重建\n", backup)
+	logger.Warn("播放列表文件损坏，已备份至 %s 并重建", backup)
 	store, retryErr := playlists.NewStore(path)
 	if retryErr != nil {
 		return nil, retryErr
@@ -196,6 +204,7 @@ func loadConfig(path string) (*config.Config, error) {
 		return nil, err // 备份失败（如权限问题），按原样返回错误
 	}
 	fmt.Fprintf(os.Stderr, "music-tui: 警告：配置文件损坏，已备份至 %s 并重建\n", backup)
+	logger.Warn("配置文件损坏，已备份至 %s 并重建", backup)
 	cfg, retryErr := config.Load(path)
 	if retryErr != nil {
 		return nil, retryErr
@@ -217,13 +226,14 @@ func loadCache(opts cache.Options, ytdlpPath, cookieFile string, headers map[str
 			backup := fmt.Sprintf("%s.corrupt-%d", idxPath, time.Now().UnixNano())
 			if berr := os.Rename(idxPath, backup); berr == nil {
 				fmt.Fprintf(os.Stderr, "music-tui: 警告：缓存索引损坏，已备份至 %s 并重建\n", backup)
+				logger.Warn("缓存索引损坏，已备份至 %s 并重建", backup)
 				if cm, retryErr := cache.New(opts, ytdlpPath, cookieFile, headers); retryErr == nil {
 					return cm
 				}
 			}
 		}
 	}
-	log.Printf("缓存初始化失败（已降级为禁用）: %v", err)
+	logger.Warn("缓存初始化失败（已降级为禁用）: %v", err)
 	return cache.Disabled()
 }
 
@@ -239,6 +249,7 @@ func loadSession(path string) (*session.Store, error) {
 		return nil, err // 备份失败（如权限问题），按原样返回错误
 	}
 	fmt.Fprintf(os.Stderr, "music-tui: 警告：会话文件损坏，已备份至 %s 并重建\n", backup)
+	logger.Warn("会话文件损坏，已备份至 %s 并重建", backup)
 	store, retryErr := session.NewStore(path)
 	if retryErr != nil {
 		return nil, retryErr
@@ -258,6 +269,7 @@ func loadYTM(path string) (*ytm.Store, error) {
 		return nil, err // 备份失败（如权限问题），按原样返回错误
 	}
 	fmt.Fprintf(os.Stderr, "music-tui: 警告：YT Music 配置文件损坏，已备份至 %s 并重建\n", backup)
+	logger.Warn("YT Music 配置文件损坏，已备份至 %s 并重建", backup)
 	store, retryErr := ytm.NewStore(path)
 	if retryErr != nil {
 		return nil, retryErr
