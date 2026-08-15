@@ -829,7 +829,7 @@ AI 识别（结果缓存优先 + single-flight；瞬时错误重试 1 次；成�
 | aicache（10 个） | 落盘 roundtrip、负缓存持久化、损坏行跳过 + 文件重写、键空白规范化、并发 Put（-race）、同键不重复、行格式 |
 | lrccache（9 个） | 同步歌词 roundtrip（毫秒误差内）、sync-only（只产出 .lrc、.txt 不识别、旧 .txt 启动清理）、未知名 miss、清洗/截断/控制字符、空歌词不写、文件可 ParseLRC | synced/plain 存取 roundtrip（毫秒误差内）、未知名 miss、不安全字符清洗、超长截断（字节计）、sync/plain 分文件不覆盖、空歌词不写、文件为可 ParseLRC 纯文本 |
 | cnlyrics（9 个）+ enhanced 链集成（9 个） | 网易云搜索解析（毫秒→秒、路径/参数）/歌词（空/纯文本 sync-only 拒绝）/403 报错；QQ 搜索解析（interval 秒、Referer 头）/歌词/URL 形状/403；集成：lrclib 未命中→网易云→QQ 链、时长 >3s 跳过、源错误继续、全未命中确定性兜底、命中入 LRC 缓存二次零网络、纯文本拒绝 |
-| enhanced（27 个） | AI 优先流程（含 4 个审查补充）：AI 子预算超时后兜底可跑、兜底命中以 AI 键缓存二次零网络、错误透传后 AI 结果缓存不重调、no-AI 非 NotFound 透传；识别成功严格重查（确定性不跑）；严格未命中确定性兜底（展示信息仍用 AI 标题）；非歌曲/AI 失败/空标题 → 确定性兜底（负缓存生效）；服务端错误透传不兜底；双缓存命中零请求；并发 single-flight；AI 标题携带（live/缓存）；纯文本拒绝；失败路径不携带标题 | 确定性命中不调 AI；无 AI 配置降级；AI 清洗→重查命中（Source 标注）；is_song=false 负缓存（二次不调 AI）；AI 失败降级 + 失败不缓存；全部候选 >3s 弃用；AI 结果缓存 + 歌词缓存命中免 AI/免 lrclib；AI 结果缓存命中仍重查 lrclib；空 title 拒绝；缓存跨重启落盘命中 |
+| enhanced（29 个，含链集成 9 个） | AI 优先流程（含 4 个审查补充）：AI 子预算超时后兜底可跑、兜底命中以 AI 键缓存二次零网络、错误透传后 AI 结果缓存不重调、no-AI 非 NotFound 透传；识别成功严格重查（确定性不跑）；严格未命中确定性兜底（展示信息仍用 AI 标题）；非歌曲/AI 失败/空标题 → 确定性兜底（负缓存生效）；服务端错误透传不兜底；双缓存命中零请求；并发 single-flight；AI 标题携带（live/缓存）；纯文本拒绝；失败路径不携带标题 | 确定性命中不调 AI；无 AI 配置降级；AI 清洗→重查命中（Source 标注）；is_song=false 负缓存（二次不调 AI）；AI 失败降级 + 失败不缓存；全部候选 >3s 弃用；AI 结果缓存 + 歌词缓存命中免 AI/免 lrclib；AI 结果缓存命中仍重查 lrclib；空 title 拒绝；缓存跨重启落盘命中 |
 | config（7 个新增） | openai 缺失禁用、key 存在 model 默认、显式空 key 禁用、显式值、显式空 model 默认、Save roundtrip |
 | ui（6 个新增） | AI 来源歌词显示 `〔AI 匹配〕`、确定性来源不显示、AI 标识行视口高度预留（窄窗口不溢出）、控制栏/状态栏 AI 标题覆盖 + 切歌清空、队列当前项 AI 标题（非当前项保持原始）、MPRIS onTrack 收到清洗后曲目（无 AI 信息不触发） |
 

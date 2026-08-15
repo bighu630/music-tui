@@ -167,6 +167,6 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 ## 追加需求（用户 8-15 第四轮）：中文歌词源链（lrclib → 网易云 → QQ）
 
 - [x] 调研：网易云/QQ 音乐歌词接口实测匿名可用（无登录纯 GET，标准 LRC）；Musixmatch/Genius 中文覆盖差、酷我/酷狗需逆向——不采用
-- [x] 实现：lyrics/netease.go（搜索/歌词，毫秒→秒）+ qqmusic.go（搜索/歌词，需 Referer）+ fetchCN 链（时长 ≤3s 筛选、源错误继续、命中入 LRC 缓存）；EnhancedClient.EnableCNSources 显式启用（main 注入真源、测试注入 mock）
+- [x] 实现：lyrics/netease.go（网易云搜索/歌词，毫秒→秒；QQ 客户端同文件分段，需 Referer）+ fetchCN 链（时长 ≤3s 筛选、源错误继续、命中入 LRC 缓存）；EnhancedClient.EnableCNSources 显式启用（main 注入真源、测试注入 mock）
 - [x] 测试：cnlyrics 10 个（两源解析/空/纯文本/错误/链集成/时长/缓存），全量 build/vet/test -race 全绿
 - [ ] 真机验收（待用户）：lrclib 无数据的歌（如薛之谦《病态》）经网易云/QQ 命中出歌词
