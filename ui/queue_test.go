@@ -1264,3 +1264,119 @@ func TestQueueMoveFilterInteraction(t *testing.T) {
 		t.Errorf("聚焦时 m 应输入过滤词, value=%q focused=%v", m.queuePage.filterInput.Value(), m.queuePage.filterInput.Focused())
 	}
 }
+
+// TestQueueMoveGlobalKeysNotIntercepted 需求 5：移动模式不拦截 root 全局键。
+// 全链路（startPlay 建当前曲 + trackAppendMsg 建队列 ≥2 首）进入移动模式后：
+// 空格暂停/继续照常（mpv Pause/Resume 命令发出，StateEvent 回灌后
+// m.state.Playing 翻转）；数字键 1→2 切页往返 moving 保持 true 且移动 hint
+// 仍在；q 照常产生 tea.QuitMsg（先例：TestQuitOnQ/TestSpaceReplayReplacesQueue
+// 均处理 Quit 消息）；Esc 正常退出。
+func TestQueueMoveGlobalKeysNotIntercepted(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	if !m.queuePage.moving {
+		t.Fatal("按 m 应进入移动模式")
+	}
+
+	// 空格：不退出移动模式，暂停命令照常发出（全局语义不被拦截）
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if !m.queuePage.moving {
+		t.Fatal("移动模式按空格不应退出移动模式")
+	}
+	if msgs := execCmds(cmd); fp.pauseCount() != 1 {
+		t.Errorf("空格应触发暂停（Pause 命令已发出）, pauseCount = %d, msgs=%v", fp.pauseCount(), msgs)
+	}
+	m, _ = update(m, playerEventMsg{ev: player.StateEvent{Playing: false}}) // mpv 暂停状态回灌
+	if m.state.Playing {
+		t.Error("暂停事件回灌后 Playing 应为 false")
+	}
+	// 再按空格：继续播放，同样不退出移动模式
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if !m.queuePage.moving {
+		t.Fatal("移动模式再按空格不应退出移动模式")
+	}
+	if msgs := execCmds(cmd); fp.resumeCount() != 1 {
+		t.Errorf("再按空格应触发继续（Resume 命令已发出）, resumeCount = %d, msgs=%v", fp.resumeCount(), msgs)
+	}
+	m, _ = update(m, playerEventMsg{ev: player.StateEvent{Playing: true}})
+	if !m.state.Playing {
+		t.Error("继续事件回灌后 Playing 应为 true")
+	}
+
+	// 数字键切页：moving 状态随页面保留（1 首页 → 2 队列页）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	if m.current != pageHome {
+		t.Fatalf("按 1 应切到首页, current = %v", m.current)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	if m.current != pageQueue {
+		t.Fatalf("按 2 应切回队列页, current = %v", m.current)
+	}
+	if !m.queuePage.moving {
+		t.Fatal("切页往返后 moving 应保持 true")
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, "↑↓←→/hjkl 移动") {
+		t.Errorf("切页往返后仍应显示移动模式 hint, got %q", got)
+	}
+
+	// q：照常触发退出（先例：resume_test 对 Quit 消息有断言）
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	var quit bool
+	for _, msg := range execCmds(cmd) {
+		if _, ok := msg.(tea.QuitMsg); ok {
+			quit = true
+		}
+	}
+	if !quit {
+		t.Error("移动模式按 q 应产生 Quit 消息")
+	}
+	if !m.queuePage.moving {
+		t.Fatal("q 只触发退出消息，不应改变 moving 状态")
+	}
+
+	// Esc 正常退出移动模式
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.queuePage.moving {
+		t.Fatal("Esc 应退出移动模式")
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, "m 移动") {
+		t.Errorf("退出后 hint 应恢复含 m 移动, got %q", got)
+	}
+}
+
+// TestQueueMoveHintOnLastLine 移动模式/过滤确认态的提示行贴底回归：
+// 队列 10 首（触发列表分页）进入移动模式后，移动 hint 替换普通 hint 且
+// 恒在内容区最后一行（状态栏上方）；Esc 退出后过滤确认态 hint 含 m 移动
+// 且同样贴底。
+func TestQueueMoveHintOnLastLine(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	for i := 0; i < 10; i++ {
+		m.queue.Add(testTrack(fmt.Sprintf("t%d", i)))
+	}
+	m = m.syncQueueViews()
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	if !m.queuePage.moving {
+		t.Fatal("按 m 应进入移动模式")
+	}
+	assertHintOnLastLine(t, m, "↑↓←→/hjkl 移动")
+	if got := m.queuePage.view(); strings.Contains(got, "跳转播放") {
+		t.Errorf("移动模式 hint 应替换普通 hint（不应含跳转播放）, got %q", got)
+	}
+
+	// Esc 退出 → 过滤确认态（/ → 输入词 → Enter 失焦）：hint 含 m 移动且贴底
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.queuePage.filterInput.Focused() || !m.queuePage.filtering {
+		t.Fatalf("过滤确认态前置失败: filtering=%v focused=%v", m.queuePage.filtering, m.queuePage.filterInput.Focused())
+	}
+	assertHintOnLastLine(t, m, "m 移动")
+}
