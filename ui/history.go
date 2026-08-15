@@ -177,7 +177,7 @@ func (h historyModel) selectedTrack() (model.Track, bool) {
 func (h historyModel) setSize(width, height int) historyModel {
 	h.width, h.height = width, height
 	h.list.SetSize(width, height-3)
-	h.filterInput.Width = width - 14
+	h.filterInput.Width = width - 18 // 过滤行前缀 "过滤: "(6 列) + 计数 "(n/m)"(≤10 列)
 	if h.filterInput.Width < 10 {
 		h.filterInput.Width = 10
 	}

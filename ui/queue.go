@@ -223,7 +223,7 @@ func (q queueModel) sync(qu *queue.Queue) queueModel {
 func (q queueModel) setSize(width, height int) queueModel {
 	q.width, q.height = width, height
 	q.list.SetSize(width, height-3)
-	q.filterInput.Width = width - 14
+	q.filterInput.Width = width - 18 // 过滤行前缀 "过滤: "(6 列) + 计数 "(n/m)"(≤10 列)
 	if q.filterInput.Width < 10 {
 		q.filterInput.Width = 10
 	}
@@ -235,9 +235,9 @@ func (q queueModel) setSize(width, height int) queueModel {
 // 内容区最后一行。
 func (q queueModel) view() string {
 	if q.filtering {
-		hint := "列表循环 · 输入过滤 · Enter 确认 · Esc 取消"
+		hint := q.modeLabel() + " · 输入过滤 · Enter 确认 · Esc 取消"
 		if !q.filterInput.Focused() {
-			hint = "列表循环 · Enter/p 跳转播放 · d 删除 · c 清空 · s 切换模式 · Esc 退出过滤"
+			hint = q.modeLabel() + " · Enter/p 跳转播放 · d 删除 · c 清空 · s 切换模式 · Esc 退出过滤"
 		}
 		count := fmt.Sprintf("(%d/%d)", len(q.list.VisibleItems()), len(q.items))
 		filterLine := "过滤: " + q.filterInput.View() + " " + lipgloss.NewStyle().Faint(true).Render(count)

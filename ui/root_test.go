@@ -2301,3 +2301,30 @@ func TestQueueFilterHintOnLastLine(t *testing.T) {
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 确认
 	assertHintOnLastLine(t, m, "Esc 退出过滤")
 }
+
+// TestGlobalKeysYieldToFilterHistory 历史页过滤聚焦时：空格/a/q 同样让位
+// 给过滤输入框（与队列页同构的 typingText 分支）。
+func TestGlobalKeysYieldToFilterHistory(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	if err := m.history.Add(testTrack("t1")); err != nil {
+		t.Fatal(err)
+	}
+	m = m.refreshHistory()
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if m.historyPage.filterInput.Value() != " " {
+		t.Errorf("空格应输入过滤词, got %q", m.historyPage.filterInput.Value())
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if m.plPicker != nil {
+		t.Fatal("过滤聚焦时 a 不应打开选择器")
+	}
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	for _, msg := range execCmds(cmd) {
+		if _, ok := msg.(tea.QuitMsg); ok {
+			t.Fatal("过滤聚焦时 q 不应退出")
+		}
+	}
+}

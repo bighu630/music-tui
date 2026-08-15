@@ -904,3 +904,69 @@ func TestQueueSlashFilterSyncReapplies(t *testing.T) {
 		t.Errorf("sync 后计数应 (3/4): %q", got)
 	}
 }
+
+// TestQueueSlashFilterEscKeepsSelection Esc 退出过滤后选中项按曲目 ID 恢复
+// （keep-found 路径：过滤前后选中项均可见）。
+func TestQueueSlashFilterEscKeepsSelection(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	for _, id := range []string{"ta", "tb", "tc"} {
+		m.queue.Add(testTrack(id))
+	}
+	m = m.syncQueueViews()
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 tb（下标 1）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("tb")}) // 仅 tb 可见
+	if it, ok := m.queuePage.list.SelectedItem().(queueItem); !ok || it.track.ID != "tb" {
+		t.Fatalf("过滤后选中应保持 tb")
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc}) // 退出过滤
+	if it, ok := m.queuePage.list.SelectedItem().(queueItem); !ok || it.track.ID != "tb" {
+		t.Fatalf("Esc 后选中应按 ID 恢复 tb")
+	}
+	if idx := m.queuePage.list.Index(); idx != 1 {
+		t.Fatalf("Esc 后选中下标 = %d, want 1", idx)
+	}
+}
+
+// TestQueueSlashFilterZeroHitsSafe 0 命中时操作键安全（不产生任何消息），Esc 恢复。
+func TestQueueSlashFilterZeroHitsSafe(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m.queue.Add(testTrack("t1"))
+	m = m.syncQueueViews()
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")}) // 0 命中
+	if got := m.queuePage.view(); !strings.Contains(got, "(0/1)") {
+		t.Fatalf("计数应 (0/1): %q", got)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 确认
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if len(execCmds(cmd)) != 0 {
+		t.Fatal("0 命中时 Enter 不应产生消息")
+	}
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if len(execCmds(cmd)) != 0 {
+		t.Fatal("0 命中时 d 不应产生消息")
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if n := len(m.queuePage.list.VisibleItems()); n != 1 {
+		t.Fatalf("Esc 后可见 %d 项, want 1", n)
+	}
+}
+
+// TestQueueSlashFilterEmptyQueue 空队列 / 打开显示 (0/0)，Esc 正常退出。
+func TestQueueSlashFilterEmptyQueue(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if got := m.queuePage.view(); !strings.Contains(got, "(0/0)") {
+		t.Fatalf("空队列计数应 (0/0): %q", got)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.queuePage.filtering {
+		t.Fatal("Esc 应退出过滤")
+	}
+}
