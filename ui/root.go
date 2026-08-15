@@ -1800,14 +1800,18 @@ func (m Model) delegate(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// typingText 返回是否有输入框处于聚焦（搜索关键词/播放列表命名）：
-// 聚焦时字符类全局键（空格/a/q）让位给输入框。
+// typingText 返回是否有输入框处于聚焦（搜索关键词/播放列表命名/队列历史
+// 页 / 过滤）：聚焦时字符类全局键（空格/a/q）让位给输入框。
 func (m Model) typingText() bool {
 	switch m.current {
 	case pageSearch:
 		return m.searchPage.typing()
 	case pagePlaylists:
 		return m.plPage.typing()
+	case pageQueue:
+		return m.queuePage.typing()
+	case pageHistory:
+		return m.historyPage.typing()
 	}
 	return false
 }
