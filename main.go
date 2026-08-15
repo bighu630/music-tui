@@ -145,6 +145,10 @@ func run() error {
 		mprisSrv.SetTrack,
 		cookieFile != "" || len(ytdlpHeaders) > 0,
 	)
+	// MPRIS 队列控制注入：ui 侧桥实现 mpris 包的 controller 接口（编译期检查）；
+	// 模式变更经 sink 同步回 MPRIS 属性（LoopStatus/Shuffle 投影 + PropertiesChanged）。
+	mprisSrv.SetController(model.MprisController())
+	model.MprisController().SetModeSink(mprisSrv.SyncMode)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI 运行失败: %w", err)

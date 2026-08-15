@@ -305,6 +305,8 @@ type Model struct {
 	plPicker *plPickerModel // 全局 a 键“添加到”选择器；nil = 未打开
 
 	onTrack func(*model.Track) // 外部消费者（MPRIS）感知当前曲目；nil 安全
+
+	mprisCtrl *MprisController // MPRIS 控制器桥（NewModel 创建，main 注入 mpris 服务）
 }
 
 // NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h/sess/pl/cm/yt 为具体服务，
@@ -378,6 +380,9 @@ func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cove
 			m.queue = queue.New()
 		}
 	}
+	// MPRIS 控制器桥：必须在 queue 最终确定后创建（恢复失败分支会重建 queue）。
+	// 方法签名与 mpris 包 controller 接口一致（隐式满足，编译期由 main 检查）。
+	m.mprisCtrl = &MprisController{reqs: make(chan mprisReq, 16), q: m.queue}
 	m = m.syncQueueViews()
 	m.historyPage = m.historyPage.setEntries(h.Entries())
 	m.plPage = m.plPage.setLists(pl.Lists())
@@ -422,7 +427,7 @@ func (m Model) refreshPreload() {
 // 存在已保存会话时追加续播恢复 cmd（PlayPaused 静默加载并定位）。
 // （不用包级 spinner.Tick：bubbles v1.0.0 的包级 Tick 无延时，会形成忙循环。）
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{waitForPlayerEvents(m.player), spinnerTick}
+	cmds := []tea.Cmd{waitForPlayerEvents(m.player), spinnerTick, subscribeMprisReqs(m.mprisCtrl.reqs)}
 	if m.resume != nil {
 		cmds = append(cmds, resumeCmd(m))
 	}
@@ -517,6 +522,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case queueModeMsg:
 		// 队列页 s 键：与首页模式按钮共用三态循环
 		return m.cycleMode()
+
+	case mprisReqMsg:
+		return m.handleMprisReq(msg.req)
 
 	case queueMoveMsg:
 		// 队列页移动模式：把 from 下标曲目移到最终下标 to（currentIdx 跟随
@@ -1654,11 +1662,66 @@ func addHistoryCmd(h *history.Store, track model.Track) tea.Cmd {
 	}
 }
 
+// handleMprisReq 消费一条 MPRIS 控制器请求：与对应 UI 键位同一编排路径。
+// 所有分支都必须回写 reply（D-Bus goroutine 同步等待）并重新订阅请求流
+// （cmd 链不丢，同 TrackEnded 分支约束）。
+func (m Model) handleMprisReq(req mprisReq) (Model, tea.Cmd) {
+	switch req.kind {
+	case reqNext:
+		if tr, ok := m.queue.Next(); ok {
+			m.retryCount = 0
+			m.queueSkip = false
+			m.current = pageHome
+			m2, cmd := m.beginPlay(tr)
+			m2.refreshPreload() // 切歌后重算预加载目标（preloader 为指针，副本共享）
+			req.reply <- nil
+			return m2, tea.Batch(cmd, subscribeMprisReqs(m.mprisCtrl.reqs))
+		}
+		req.reply <- queue.ErrEmpty
+		return m, subscribeMprisReqs(m.mprisCtrl.reqs)
+	case reqPrev:
+		if tr, ok := m.queue.Prev(); ok {
+			m.retryCount = 0
+			m.queueSkip = false
+			m.current = pageHome
+			m2, cmd := m.beginPlay(tr)
+			m2.refreshPreload()
+			req.reply <- nil
+			return m2, tea.Batch(cmd, subscribeMprisReqs(m.mprisCtrl.reqs))
+		}
+		req.reply <- queue.ErrEmpty
+		return m, subscribeMprisReqs(m.mprisCtrl.reqs)
+	case reqSetMode:
+		m2, cmd := m.applyMode(req.mode)
+		req.reply <- nil
+		return m2, tea.Batch(cmd, subscribeMprisReqs(m.mprisCtrl.reqs))
+	}
+	req.reply <- nil
+	return m, subscribeMprisReqs(m.mprisCtrl.reqs)
+}
+
+// applyMode 绝对模式切换（MPRIS 写 LoopStatus/Shuffle 与 UI 三态循环共用）：
+// SetMode + 同步 mpv 单曲循环 + 重算预加载 + 重建队列视图 + 通知 MPRIS 同步。
+// 同模式切换为 no-op：不通知（避免 MPRIS 无谓 PropertiesChanged，与
+// notifyModeChanged 注释约定一致）；SetLoop 失败仅 toast 不阻断（模式已切换，
+// 与 s 键原行为一致）。
+func (m Model) applyMode(mode queue.Mode) (Model, tea.Cmd) {
+	prev := m.queue.Mode()
+	m.queue.SetMode(mode)
+	// 模式影响预加载门控（RepeatOne 跳过预载）：切换后立即重算目标
+	m.refreshPreload()
+	if m.queue.Mode() != prev {
+		m.notifyModeChanged()
+	}
+	if err := m.player.SetLoop(mode == queue.RepeatOne); err != nil {
+		m, cmd := m.showToast("设置循环失败: "+err.Error(), toastError)
+		return m.syncQueueViews(), cmd
+	}
+	return m.syncQueueViews(), nil
+}
+
 // cycleMode 三态循环切换播放模式：Sequential→Shuffle→RepeatOne→Sequential。
 // 首页模式按钮（toggleModeMsg）与队列页 s 键（queueModeMsg）共用。
-// 切换时同步 mpv 单曲循环状态：切入 RepeatOne → SetLoop(true)（当前文件
-// 开始无缝循环）；切出 → SetLoop(false)（解除正在循环的文件，否则 mpv
-// 不再产生 TrackEnded，UI 无法感知结束）。失败仅记 toast 不阻断。
 func (m Model) cycleMode() (Model, tea.Cmd) {
 	var next queue.Mode
 	switch m.queue.Mode() {
@@ -1669,14 +1732,15 @@ func (m Model) cycleMode() (Model, tea.Cmd) {
 	default:
 		next = queue.Sequential
 	}
-	m.queue.SetMode(next)
-	// 模式影响预加载门控（RepeatOne 跳过预载）：切换后立即重算目标
-	m.refreshPreload()
-	if err := m.player.SetLoop(next == queue.RepeatOne); err != nil {
-		m, cmd := m.showToast("设置循环失败: "+err.Error(), toastError)
-		return m.syncQueueViews(), cmd
+	return m.applyMode(next)
+}
+
+// notifyModeChanged 通知外部消费者（MPRIS）播放模式已变更；nil 安全。
+// 调用方保证仅在模式实际变化后调用（applyMode 同模式切换不通知）。
+func (m Model) notifyModeChanged() {
+	if m.mprisCtrl != nil && m.mprisCtrl.onModeChanged != nil {
+		m.mprisCtrl.onModeChanged(m.queue.Mode())
 	}
-	return m.syncQueueViews(), nil
 }
 
 // togglePlay 全局空格：播放中→暂停；已结束/出错→重播同曲（ended）；
