@@ -10,22 +10,6 @@ https://github.com/user-attachments/assets/16f24f0f-6a86-4493-9ecd-60b59ad62277
 
 
 
-
-## ✨ 功能特性
-
-- **五页面布局**：首页 / 队列 / 播放列表 / 搜索 / 历史，`Tab` 或数字键快速切换，支持鼠标点击
-- **YouTube 搜索即播**：无需 API key，搜索 → 回车 → 播放一气呵成
-- **播放队列**：顺序 / 随机 / 单曲循环三种模式、自动连播，队列内可直接移动歌曲顺序
-- **同步歌词**：lrclib 精确匹配，逐行高亮、随进度自动滚动
-- **AI 增强歌词匹配**（可选）：OpenAI 协议兼容服务清洗 YouTube 噪声标题，命中率大幅提升，并支持网易云 / QQ 音乐歌词源兜底
-- **封面图**：自动适配 kitty / sixel / iTerm2，兼容终端降级为半块字符渲染
-- **播放历史**：最近 100 条记录，一键重播、可删除
-- **命名播放列表**：新建 / 重命名 / 删除，任何页面选中歌曲按 `a` 即可收藏
-- **YT Music 歌单同步**：cookie 登录后把账号歌单同步为本地列表，离线可播，支持歌单链接导入
-- **音频缓存**：LRU 自动缓存最近播放的歌曲（默认 100 首），二次播放秒开；预加载下一首，连播不卡顿
-- **会话续播**：记住队列与播放进度，再次启动以暂停态恢复，按空格继续
-- **MPRIS 集成**（Linux）：支持 playerctl 与桌面媒体键控制
-
 ## 📦 依赖
 
 | 依赖 | 用途 | 安装 |
@@ -45,6 +29,42 @@ https://github.com/user-attachments/assets/16f24f0f-6a86-4493-9ecd-60b59ad62277
 go build -o music-tui .
 ./music-tui
 ```
+
+## ⚙️ 配置
+
+配置文件在首次运行时自动生成：`~/.config/music-tui/config.json`（macOS 为 `~/Library/Application Support/music-tui/`，Windows 为 `%AppData%`）。
+
+```json
+{
+  "cache": {
+    "enabled": true,
+    "max_entries": 100,
+    "dir": "/home/you/.cache/music-tui"
+  },
+  "openai": {
+    "api_key": "",
+    "model": "gpt-4o-mini",
+    "base_url": ""
+  },
+  "ytdlp": {
+    "headers": {}
+  },
+  "log": {
+    "level": "info"
+  }
+}
+```
+
+| 配置项 | 说明 |
+|---|---|
+| `cache.enabled` | 音频缓存总开关（默认开） |
+| `cache.max_entries` | 缓存歌曲数上限，超出按 LRU 淘汰（默认 100） |
+| `cache.dir` | 缓存目录（默认 `~/.cache/music-tui`，删掉即清空缓存） |
+| `openai.api_key` | OpenAI 协议兼容服务的 API key；**留空 = 禁用 AI 歌词增强**（行为与不带 key 完全一致） |
+| `openai.model` | 模型名（默认 `gpt-4o-mini`） |
+| `openai.base_url` | 兼容服务地址，可填 DeepSeek（`https://api.deepseek.com/v1`）等任何 OpenAI 协议兼容服务 |
+| `ytdlp.headers` | 附加到每次 yt-dlp 调用的 HTTP 头（可选） |
+| `log.level` | 日志级别：`debug` / `info` / `warn` / `error` |
 
 ## 🚀 使用方法
 
@@ -105,41 +125,7 @@ go build -o music-tui .
 | `s` / `y` / `u` | YT Music：登录设置 / 同步全部歌单 / 导入歌单链接（概览页） |
 | `r` | 刷新当前列表（详情页，仅 YT Music 同步列表） |
 
-## ⚙️ 配置
 
-配置文件在首次运行时自动生成：`~/.config/music-tui/config.json`（macOS 为 `~/Library/Application Support/music-tui/`，Windows 为 `%AppData%`）。
-
-```json
-{
-  "cache": {
-    "enabled": true,
-    "max_entries": 100,
-    "dir": "/home/you/.cache/music-tui"
-  },
-  "openai": {
-    "api_key": "",
-    "model": "gpt-4o-mini",
-    "base_url": ""
-  },
-  "ytdlp": {
-    "headers": {}
-  },
-  "log": {
-    "level": "info"
-  }
-}
-```
-
-| 配置项 | 说明 |
-|---|---|
-| `cache.enabled` | 音频缓存总开关（默认开） |
-| `cache.max_entries` | 缓存歌曲数上限，超出按 LRU 淘汰（默认 100） |
-| `cache.dir` | 缓存目录（默认 `~/.cache/music-tui`，删掉即清空缓存） |
-| `openai.api_key` | OpenAI 协议兼容服务的 API key；**留空 = 禁用 AI 歌词增强**（行为与不带 key 完全一致） |
-| `openai.model` | 模型名（默认 `gpt-4o-mini`） |
-| `openai.base_url` | 兼容服务地址，可填 DeepSeek（`https://api.deepseek.com/v1`）等任何 OpenAI 协议兼容服务 |
-| `ytdlp.headers` | 附加到每次 yt-dlp 调用的 HTTP 头（可选） |
-| `log.level` | 日志级别：`debug` / `info` / `warn` / `error` |
 
 ## 📂 数据与日志
 
