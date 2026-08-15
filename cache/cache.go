@@ -268,7 +268,7 @@ func (m *Manager) register(id, file string) error {
 	return m.idx.save(m.indexPath())
 }
 
-// evictIfOverLimit 超限淘汰最旧条目（删文件）；调用方持 m.mu。
+// evictIfOverLimit 超限淘汰最旧条目（删文件）；调用方应持 m.mu（New 构造期无并发除外）。
 func (m *Manager) evictIfOverLimit() {
 	max := m.maxEntries
 	if max < 1 {

@@ -1215,7 +1215,11 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 			}
 			if m.retryCount < maxPlayRetries {
 				m.retryCount++
-				logger.Warn("播放失败，自动重试 %d/%d: %s - %s (id=%s)", m.retryCount, maxPlayRetries, m.state.Track.Title, m.state.Track.Artist, m.state.Track.ID)
+				if t := m.state.Track; t != nil {
+					logger.Warn("播放失败，自动重试 %d/%d: %s - %s (id=%s)", m.retryCount, maxPlayRetries, t.Title, t.Artist, t.ID)
+				} else {
+					logger.Warn("播放失败，自动重试 %d/%d", m.retryCount, maxPlayRetries)
+				}
 				m, cmd := m.showToast(fmt.Sprintf("播放失败：%s，正在自动重试（%d/%d）…", hint, m.retryCount, maxPlayRetries), toastWarning)
 				m.state.Playing = false
 				m.home = m.home.syncState(m.state)

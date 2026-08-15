@@ -46,7 +46,9 @@ func TestParseLevel(t *testing.T) {
 		{"warn", LevelWarn},
 		{"error", LevelError},
 		{"", LevelInfo},
-		{"INFO", LevelInfo}, // 大小写敏感：非法回落
+		{"INFO", LevelInfo}, // 大小写不敏感：正常解析为 info
+		{"WARN", LevelWarn},
+		{"Debug", LevelDebug},
 		{"verbose", LevelInfo},
 	}
 	for _, c := range cases {
@@ -102,6 +104,11 @@ func TestLineFormat(t *testing.T) {
 func TestInitFailureDegrades(t *testing.T) {
 	// 日志路径指向不存在目录 → Init 失败 → 写不 panic、不创建文件
 	logPath = filepath.Join(t.TempDir(), "no-such-dir", "x.log")
+	t.Cleanup(func() {
+		// 恢复全局状态（logPath 与默认级别），保证测试顺序无关
+		logPath = filepath.Join(os.TempDir(), "music-tui.log")
+		level = LevelInfo
+	})
 	Init(LevelDebug)
 	Info("should not panic")
 	SetLevel(LevelInfo)

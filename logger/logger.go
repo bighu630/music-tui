@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -30,9 +31,9 @@ var (
 	MaxFileSize = int64(5 * 1024 * 1024)
 )
 
-// NormalizeLevel 返回 s 的规范化级别字符串；空/非法回落 "info"。
+// NormalizeLevel 返回 s 的规范化级别字符串（大小写不敏感）；空/非法回落 "info"。
 func NormalizeLevel(s string) string {
-	switch s {
+	switch strings.ToLower(s) {
 	case "debug":
 		return "debug"
 	case "warn":
