@@ -239,6 +239,10 @@ type Model struct {
 	pl      *playlists.Store
 	yt      *ytm.Client // YT Music 同步客户端；nil = 未集成（测试/降级）
 
+	// ytdlpConfigured 是否已配置 yt-dlp cookie/headers（main 组装时注入）：
+	// 未配置时取流风控类失败（YouTube 403/风控）的提示附加 YT Music 登录引导。
+	ytdlpConfigured bool
+
 	cache            *cache.Manager // 音频缓存（命中优先本地文件；未命中后台下载）
 	playingFromCache bool           // 当前曲目是否播放自缓存文件（LoadFailed 时据此移除损坏条目）
 
@@ -297,29 +301,32 @@ type Model struct {
 // NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h/sess/pl/cm/yt 为具体服务，
 // cm 为音频缓存管理器（nil = 未集成），yt 为 YT Music 同步客户端（nil = 未集成），
 // onTrack 在播放状态变化时同步回调当前曲目（nil 表示无曲目；可为 nil）。
+// ytdlpConfigured 表示已配置 yt-dlp cookie/headers（未配置且取流风控类失败时，
+// 失败提示附加 YT Music 登录 cookie 配置引导）。
 // 若 sess 存在已保存会话（队列 + 进度），同步恢复队列与播放状态（暂停态），
 // mpv 的静默加载由 Init 返回的 resumeCmd 完成。
-func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, cm *cache.Manager, yt *ytm.Client, onTrack func(*model.Track)) Model {
+func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, cm *cache.Manager, yt *ytm.Client, onTrack func(*model.Track), ytdlpConfigured bool) Model {
 
 	m := Model{
-		player:       p,
-		lyrics:       l,
-		cover:        c,
-		history:      h,
-		queue:        queue.New(),
-		session:      sess,
-		pl:           pl,
-		cache:        cm,
-		yt:           yt,
-		onTrack:      onTrack,
-		current:      pageHome,
-		hoverTab:     -1,
-		failedTracks: map[string]bool{},
-		home:         newHomeModel(p),
-		searchPage:   newSearchModel(s),
-		historyPage:  newHistoryModel(),
-		queuePage:    newQueueModel(),
-		plPage:       newPlaylistModel(),
+		player:          p,
+		lyrics:          l,
+		cover:           c,
+		history:         h,
+		queue:           queue.New(),
+		session:         sess,
+		pl:              pl,
+		cache:           cm,
+		yt:              yt,
+		onTrack:         onTrack,
+		ytdlpConfigured: ytdlpConfigured,
+		current:         pageHome,
+		hoverTab:        -1,
+		failedTracks:    map[string]bool{},
+		home:            newHomeModel(p),
+		searchPage:      newSearchModel(s),
+		historyPage:     newHistoryModel(),
+		queuePage:       newQueueModel(),
+		plPage:          newPlaylistModel(),
 	}
 	// 续播恢复：会话存在且队列有当前曲目才恢复；否则丢弃会话从空态开始
 	if st := sess.State(); st != nil {
@@ -1179,7 +1186,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 			case fromCache:
 				hint = "缓存文件损坏，已移除（下次播放将重新下载）"
 			default:
-				hint = loadFailureHint(le.FileError)
+				hint = m.failureHint(le)
 			}
 			// 续播恢复（PlayPaused 静默加载）期间撞取流失败：不自动重试——
 			// 恢复上下文已作废（重试会走 beginPlay→Play()：发声、从 0:00、
@@ -1282,6 +1289,19 @@ func loadFailureHint(fileErr string) string {
 	default:
 		return "播放出错：" + fileErr
 	}
+}
+
+// failureHint 取流失败（LoadFailedError）提示：在 loadFailureHint 诊断基础上，
+// 未配置 yt-dlp cookie/headers 且失败与风控相关（提示含“风控/拒绝访问”或
+// file_error 含 403）时，附加 YT Music 登录（cookie）配置引导，给用户可操作方向。
+// 已配置或非风控失败不加引导（避免噪音）。
+func (m Model) failureHint(le *player.LoadFailedError) string {
+	h := loadFailureHint(le.FileError)
+	if !m.ytdlpConfigured &&
+		(strings.Contains(h, "风控") || strings.Contains(h, "拒绝访问") || strings.Contains(le.FileError, "403")) {
+		h += "；可在设置中配置 YT Music 登录（cookie）降低风控失败，重启生效"
+	}
+	return h
 }
 
 // skipFailedTrack 重试耗尽后跳过失败曲目：播放 tr 并设置跳过横幅。

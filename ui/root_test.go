@@ -242,7 +242,7 @@ func newYTTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, onTrack
 // newTestModelBase 组装除 yt 外的全部服务与模型（newTestModel/newYTTestModel 共用）。
 // 缓存指向临时目录 + 不存在的 yt-dlp（CacheAsync 后台下载立即失败退出，无网络无泄漏）。
 func newTestModelBase(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, yt *ytm.Client, onTrack func(*model.Track)) Model {
-	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, "/nonexistent/yt-dlp")
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, "/nonexistent/yt-dlp", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,6 +251,7 @@ func newTestModelBase(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, yt *y
 
 // newTestModelBaseWithCache 同 newTestModelBase，但缓存管理器由调用方注入
 // （缓存预热时序测试用：注入假 yt-dlp 脚本观测下载调用）。
+// 默认 ytdlpConfigured=false（未配置 yt-dlp cookie；需要已配置场景的测试直接改 m.ytdlpConfigured）。
 func newTestModelBaseWithCache(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, yt *ytm.Client, onTrack func(*model.Track), cm *cache.Manager) Model {
 	t.Helper()
 	lyricServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -276,7 +277,7 @@ func newTestModelBaseWithCache(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapt
 	}
 	return NewModel(fp, fa,
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, pls, cm, yt, onTrack)
+		cf, hist, sess, pls, cm, yt, onTrack, false)
 }
 
 // refreshYTStatus 把 store 的登录状态同步进模型与页面（直接 seed store 后调用）。
@@ -1238,6 +1239,102 @@ func TestLoadFailRetriesThenSucceeds(t *testing.T) {
 	}
 }
 
+// 未配置 yt-dlp cookie 且取流失败属风控类（no audio or video data played / 403）：
+// toast 附加「配置 YT Music 登录」引导，给用户可操作方向（TDD 引导行为）。
+func TestLoadFailHintGuidesCookieWhenUnconfigured(t *testing.T) {
+	cases := []struct {
+		name     string
+		fileErr  string
+		wantHint string
+	}{
+		{
+			name:     "no audio or video data played",
+			fileErr:  "no audio or video data played",
+			wantHint: "可在设置中配置 YT Music 登录（cookie）降低风控失败，重启生效",
+		},
+		{
+			name:     "403 forbidden",
+			fileErr:  "yt-dlp: HTTP Error 403: Forbidden",
+			wantHint: "可在设置中配置 YT Music 登录（cookie）降低风控失败，重启生效",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := newFakePlayer()
+			m := newTestModel(t, fp, &fakeSearchAdapter{}, nil) // 默认 ytdlpConfigured=false
+			m, cmd := m.startPlay(testTrack("t1"))
+			_ = execCmds(cmd)
+
+			m, _ = update(m, playerEventMsg{ev: player.ErrorEvent{Err: &player.LoadFailedError{FileError: tc.fileErr}}})
+			toast := activeToastText(m)
+			if !strings.Contains(toast, "配置 YT Music 登录") {
+				t.Errorf("toast = %q, want 含“配置 YT Music 登录”引导", toast)
+			}
+			if !strings.Contains(toast, tc.wantHint) {
+				t.Errorf("toast = %q, want 含完整引导 %q", toast, tc.wantHint)
+			}
+		})
+	}
+}
+
+// 已配置 yt-dlp cookie（ytdlpConfigured=true）：同类风控失败不加引导（用户已知），
+// 但重试提示本身保留。
+func TestLoadFailHintNoGuideWhenConfigured(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m.ytdlpConfigured = true
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	m, _ = update(m, playerEventMsg{ev: player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}})
+	toast := activeToastText(m)
+	if strings.Contains(toast, "配置 YT Music 登录") {
+		t.Errorf("已配置 cookie 时 toast = %q, want 不含“配置 YT Music 登录”引导", toast)
+	}
+	if !strings.Contains(toast, "正在自动重试（1/2）") {
+		t.Errorf("toast = %q, want 仍含“正在自动重试（1/2）”", toast)
+	}
+}
+
+// 未配置 cookie 但失败与风控无关（网络解析失败）：不加 cookie 引导，避免噪音。
+func TestLoadFailHintNoGuideForNonRiskFailure(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	m, _ = update(m, playerEventMsg{ev: player.ErrorEvent{Err: &player.LoadFailedError{FileError: "Couldn't resolve host: youtube.com"}}})
+	if toast := activeToastText(m); strings.Contains(toast, "配置 YT Music 登录") {
+		t.Errorf("非风控失败 toast = %q, want 不含“配置 YT Music 登录”引导", toast)
+	}
+}
+
+// failureHint 方法级规则：未配置 + 风控类失败追加引导；已配置或非风控失败不加。
+// 403 判定同时覆盖 hint 映射与 FileError 原始文本两条触发路径。
+func TestFailureHint(t *testing.T) {
+	guide := "可在设置中配置 YT Music 登录（cookie）降低风控失败，重启生效"
+	riskCases := []*player.LoadFailedError{
+		{FileError: "no audio or video data played"},     // hint 含“风控”
+		{FileError: "yt-dlp: HTTP Error 403: Forbidden"}, // hint 含“拒绝访问”+ FileError 含 403
+		{FileError: "request failed with status 403"},    // FileError 含 403 兜底
+	}
+	for _, le := range riskCases {
+		if h := (Model{}).failureHint(le); !strings.Contains(h, guide) {
+			t.Errorf("未配置 + %q: failureHint = %q, want 含 cookie 引导", le.FileError, h)
+		}
+	}
+	// 已配置：同类失败不加引导
+	if h := (Model{ytdlpConfigured: true}).failureHint(riskCases[0]); strings.Contains(h, guide) {
+		t.Errorf("已配置 + 风控失败: failureHint = %q, want 不含引导", h)
+	}
+	// 未配置 + 非风控失败（含空 FileError）：不加引导
+	for _, fileErr := range []string{"Couldn't resolve host: youtube.com", "", "mpv: file not found"} {
+		if h := (Model{}).failureHint(&player.LoadFailedError{FileError: fileErr}); strings.Contains(h, guide) {
+			t.Errorf("非风控失败 %q: failureHint = %q, want 不含引导", fileErr, h)
+		}
+	}
+}
+
 // 队列连播时某曲重试耗尽：跳过失败曲目，继续播放下一首；
 // 横幅保留告知用户哪首失败（不中断整个连播）。
 func TestLoadFailRetriesExhaustedSkipsInQueue(t *testing.T) {
@@ -1951,7 +2048,7 @@ func TestTrackStartedTriggersCacheWarmup(t *testing.T) {
 	fp := newFakePlayer()
 	fa := &fakeSearchAdapter{}
 	logPath := filepath.Join(t.TempDir(), "ytdlp.log")
-	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, writeFakeYtDlpScript(t, logPath))
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, writeFakeYtDlpScript(t, logPath), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
