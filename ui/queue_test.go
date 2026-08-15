@@ -754,3 +754,153 @@ func TestQueueCurrentItemShowsAITitle(t *testing.T) {
 		t.Errorf("当前项不应再显示原始标题: %q", got)
 	}
 }
+
+// TestQueueSlashFilter 队列页 / 过滤全流程：打开→输入实时过滤→计数→
+// Enter 确认→过滤态播放/删除（原始下标）→Esc 恢复。
+// 注：数字 1-5 被 root 拦截用于切页（设计约束：过滤词无法含 1-5），
+// 故用无数字关键词 "tb" 验证单选命中。
+func TestQueueSlashFilter(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	for _, id := range []string{"ta", "tb", "tc"} {
+		m.queue.Add(testTrack(id))
+	}
+	m = m.syncQueueViews()
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 队列页
+
+	// / 打开过滤
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if !m.queuePage.filtering || !m.queuePage.filterInput.Focused() {
+		t.Fatalf("/ 后 filtering=%v focused=%v, want true/true", m.queuePage.filtering, m.queuePage.filterInput.Focused())
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, "过滤:") {
+		t.Errorf("过滤行未渲染: %q", got)
+	}
+
+	// 输入 "tb" 实时过滤 + 计数（数字 1-5 不可入过滤词，用字母区分）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	if got := m.queuePage.view(); !strings.Contains(got, "(1/3)") {
+		t.Errorf("计数应显示 (1/3): %q", got)
+	}
+	if n := len(m.queuePage.list.VisibleItems()); n != 1 {
+		t.Fatalf("过滤后可见 %d 项, want 1", n)
+	}
+
+	// Enter 确认：失焦、过滤保持
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.queuePage.filterInput.Focused() {
+		t.Fatal("Enter 应确认过滤并失焦")
+	}
+	if m.queuePage.filtering != true {
+		t.Fatal("确认后 filtering 应保持 true")
+	}
+
+	// 确认态 Enter 播放 → queuePlayMsg.index 为原始下标 1
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	var play queuePlayMsg
+	for _, msg := range execCmds(cmd) {
+		if pm, ok := msg.(queuePlayMsg); ok {
+			play = pm
+		}
+	}
+	if play.index != 1 {
+		t.Fatalf("过滤态播放 index = %d, want 1（原始队列下标）", play.index)
+	}
+
+	// 确认态 d 删除 → deleteEntryMsg 原始下标 1
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	var del queueDeleteMsg
+	for _, msg := range execCmds(cmd) {
+		if dm, ok := msg.(queueDeleteMsg); ok {
+			del = dm
+		}
+	}
+	if del.index != 1 {
+		t.Fatalf("过滤态删除 index = %d, want 1", del.index)
+	}
+	m, _ = update(m, del) // root 执行删除
+	if len(m.queuePage.list.VisibleItems()) != 0 {
+		t.Errorf("删除后过滤列表应为空（剩余 ta/tc 不含 tb）")
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, "(0/2)") {
+		t.Errorf("删除后计数应 (0/2): %q", got)
+	}
+
+	// Esc 恢复完整列表
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.queuePage.filtering {
+		t.Fatal("Esc 应退出过滤")
+	}
+	if got := m.queuePage.view(); strings.Contains(got, "过滤:") {
+		t.Errorf("退出后不应有过滤行: %q", got)
+	}
+	if n := len(m.queuePage.list.VisibleItems()); n != 2 {
+		t.Fatalf("恢复后可见 %d 项, want 2", n)
+	}
+}
+
+// TestQueueSlashFilterIndexMapping 多命中时选中项与原始下标映射。
+func TestQueueSlashFilterIndexMapping(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	for _, id := range []string{"ta", "tb", "tc"} {
+		m.queue.Add(testTrack(id))
+	}
+	m = m.syncQueueViews()
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")}) // 命中全部 3 项
+	if n := len(m.queuePage.list.VisibleItems()); n != 3 {
+		t.Fatalf("过滤后可见 %d 项, want 3", n)
+	}
+	// 聚焦态 ↑↓ 仍可移动列表
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 确认（选中第 2 项）
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	var play queuePlayMsg
+	for _, msg := range execCmds(cmd) {
+		if pm, ok := msg.(queuePlayMsg); ok {
+			play = pm
+		}
+	}
+	if play.index != 1 {
+		t.Fatalf("播放 index = %d, want 1", play.index)
+	}
+	// 已确认态再按 /：重新聚焦并保留关键词（本次按键不消费为字符）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if !m.queuePage.filterInput.Focused() {
+		t.Fatal("已确认态 / 应重新聚焦过滤输入框")
+	}
+	if m.queuePage.filterInput.Value() != "t" {
+		t.Fatalf("重聚焦应保留关键词, got %q", m.queuePage.filterInput.Value())
+	}
+	// 聚焦态再按 / 才是输入字符
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if m.queuePage.filterInput.Value() != "t/" {
+		t.Fatalf("聚焦态 / 应输入字符, got %q", m.queuePage.filterInput.Value())
+	}
+}
+
+// TestQueueSlashFilterSyncReapplies 过滤态下 sync 重放过滤（删除后计数一致）。
+func TestQueueSlashFilterSyncReapplies(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	for _, id := range []string{"ta", "tb", "tc"} {
+		m.queue.Add(testTrack(id))
+	}
+	m = m.syncQueueViews()
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	// 外部变化（如搜索页追加 u4）→ sync 后过滤仍生效（u4 不含关键词 t）
+	m.queue.Add(testTrack("u4"))
+	m = m.syncQueueViews()
+	if n := len(m.queuePage.list.VisibleItems()); n != 3 {
+		t.Fatalf("sync 后过滤列表 %d 项, want 3（u4 不含关键词）", n)
+	}
+	if got := m.queuePage.view(); !strings.Contains(got, "(3/4)") {
+		t.Errorf("sync 后计数应 (3/4): %q", got)
+	}
+}
