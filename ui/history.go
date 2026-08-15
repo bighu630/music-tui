@@ -55,7 +55,8 @@ func (h historyModel) Update(msg tea.Msg) (historyModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "enter":
+		case "enter", "p":
+			// p 与 Enter 同义：选中记录 → 播放（替换语义）
 			if item, ok := h.list.SelectedItem().(historyItem); ok {
 				return h, emitTrackSelected(item.entry.Track)
 			}
@@ -63,12 +64,6 @@ func (h historyModel) Update(msg tea.Msg) (historyModel, tea.Cmd) {
 		case "d":
 			if item, ok := h.list.SelectedItem().(historyItem); ok {
 				return h, emitDeleteEntry(item.entry.Track.ID, item.entry.Track.Source)
-			}
-			return h, nil
-		case "a":
-			// 选中记录 → 追加到队尾（不打断当前播放）
-			if item, ok := h.list.SelectedItem().(historyItem); ok {
-				return h, emitTrackAppend(item.entry.Track)
 			}
 			return h, nil
 		case "c":
@@ -92,7 +87,7 @@ func (h historyModel) setEntries(entries []history.Entry) historyModel {
 	return h
 }
 
-// selectedTrack 返回当前选中的历史记录（供全局 p 键添加到播放列表）。
+// selectedTrack 返回当前选中的历史记录（供全局 a 键添加到播放列表）。
 func (h historyModel) selectedTrack() (model.Track, bool) {
 	if item, ok := h.list.SelectedItem().(historyItem); ok {
 		return item.entry.Track, true
@@ -116,5 +111,5 @@ func (h historyModel) view() string {
 			Render("暂无播放历史\n\n去搜索页播放一首歌吧")
 	}
 	return h.list.View() + "\n" +
-		lipgloss.NewStyle().Faint(true).Render("Enter 重播 · a 加入队列 · d 删除 · c 清空")
+		lipgloss.NewStyle().Faint(true).Render("Enter/p 重播 · d 删除 · c 清空 · a 添加到…")
 }

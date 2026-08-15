@@ -281,7 +281,7 @@ type Model struct {
 	queuePage   queueModel
 	plPage      playlistModel
 
-	plPicker *plPickerModel // 全局 p 键“添加到播放列表”选择器；nil = 未打开
+	plPicker *plPickerModel // 全局 a 键“添加到”选择器；nil = 未打开
 
 	onTrack func(*model.Track) // 外部消费者（MPRIS）感知当前曲目；nil 安全
 }
@@ -902,8 +902,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.saveSession() // 退出前持久化会话（队列 + 进度）
 			return m, tea.Quit
-		case "p":
-			// 输入框聚焦时 p 是输入字符（同空格/q 模式）。
+		case "a":
+			// 输入框聚焦时 a 是输入字符（同空格/q 模式）；否则弹出“添加到”选择器
+			//（当前播放队列/各播放列表/新建列表）。p 已改为页面层播放键，全局不拦截。
 			if m.typingText() {
 				return m.delegate(msg)
 			}
@@ -1600,7 +1601,7 @@ func (m Model) delegate(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 // typingText 返回是否有输入框处于聚焦（搜索关键词/播放列表命名）：
-// 聚焦时字符类全局键（空格/p/q）让位给输入框。
+// 聚焦时字符类全局键（空格/a/q）让位给输入框。
 func (m Model) typingText() bool {
 	switch m.current {
 	case pageSearch:
@@ -1611,7 +1612,7 @@ func (m Model) typingText() bool {
 	return false
 }
 
-// selectedTrack 返回当前页面选中的歌曲（供全局 p 键添加到播放列表）；
+// selectedTrack 返回当前页面选中的歌曲（供全局 a 键添加到播放列表）；
 // 首页/队列页无选中歌曲语义，返回 false。
 func (m Model) selectedTrack() (model.Track, bool) {
 	switch m.current {

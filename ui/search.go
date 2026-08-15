@@ -82,7 +82,7 @@ func newSearchModel(adapter search.SearchAdapter) searchModel {
 // 仍由 root 全局切页，其余数字字符由输入框消费）。
 func (s searchModel) typing() bool { return s.input.Focused() }
 
-// selectedTrack 返回当前选中的搜索结果（供全局 p 键添加到播放列表）；
+// selectedTrack 返回当前选中的搜索结果（供全局 a 键添加到播放列表）；
 // 未完成搜索/无结果/无选中项时返回 false。
 func (s searchModel) selectedTrack() (model.Track, bool) {
 	if s.state != searchDone || len(s.results) == 0 {
@@ -119,15 +119,15 @@ func (s searchModel) Update(msg tea.Msg) (searchModel, tea.Cmd) {
 				}
 			}
 			return s, nil
-		case "a":
-			// 输入框聚焦时 'a' 是搜索字符（走下方 typing 分支插入）
+		case "p":
+			// 输入框聚焦时 p 是输入字符（走下方 typing 分支插入）
 			if s.typing() {
 				break
 			}
-			// 列表选中项 → 追加到队尾（不打断当前播放）
+			// 列表选中项 → 播放（与 Enter 同义，替换语义）
 			if s.state == searchDone && len(s.results) > 0 {
 				if item, ok := s.list.SelectedItem().(trackItem); ok {
-					return s, emitTrackAppend(item.track)
+					return s, emitTrackSelected(item.track)
 				}
 			}
 			return s, nil
@@ -214,7 +214,7 @@ func (s searchModel) view() string {
 			sb.WriteString(lipgloss.NewStyle().Faint(true).Render("无结果"))
 		default:
 			sb.WriteString(s.list.View())
-			sb.WriteString("\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ 选择 · Enter 播放 · a 加入队列"))
+			sb.WriteString("\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ 选择 · Enter/p 播放 · a 添加到…"))
 		}
 	}
 	return sb.String()

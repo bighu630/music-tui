@@ -76,13 +76,14 @@ func newQueueModel() queueModel {
 	return queueModel{list: l, current: -1}
 }
 
-// Update 处理队列页按键：Enter 跳转播放、d 删除、c 清空、s 切换模式；
+// Update 处理队列页按键：Enter/p 跳转播放、d 删除、c 清空、s 切换模式；
 // 其余按键交给列表（↑↓ 选择等）。
 func (q queueModel) Update(msg tea.Msg) (queueModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "enter":
+		case "enter", "p":
+			// p 与 Enter 同义：跳转播放选中曲目（保留队列）
 			if item, ok := q.list.SelectedItem().(queueItem); ok {
 				return q, emitQueuePlay(item.idx)
 			}
@@ -152,10 +153,10 @@ func (q queueModel) view() string {
 		return lipgloss.NewStyle().
 			Padding(1, 0).
 			Faint(true).
-			Render("队列为空\n\n搜索页选中结果后按 a 加入队列，Enter 立即播放")
+			Render("队列为空\n\n搜索页选中结果后按 a 添加到队列，Enter 立即播放")
 	}
 	return q.list.View() + "\n" +
-		lipgloss.NewStyle().Faint(true).Render(q.modeLabel()+" · Enter 跳转播放 · d 删除 · c 清空 · s 切换模式")
+		lipgloss.NewStyle().Faint(true).Render(q.modeLabel()+" · Enter/p 跳转播放 · d 删除 · c 清空 · s 切换模式")
 }
 
 // modeLabel 队列页底部的模式名（完整三态文案：列表循环/随机播放/单曲循环）。

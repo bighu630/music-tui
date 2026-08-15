@@ -1,4 +1,4 @@
-// 播放列表页（两级视图：概览 ↔ 详情）与全局 p 键"添加到播放列表"选择器。
+// 播放列表页（两级视图：概览 ↔ 详情）与全局 a 键“添加到”选择器。
 package ui
 
 import (
@@ -261,15 +261,15 @@ func newPlaylistModel() playlistModel {
 }
 
 // Update 处理播放列表页按键。
-// overview：Enter 进入详情、n 新建、r 重命名、d 删除、s 登录设置、
+// overview：Enter 进入详情、n 新建、r 重命名、d 删除、p 播放选中列表、
 //
-//	y 同步全部、u URL 导入（s/y/u 仅概览响应，详情不响应）；
+//	s 登录设置、y 同步全部、u URL 导入（s/y/u 仅概览响应，详情不响应）；
 //
-// detail：Enter 整列表播放、a 加入队列、d 移除、r 刷新（YT 同步列表）、
+// detail：Enter/p 整列表播放、d 移除、r 刷新（YT 同步列表）、
 //
 //	Esc/← 返回概览；
 //
-// 命名输入：Enter 提交、Esc 取消；
+// 命名输入：Enter 提交、Esc 取消（字符键含 a/p 均让位输入框）；
 // URL 导入：Enter 提交（空值忽略）、Esc 返回概览；
 // 登录设置：主菜单/浏览器二级列表 Enter 确认、Esc 返回上一层，
 //
@@ -350,7 +350,8 @@ func (p playlistModel) Update(msg tea.Msg) (playlistModel, tea.Cmd) {
 			}
 		case plDetail:
 			switch msg.String() {
-			case "enter":
+			case "enter", "p":
+				// p 与 Enter 同义：整列表替换进队列，从选中曲开始播放
 				if item, ok := p.detail.SelectedItem().(plTrackItem); ok {
 					return p, emitPlLoad(p.curName, item.idx)
 				}
@@ -358,11 +359,6 @@ func (p playlistModel) Update(msg tea.Msg) (playlistModel, tea.Cmd) {
 			case "d":
 				if item, ok := p.detail.SelectedItem().(plTrackItem); ok {
 					return p, emitPlRemoveTrack(p.curName, item.idx)
-				}
-				return p, nil
-			case "a":
-				if item, ok := p.detail.SelectedItem().(plTrackItem); ok {
-					return p, emitTrackAppend(item.track)
 				}
 				return p, nil
 			case "r":
@@ -377,6 +373,12 @@ func (p playlistModel) Update(msg tea.Msg) (playlistModel, tea.Cmd) {
 			case "enter":
 				if item, ok := p.overview.SelectedItem().(overviewItem); ok {
 					return p.enterDetail(item.list), nil
+				}
+				return p, nil
+			case "p":
+				// 播放选中列表（从第一首开始）
+				if item, ok := p.overview.SelectedItem().(overviewItem); ok {
+					return p, emitPlLoad(item.list.Name, 0)
 				}
 				return p, nil
 			case "n":
@@ -643,7 +645,7 @@ func (p playlistModel) setYTSyncs(entries []ytm.SyncEntry) playlistModel {
 	return p
 }
 
-// selectedTrack 详情模式且有选中项时返回（供全局 p 键添加到播放列表）。
+// selectedTrack 详情模式且有选中项时返回（供全局 a 键添加到播放列表）。
 func (p playlistModel) selectedTrack() (model.Track, bool) {
 	if p.mode != plDetail {
 		return model.Track{}, false
@@ -683,9 +685,9 @@ func (p playlistModel) view() string {
 			return lipgloss.NewStyle().
 				Padding(1, 0).
 				Faint(true).
-				Render("列表为空\n\n在搜索/历史页选中歌曲后按 p 添加到播放列表")
+				Render("列表为空\n\n在搜索/历史页选中歌曲后按 a 添加到播放列表")
 		}
-		hint := "Enter 从选中曲播放整个列表 · a 加入队列 · d 移除 · Esc 返回"
+		hint := "Enter/p 从选中曲播放整个列表 · d 移除 · Esc 返回"
 		if p.ytSyncNames[p.curName] {
 			hint += " · r 刷新"
 		}
@@ -700,7 +702,7 @@ func (p playlistModel) view() string {
 				Render("暂无播放列表\n\n按 n 新建播放列表")
 		}
 		return status + "\n" + p.overview.View() + "\n" +
-			lipgloss.NewStyle().Faint(true).Render("Enter 查看 · n 新建 · r 重命名 · d 删除 · s 登录设置 · y 同步全部 · u 导入")
+			lipgloss.NewStyle().Faint(true).Render("Enter 查看 · p 播放 · n 新建 · r 重命名 · d 删除 · s 登录设置 · y 同步全部 · u 导入")
 	}
 }
 
@@ -765,10 +767,11 @@ func (p playlistModel) ytLoginMethodLabel() string {
 	return p.ytLogin.Method.String()
 }
 
-// ---- 全局 p 键选择器 ----
+// ---- 全局 a 键选择器 ----
 
-// plPickerModel 按 p 弹出的"添加到播放列表"选择器：
-// 列表名 + 末尾固定"＋ 新建列表"项；Enter 直接加入，或进入命名输入新建列表。
+// plPickerModel 按 a 弹出的"添加到"选择器：
+// 首项固定"当前播放队列"（Enter 直接追加到队尾）+ 各列表名 + 末尾固定
+// "＋ 新建列表"项；Enter 直接加入，或进入命名输入新建列表。
 // 选择器直接持有 store 完成加入/创建，关闭时把成功提示交给 root 展示。
 type plPickerModel struct {
 	pl    *playlists.Store
@@ -787,7 +790,7 @@ type plPickerModel struct {
 func newPlPicker(pl *playlists.Store, track model.Track) *plPickerModel {
 	delegate := list.NewDefaultDelegate()
 	l := list.New(nil, delegate, 80, 24)
-	l.Title = "添加到播放列表"
+	l.Title = "添加到"
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false)
 	l.SetShowStatusBar(false)
@@ -799,16 +802,28 @@ func newPlPicker(pl *playlists.Store, track model.Track) *plPickerModel {
 	return p
 }
 
-// refreshItems 从 store 重建列表项（末尾固定"＋ 新建列表"）。
+// refreshItems 从 store 重建列表项：首项固定"▶ 当前播放队列"（默认选中），
+// 中间各播放列表，末尾固定"＋ 新建列表"。
 func (p *plPickerModel) refreshItems() {
 	lists := p.pl.Lists()
-	items := make([]list.Item, 0, len(lists)+1)
+	items := make([]list.Item, 0, len(lists)+2)
+	items = append(items, pickerQueueItem{})
 	for _, l := range lists {
 		items = append(items, pickerListItem{name: l.Name})
 	}
 	items = append(items, pickerNewItem{})
 	p.list.SetItems(items)
 }
+
+// pickerQueueItem 选择器首项：追加到当前播放队列（固定第一项，默认选中）。
+// 样式加粗与末尾粉色新建项区分。
+type pickerQueueItem struct{}
+
+func (pickerQueueItem) Title() string {
+	return lipgloss.NewStyle().Bold(true).Render("▶ 当前播放队列")
+}
+func (pickerQueueItem) Description() string { return "追加到队尾" }
+func (pickerQueueItem) FilterValue() string { return "当前播放队列" }
 
 // pickerListItem 选择器里的列表条目。
 type pickerListItem struct{ name string }
@@ -864,6 +879,11 @@ func (p plPickerModel) Update(msg tea.Msg) (plPickerModel, tea.Cmd) {
 		switch msg.String() {
 		case "enter":
 			switch it := p.list.SelectedItem().(type) {
+			case pickerQueueItem:
+				// 追加到当前播放队列：走全局 trackAppendMsg（root 已有处理），
+				// 不设 notice（追加无成功 toast，与搜索/历史页直加队列一致）。
+				p.closed = true
+				return p, emitTrackAppend(p.track)
 			case pickerListItem:
 				if err := p.pl.AddTrack(it.name, p.track); err != nil {
 					p.err = err.Error()
