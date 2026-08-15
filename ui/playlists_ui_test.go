@@ -1496,6 +1496,95 @@ func TestYTURLImportFailure(t *testing.T) {
 	}
 }
 
+// ---- l 本地路径导入（页面层：输入 → plLocalAddMsg；root 层负责扫描与入库） ----
+
+// l 本地路径导入：输入 → plLocalAddMsg。Enter 后留在输入模式——失败时
+// root 只 toast（不退出输入），用户可直接改路径重试；成功由 root 退出输入。
+func TestPlaylistLocalAddFlow(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := m.pl.Create("本地歌单"); err != nil {
+		t.Fatal(err)
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
+		t.Fatalf("l 后应进入本地路径输入: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+	got := stripANSI(m.plPage.view())
+	if !strings.Contains(got, "输入本地路径（音频文件或目录），Enter 扫描") {
+		t.Error("本地路径输入占位缺失")
+	}
+	if !strings.Contains(got, "Enter 扫描 · Esc 返回") {
+		t.Error("本地路径输入提示行缺失")
+	}
+	dir := t.TempDir()
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(dir)})
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	var lm plLocalAddMsg
+	for _, msg := range execCmds(cmd) {
+		if imsg, ok := msg.(plLocalAddMsg); ok {
+			lm = imsg
+		}
+	}
+	if lm.path != dir {
+		t.Fatalf("plLocalAddMsg.path = %q, want %q", lm.path, dir)
+	}
+	if m.plPage.mode != plLocalAdd {
+		t.Fatalf("Enter 后应留在输入模式（失败可重试，成功由 root 退出）: mode=%v", m.plPage.mode)
+	}
+	if got := m.plPage.input.Value(); got != dir {
+		t.Errorf("提交后输入内容应保留（供修改重试）, got %q", got)
+	}
+}
+
+// l 本地路径导入：空输入 Enter 忽略（不产生消息、不退出输入）。
+func TestPlaylistLocalAddEmptyIgnored(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("   ")})
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Errorf("空路径 Enter 不应产生消息: %v", cmd)
+	}
+	if m.plPage.mode != plLocalAdd {
+		t.Errorf("空输入应留在本地输入模式: mode=%v", m.plPage.mode)
+	}
+}
+
+// l 本地路径导入：Esc 取消回概览。
+func TestPlaylistLocalAddEscCancels(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/tmp/x")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.plPage.mode != plOverview || m.plPage.typing() {
+		t.Fatalf("Esc 后应回概览: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+}
+
+// 本地路径输入聚焦时 a/空格/q 是输入字符（root 让位，同 URL 导入/命名输入）。
+func TestPlaylistLocalAddConsumesGlobalKeys(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if m.plPicker != nil {
+		t.Fatal("本地路径输入聚焦时 a 不应打开选择器")
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if got := m.plPage.input.Value(); got != "a q" {
+		t.Errorf("input = %q, want %q", got, "a q")
+	}
+	if !m.plPage.typing() {
+		t.Error("输入后应仍在本地路径输入模式")
+	}
+}
+
 // y 同步全部：成功 notice + 本地列表创建 + 同步映射 + 重复触发忽略。
 func TestYTSyncAllFlow(t *testing.T) {
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
