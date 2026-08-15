@@ -345,6 +345,55 @@ func TestHomeBottomControlRows(t *testing.T) {
 	}
 }
 
+// TestHomeControlBarPositions 渲染列位置必须与 controlBarLayout 命中区间一致：
+// 中栏 "|<" 起点 == lay.centerStart，右栏模式文本起点 == lay.rightStart。
+// （回归：padLeft 按 leftW 上限计算，标题实际宽度小于 leftW 时未补齐差额，
+//  中栏/右栏整体贴左偏移——用户终端验证发现 "顺序 9/25 后面一大堆空"，
+//  且鼠标命中区间（按 layout）与渲染位置错位导致点击失效。）
+func TestHomeControlBarPositions(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m.home = m.home.setSize(120, 40)
+	m.home = m.home.setQueueInfo(3, 12, queue.Sequential)
+
+	// 短标题（不截断，触发补位差额）与超长标题（触发截断）两种场景
+	cases := []struct {
+		name  string
+		title string
+	}{
+		{"短标题", "我怕来者不是你"},
+		{"超长标题", strings.Repeat("歌", 60)},
+	}
+	for _, tc := range cases {
+		tr := testTrack("t1")
+		tr.Title = tc.title
+		m.state = model.PlaybackState{Track: &tr, Playing: true}
+		m.home = m.home.syncState(m.state)
+
+		lines := strings.Split(m.home.view(), "\n")
+		btnLine := lines[len(lines)-1]
+		lay := m.home.controlBarLayout(m.home.width)
+
+		if col := colOf(btnLine, "|<"); col != lay.centerStart {
+			t.Errorf("%s: 中栏 |< 起始列 = %d, want %d (centerStart)\n按钮行: %q", tc.name, col, lay.centerStart, btnLine)
+		}
+		if col := colOf(btnLine, "顺序"); col != lay.rightStart {
+			t.Errorf("%s: 右栏模式文本起始列 = %d, want %d (rightStart)\n按钮行: %q", tc.name, col, lay.rightStart, btnLine)
+		}
+	}
+}
+
+// colOf 返回 line 中子串 substr 首次出现的起始列（按显示宽度）。
+func colOf(line, substr string) int {
+	idx := strings.Index(line, substr)
+	if idx < 0 {
+		return -1
+	}
+	return ansi.StringWidth(line[:idx])
+}
+
 // TestHomeModeKeyCycles 首页 m 键三态循环切换模式（Sequential→Shuffle→
 // RepeatOne→Sequential）。与队列页 s 键语义一致：模式是全局队列属性，
 // 无曲目时也应能切换（root.cycleMode 不依赖当前播放）。

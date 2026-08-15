@@ -602,15 +602,25 @@ func (m homeModel) controlBarView() string {
 		leftW = 10
 	}
 	left := ansi.Truncate(t.Title+" - "+t.Artist, leftW, "…")
-	padLeft := lay.centerStart - leftW - 2 // 中栏起点前的补位
-	if padLeft < 0 {
-		padLeft = 0
+	// 补位按 left 实际显示宽计算（而非 leftW 上限）：标题短于左栏宽/截断符
+	// 使 left 不足 leftW 时，差额不补齐会导致中栏/右栏整体贴左偏移——
+	// 渲染与命中区间（controlBarLayout）错位，且右侧大片空白。
+	leftPad := lay.centerStart - ansi.StringWidth(left) - 2
+	if leftPad < 0 {
+		leftPad = 0
+	}
+	// 中栏→右栏间距同样取自 layout（rightStart - 中栏终点）：右栏右对齐
+	// 到 rightStart（右缘留 2 列），gap 随窗口宽度变化；若按固定 2+边距
+	// 计算会与命中区间错位 2 列（回归：右栏渲染右移、行尾无留白）。
+	gapRight := lay.rightStart - (lay.centerStart + centerBarW)
+	if gapRight < 0 {
+		gapRight = 0
 	}
 	padRight := width - lay.rightStart - rightW
 	if padRight < 0 {
 		padRight = 0
 	}
-	return left + strings.Repeat(" ", 2+padLeft) + center + strings.Repeat(" ", 2+padRight) + right
+	return left + strings.Repeat(" ", 2+leftPad) + center + strings.Repeat(" ", gapRight) + right + strings.Repeat(" ", padRight)
 }
 
 // modeIcon 三态播放模式图标。
