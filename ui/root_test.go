@@ -3412,6 +3412,25 @@ func TestPlaylistLocalAddMsgFailure(t *testing.T) {
 	}
 }
 
+// 本地目录导入：空目录（无音频文件）→ toastError 含「目录中没有找到支持的音频文件」、
+// 不新建列表、留在输入模式（可重试）。
+func TestPlaylistLocalAddMsgEmptyDir(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	dir := t.TempDir() // 空目录：无任何音频文件
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, plLocalAddMsg{path: dir})
+	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "目录中没有找到支持的音频文件") {
+		t.Errorf("toast = %+v, want toastError 且含「目录中没有找到支持的音频文件」", m.toast)
+	}
+	if len(m.pl.Lists()) != 0 {
+		t.Error("空目录失败不应新建列表")
+	}
+	if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
+		t.Errorf("失败应留在输入框可重试: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
+	}
+}
+
 // 本地目录导入重名：已存在「本地-<目录名>」→ toastError 含「已存在同名列表」、
 // 留在输入框、不重复添加。
 func TestPlaylistLocalAddMsgDuplicateName(t *testing.T) {

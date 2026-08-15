@@ -1502,10 +1502,6 @@ func TestYTURLImportFailure(t *testing.T) {
 // root 只 toast（不退出输入），用户可直接改路径重试；成功由 root 退出输入。
 func TestPlaylistLocalAddFlow(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	if _, err := m.pl.Create("本地歌单"); err != nil {
-		t.Fatal(err)
-	}
-	m.plPage = m.plPage.setLists(m.pl.Lists())
 
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})

@@ -665,14 +665,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m, cmd := m.showToast(err.Error(), toastError)
 			return m, cmd
 		}
-		// Clean 先处理尾部斜杠（如 "/a/b/" → base="b"）
-		listName := "本地-" + filepath.Base(filepath.Clean(path))
+		// Clean 先处理尾部斜杠（如 "/a/b/" → base="b"）；根/当前目录退化时
+		// Base 为 "/"、"."、".."，无目录名可取 → 报错留在输入框，
+		// 避免生成「本地-/」类怪名
+		base := filepath.Base(filepath.Clean(path))
+		if base == "/" || base == "." || base == ".." {
+			m, cmd := m.showToast(fmt.Sprintf("无法从该路径生成列表名: %s", path), toastError)
+			return m, cmd
+		}
+		listName := "本地-" + base
 		if _, err := m.pl.Create(listName); err != nil {
 			// 已存在同名列表：报错留在输入框，用户换路径/改名重试
 			m, cmd := m.showToast(err.Error(), toastError)
 			return m, cmd
 		}
 		if err := m.pl.AddTracks(listName, tracks); err != nil {
+			// 回滚新建的空列表，避免残留空列表导致用户重输同一路径撞「已存在同名列表」死锁；
+			// Delete 失败（写盘错误）忽略——尽力而为
+			_ = m.pl.Delete(listName)
 			m, cmd := m.showToast("添加失败: "+err.Error(), toastError)
 			return m, cmd
 		}
