@@ -239,10 +239,11 @@ type Model struct {
 	cache            *cache.Manager // 音频缓存（命中优先本地文件；未命中后台下载）
 	playingFromCache bool           // 当前曲目是否播放自缓存文件（LoadFailed 时据此移除损坏条目）
 
-	state     model.PlaybackState
-	current   page
-	width     int // 窗口宽度（分隔线按此宽度渲染，不写死）
-	hoverTab  int // Tab 栏悬停标签下标（= page 枚举值）；-1 = 无悬停
+	state    model.PlaybackState
+	current  page
+	width    int // 窗口宽度（分隔线按此宽度渲染，不写死）
+	height   int // 页面 body 高度（WindowSizeMsg 时 = 窗口高度 - 4：顶部空行+Tab+分隔线 3 行 + 状态栏 1 行）
+	hoverTab int // Tab 栏悬停标签下标（= page 枚举值）；-1 = 无悬停
 	// toast 活跃 toast（单条覆盖；定时自动消失，不参与布局）。替代旧 lastError/notice 横幅。
 	toast   *toast
 	toastID uint64 // toast 自增 id：过期消息按 id 匹配，防误清被覆盖后的新 toast
@@ -855,6 +856,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		// 顶部空行 + Tab 栏 + 分隔线占 3 行、底部状态栏占 1 行，页面高度相应减 4
 		m.width = msg.Width
+		m.height = msg.Height - 4
 		m.home = m.home.setSize(msg.Width, msg.Height-4)
 		m.searchPage = m.searchPage.setSize(msg.Width, msg.Height-4)
 		m.historyPage = m.historyPage.setSize(msg.Width, msg.Height-4)
@@ -958,8 +960,24 @@ func (m Model) View() string {
 			body = m.historyPage.view()
 		}
 	}
+	body = m.padBody(body)
 	out := "\n" + m.tabBar() + "\n" + body + "\n" + m.statusBarView()
 	return m.overlayToast(out)
+}
+
+// padBody 把页面 body 垂直填充到页面高度（m.height），使底部状态栏恒在屏幕
+// 最后一行：内容不满一屏的页面（搜索/队列/播放列表/历史空态、列表短、选择器
+// 内容少）此前 body 行数不足，状态栏随内容上浮不贴底（回归：搜索页状态栏
+// 不再最底部）。恰好撑满/超高的 body 原样返回（不截断）；未收到 WindowSizeMsg
+// （width≤0）时原样返回。
+func (m Model) padBody(body string) string {
+	if m.width <= 0 || m.height <= 0 {
+		return body
+	}
+	if strings.Count(body, "\n")+1 >= m.height {
+		return body
+	}
+	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, body)
 }
 
 // statusBarView 底部常驻状态栏（恒 1 行，布局稳定）：首页自身已展示曲目
