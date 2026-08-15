@@ -1403,3 +1403,25 @@ func TestHomeLyricFileNilSafe(t *testing.T) {
 	m = m.resetForTrack(track)
 	// 不应 panic
 }
+
+func TestHomeLyricFileAITrackUpdatesLabel(t *testing.T) {
+	m, path := lyricFileTestHome(t)
+	track := &model.Track{Title: "原始标题", Artist: "原始歌手", Duration: 100}
+	m = m.resetForTrack(track) // loading 态,文件 = 原始歌名
+	m = m.setAITrack("AI标题", "AI歌手")
+	if got := lyricFileRead(t, path); got != "AI标题 - AI歌手\n" {
+		t.Fatalf("未同步时 setAITrack 应更新歌名,内容 = %q", got)
+	}
+	// 歌词已同步:setAITrack 不应覆盖文件中的歌词行
+	m.lyrics = &lyrics.Lyrics{Lines: []lyrics.LyricLine{{Time: 0, Text: "歌词行"}}}
+	m.lyricsState = lyricsSynced
+	m.currentLine = -1
+	m = m.syncState(model.PlaybackState{Track: track, Position: 1, Duration: 100})
+	if got := lyricFileRead(t, path); got != "歌词行\n" {
+		t.Fatalf("前置:歌词行应已写入,内容 = %q", got)
+	}
+	m = m.setAITrack("AI标题2", "AI歌手2")
+	if got := lyricFileRead(t, path); got != "歌词行\n" {
+		t.Fatalf("已同步时 setAITrack 不应覆盖歌词行,内容 = %q", got)
+	}
+}
