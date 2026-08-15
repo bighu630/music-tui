@@ -38,7 +38,7 @@ type Ytdlp struct {
 	Headers map[string]string `json:"headers"`
 }
 
-// Log 是日志配置：Level 为 "debug"/"info"/"warn"/"error"，
+// Log 是日志配置：Level 为 "debug"/"info"/"warn"/"error"（大小写不敏感），
 // 缺失/空/非法回落 "info"（默认级别）。
 type Log struct {
 	Level string `json:"level"`

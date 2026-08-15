@@ -170,3 +170,14 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 实现：lyrics/netease.go（网易云搜索/歌词，毫秒→秒；QQ 客户端同文件分段，需 Referer）+ fetchCN 链（时长 ≤3s 筛选、源错误继续、命中入 LRC 缓存）；EnhancedClient.EnableCNSources 显式启用（main 注入真源、测试注入 mock）
 - [x] 测试：cnlyrics 10 个（两源解析/空/纯文本/错误/链集成/时长/缓存），全量 build/vet/test -race 全绿
 - [ ] 真机验收（待用户）：lrclib 无数据的歌（如薛之谦《病态》）经网易云/QQ 命中出歌词
+
+## 追加需求（用户 8-15 第五轮）：文件日志系统（tmp 目录 + 级别 + 轮转）
+
+- [x] 用户确认：A 方案 /tmp/music-tui.log 单文件；5MB 轮转保留 .1 一份；config 加 log.level（默认 info）
+- [x] 实现：logger 包（级别过滤/时间戳格式/0600 权限/全局 mutex 并发安全/Init 失败静默降级；ParseLevel 大小写不敏感）
+- [x] 实现：5MB 大小轮转（超限 → .1，旧 .1 替换）；config log.level（缺失/空/非法回落 "info"）
+- [x] 实现：main 最先 Init（默认 info）→ loadConfig 后 SetLevel；6 处 stderr 损坏警告保留 + logger.Warn；4 处 log.Printf → logger.Warn
+- [x] 接入：播放（beginPlay 缓存命中/连播/重试/跳过/暂停恢复/seek）、player（Play/Pause/重连/看门狗/end-file）、缓存（下载开始/完成/命中/淘汰/校验失败，evictIfOverLimit 去重）、取流（yt-dlp 搜索/歌单/下载摘要，header 只打键名）、歌词（AI 识别/缓存命中/中文源/兜底）约 72 处日志点
+- [x] 审查：reviewer 两轮（P0 重试日志 nil 安全修复 + ParseLevel 大小写宽容 + 测试清理）
+- [x] 测试：logger 8 个（过滤/格式/轮转/并发/降级/大小写）+ config 2 个，全量 build/vet/test -race 全绿
+- [x] 用法：tail -f /tmp/music-tui.log（排查问题临时把 config.json 的 log.level 改 "debug"）
