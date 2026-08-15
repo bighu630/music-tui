@@ -24,7 +24,8 @@ import (
 
 // newCacheTestModel 与 newResumeTestModel 同款组装，但额外返回 cache Manager
 // 与缓存目录（测试预置缓存条目/断言命中需要）。ytdlpPath 固定指向不存在的
-// 路径：CacheAsync 的后台 goroutine 立即 exec 失败退出（无网络请求、无泄漏）。
+// 路径：CacheAsync 的后台 goroutine 短时间内失败退出（重试循环：5 次 × 每次
+// 间隔 2s backoff ≈ 8s 内结束；exec 立即失败，无网络请求、无泄漏）。
 func newCacheTestModel(t *testing.T, st *session.State) (Model, *fakePlayer, *cache.Manager, string) {
 	return newCacheTestModelWithYtdlp(t, st, "/nonexistent/yt-dlp")
 }

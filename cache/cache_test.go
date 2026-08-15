@@ -576,3 +576,107 @@ printf 'fake-audio-bytes' > "$out"
 		t.Errorf("脚本调用次数 = %d, want 3（2 败 1 胜）", got)
 	}
 }
+
+// 缓存目录名含 glob 元字符（如 "cache[x]"）时，New 的 .part 清理与
+// realDownload 的产物发现均不得依赖 glob（旧实现静默不匹配/报错）：
+// 下载→注册全链路仍正常命中。
+func TestCacheAsyncDirWithGlobMetachar(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cache[x]")
+	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+		writeFakeYtDlp(t, fakeYtDlpBody(`printf 'fake-audio-bytes' > "$out"`)))
+	id := "meta-1234567"
+	cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
+
+	deadline := time.Now().Add(5 * time.Second)
+	var path string
+	for {
+		var ok bool
+		if path, ok = cm.Lookup(id); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("glob 元字符目录下下载未在超时内注册")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if want := filepath.Join(dir, SafeName(id)+".webm"); path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+}
+
+// 超时杀进程清理：假脚本先写 .part 再 sleep 5（不产出最终文件），单次尝试
+// 超时被 kill → 失败清理应删除 .part；预算耗尽才放弃（无 .part 残留、inflight 清除）。
+func TestCacheAsyncTimeoutKillsAndCleans(t *testing.T) {
+	defer func(old time.Duration) { DownloadAttemptTimeout = old }(DownloadAttemptTimeout)
+	defer func(old time.Duration) { DownloadRetryBackoff = old }(DownloadRetryBackoff)
+	defer func(old int) { MaxDownloadAttempts = old }(MaxDownloadAttempts)
+	DownloadAttemptTimeout = 200 * time.Millisecond
+	DownloadRetryBackoff = time.Millisecond
+	MaxDownloadAttempts = 2
+
+	dir := t.TempDir()
+	// sleep 必须重定向（>/dev/null 2>&1）：否则 sleep 继承 stderr 管道，
+	// sh 被 kill 后管道仍被 sleep 持有，cmd.Run 会阻塞到 sleep 自然结束（~5s），
+	// 超时杀进程效果无法被测试观察到。
+	body := `: > "$out.part"` + "\n" + callCounterBody() + "\n" + `sleep 5 >/dev/null 2>&1
+`
+	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+		writeFakeYtDlp(t, fakeYtDlpBody(body)))
+	id := "timeout-id-1"
+	cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
+
+	// 等待 goroutine 结束：inflight 清除（在 realDownload 失败清理之后）
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		cm.mu.Lock()
+		inFlight := cm.inflight[id]
+		cm.mu.Unlock()
+		if !inFlight {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("inflight 未清除")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// 预算耗尽才放弃：脚本调用次数 = MaxDownloadAttempts
+	if got := callCount(filepath.Join(dir, "calls")); got != MaxDownloadAttempts {
+		t.Errorf("脚本调用次数 = %d, want %d（预算耗尽）", got, MaxDownloadAttempts)
+	}
+	// 超时被杀后 .part 残留被失败清理删除
+	if _, err := os.Stat(filepath.Join(dir, SafeName(id)+".webm.part")); !os.IsNotExist(err) {
+		t.Errorf(".part 残留未被清理: %v", err)
+	}
+}
+
+// 下载成功但 register 持久化失败（index.json 被占位成目录）→ 已下载文件应被
+// 删除，避免孤儿滞留；inflight 清除。
+func TestCacheAsyncRegisterFailureRemovesFile(t *testing.T) {
+	dir := t.TempDir()
+	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+		writeFakeYtDlp(t, fakeYtDlpBody(`printf 'fake-audio-bytes' > "$out"`)))
+	// 让 register 的持久化失败：把 index.json 占位成目录（save 的 Rename 会失败）
+	if err := os.Mkdir(filepath.Join(dir, "index.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "regfail-1234"
+	cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		cm.mu.Lock()
+		inFlight := cm.inflight[id]
+		cm.mu.Unlock()
+		if !inFlight {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("inflight 未清除")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// 已下载文件被删除，避免孤儿滞留
+	if _, err := os.Stat(filepath.Join(dir, SafeName(id)+".webm")); !os.IsNotExist(err) {
+		t.Errorf("注册失败后已下载文件残留: %v", err)
+	}
+}

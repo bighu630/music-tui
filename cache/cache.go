@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,10 +59,13 @@ func New(opts Options, ytdlpPath string) (*Manager, error) {
 	if err := os.MkdirAll(opts.Dir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建缓存目录: %w", err)
 	}
-	// 清理上次异常退出（kill -9/断电）残留的 .part 临时文件，避免永久滞留
-	if parts, err := filepath.Glob(filepath.Join(opts.Dir, "*.part")); err == nil {
-		for _, p := range parts {
-			os.Remove(p) // 失败忽略：下次启动再试
+	// 清理上次异常退出（kill -9/断电）残留的 .part 临时文件，避免永久滞留。
+	// 不用 filepath.Glob：缓存目录路径含 glob 元字符（如 "cache[x]"）时匹配会失效。
+	if entries, err := os.ReadDir(opts.Dir); err == nil {
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".part") {
+				os.Remove(filepath.Join(opts.Dir, e.Name())) // 失败忽略：下次启动再试
+			}
 		}
 	}
 	ix, err := load(m.indexPath())
@@ -189,6 +193,7 @@ func (m *Manager) download(track model.Track) {
 		if err == nil {
 			if rerr := m.register(track.ID, file); rerr != nil {
 				log.Printf("缓存下载失败(%s): %v", track.ID, rerr)
+				os.Remove(filepath.Join(m.dir, file)) // 注册失败删除已下载文件，避免孤儿滞留
 			}
 			return
 		}
