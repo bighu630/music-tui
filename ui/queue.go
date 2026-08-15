@@ -49,6 +49,9 @@ func (i queueItem) Title() string {
 }
 
 func (i queueItem) Description() string {
+	if i.track.Artist == "" {
+		return formatDuration(i.track.Duration)
+	}
 	return i.track.Artist + " · " + formatDuration(i.track.Duration)
 }
 

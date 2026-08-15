@@ -306,16 +306,21 @@ func (m homeModel) setAITrack(title, artist string) homeModel {
 	return m
 }
 
-// trackLabel 当前曲目标题标签：AI 识别结果优先，回落原始标题。
+// trackLabel 当前曲目标题标签：AI 识别结果优先，回落原始标题；
+// artist 为空时省略分隔符。
 func (m homeModel) trackLabel() string {
 	t := m.state.Track
 	if t == nil {
 		return ""
 	}
+	title, artist := t.Title, t.Artist
 	if m.aiTitle != "" {
-		return m.aiTitle + " - " + m.aiArtist
+		title, artist = m.aiTitle, m.aiArtist
 	}
-	return t.Title + " - " + t.Artist
+	if artist == "" {
+		return title
+	}
+	return title + " - " + artist
 }
 
 // syncState 同步播放状态并推进歌词高亮（每次 player 事件后调用）。

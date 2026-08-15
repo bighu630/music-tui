@@ -787,9 +787,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.home = m.home.setLyrics(msg.err, msg.lyrics)
 			if msg.err == nil && msg.title != "" {
 				// AI 识别结果：全局展示覆盖（控制栏/状态栏/队列当前项）
-				// + MPRIS 元数据同步（外部消费者感知清洗后歌名）。
+				// + MPRIS 回调（onTrack 以清洗后曲目副本重发；mpris 服务端
+				// 仅 TrackStartedEvent 发布元数据，实际保持原始标题，见 19.8）。
 				m.home = m.home.setAITrack(msg.title, msg.artist)
 				m.queuePage = m.queuePage.setAITrack(msg.title, msg.artist)
+				m = m.syncQueueViews() // 队列页立即重建当前项展示（不依赖下次队列事件）
 				if m.onTrack != nil && m.state.Track != nil {
 					t := *m.state.Track
 					t.Title, t.Artist = msg.title, msg.artist

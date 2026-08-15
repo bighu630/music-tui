@@ -17,10 +17,18 @@ type lrcCache struct {
 	dir string
 }
 
-// newLRCCache 创建歌词缓存目录。
+// newLRCCache 创建歌词缓存目录，并清理旧版本遗留的纯文本缓存
+// （*.txt，sync-only 规则前产生；Get 已不识别，删掉避免永久残留）。
 func newLRCCache(dir string) (*lrcCache, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建歌词缓存目录: %w", err)
+	}
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".txt") {
+				_ = os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
 	}
 	return &lrcCache{dir: dir}, nil
 }
@@ -72,7 +80,7 @@ var unsafeNameRe = regexp.MustCompile(`[\\/:*?"<>|\x00-\x1f]`)
 // unsafeEdgeRe 文件名首尾不安全字符（点 = 隐藏文件、空格 = 不可见后缀）。
 var unsafeEdgeRe = regexp.MustCompile(`^[.\s]+|[.\s]+$`)
 
-// maxNameBytes 文件名主干最大字节数：留出后缀（.lrc/.txt）空间，
+// maxNameBytes 文件名主干最大字节数：留出后缀（.lrc）空间，
 // 保证含后缀全长 < 255 字节（主流文件系统上限）。
 const maxNameBytes = 200
 

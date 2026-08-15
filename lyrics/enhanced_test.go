@@ -502,3 +502,25 @@ func TestEnhancedPlainOnlyRejected(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNotFound（AI 路径同样拒绝纯文本歌词）", err)
 	}
 }
+
+// TestEnhancedFailurePathsCarryNoTitle 负缓存/AI 失败路径不携带 AI 标题
+// （契约：只有成功识别才填充 FetchResult.Title/Artist）。
+func TestEnhancedFailurePathsCarryNoTitle(t *testing.T) {
+	// is_song=false（负缓存）
+	c, _, _ := newEnhancedTestEnv(t, lrclibNotFound, func(w http.ResponseWriter, r *http.Request) {
+		aiRespond(w, r, `{"is_song": false}`)
+	})
+	res, err := c.Fetch(context.Background(), model.Track{Title: "城市漫步 Vlog", Artist: "C", Duration: 600})
+	if !errors.Is(err, ErrNotFound) || res.Title != "" || res.Artist != "" {
+		t.Errorf("负缓存路径 = %+v, %v, want ErrNotFound 且 Title/Artist 空", res, err)
+	}
+
+	// AI 调用失败（降级）
+	c2, _, _ := newEnhancedTestEnv(t, lrclibNotFound, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	res, err = c2.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "A", Duration: 269})
+	if !errors.Is(err, ErrNotFound) || res.Title != "" {
+		t.Errorf("AI 失败路径 = %+v, %v, want ErrNotFound 且 Title 空", res, err)
+	}
+}
