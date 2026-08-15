@@ -148,6 +148,44 @@ func TestTabBarDividerLine(t *testing.T) {
 	}
 }
 
+// 居中：收到 WindowSizeMsg 后标签行按 (width-totalWidth)/2 水平居中，
+// 分隔线仍横贯全宽；窗口宽度小于标签总宽时不居中（左对齐）。
+// totalWidth 用 ansi.StringWidth 独立计算（五标签 + 四处 2 空格分隔），
+// 不调用 m.tabPad()，避免测试与实现共享逻辑。
+func TestTabBarCentered(t *testing.T) {
+	labels := []string{"⏹ 首页", "队列", "播放列表", "搜索", "历史"}
+	totalWidth := 0
+	for i, lb := range labels {
+		if i > 0 {
+			totalWidth += 2 // 标签间分隔
+		}
+		totalWidth += ansi.StringWidth(lb)
+	}
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	lines := strings.Split(stripANSI(m.View()), "\n")
+	gotPad := len(lines[0]) - len(strings.TrimLeft(lines[0], " "))
+	wantPad := (100 - totalWidth) / 2
+	if gotPad != wantPad {
+		t.Errorf("标签行前缀空格 = %d, want %d（(100-%d)/2），行 = %q",
+			gotPad, wantPad, totalWidth, lines[0])
+	}
+	if len(lines) < 2 || lines[1] != strings.Repeat("─", 100) {
+		t.Errorf("分隔线应保持横贯全宽 100 个 ─，实际 = %q", lines[1])
+	}
+
+	// 窗口过窄（宽度 < 标签总宽）：不居中，左对齐
+	m, _ = update(m, tea.WindowSizeMsg{Width: 20, Height: 24})
+	lines = strings.Split(stripANSI(m.View()), "\n")
+	gotPad = len(lines[0]) - len(strings.TrimLeft(lines[0], " "))
+	if gotPad != 0 {
+		t.Errorf("Width=20（小于标签总宽 %d）时不应居中，前缀空格 = %d", totalWidth, gotPad)
+	}
+}
+
 // ---- 鼠标交互（点击切换 + hover 高亮） ----
 
 // 固定状态下的标签文本（无曲目 + 队列 3 首），与 tabBar 分隔约定（2 空格）一致。
@@ -279,6 +317,53 @@ func TestMouseHoverHighlightsTab(t *testing.T) {
 	}
 	if strings.Contains(m3.View(), tabHoverStyle.Render("队列")) {
 		t.Error("移出后不应再有下划线高亮")
+	}
+}
+
+// 居中后鼠标命中与渲染偏移一致：点击居中"搜索"标签实际位置（pad + 标签
+// 起始列 + 1）应切页；点击标签行左侧留白（pad-1）不切页；悬停居中标签
+// 仍高亮。pad 独立计算（(100-totalWidth)/2，totalWidth 取 mouseTabCols
+// 末标签 col+width），不调用 m.tabPad()。
+func TestMouseClickCenteredTabBar(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	for _, id := range []string{"q1", "q2", "q3"} {
+		m, _ = update(m, trackAppendMsg{track: testTrack(id)})
+	}
+	m, _ = update(m, tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	seps := mouseTabCols()
+	last := seps[len(seps)-1]
+	pad := (100 - (last.col + ansi.StringWidth(last.text))) / 2
+	if pad <= 0 {
+		t.Fatalf("pad = %d, want > 0（测试前提：居中偏移存在）", pad)
+	}
+
+	// 点击居中后"搜索"标签的实际位置 → 切到 pageSearch
+	dst := pad + seps[3].col + 1
+	m2, _ := update(m, tea.MouseMsg{
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: dst, Y: 0,
+	})
+	if m2.current != pageSearch {
+		t.Errorf("点击居中“搜索”（x=%d）后 current = %v, want pageSearch", dst, m2.current)
+	}
+
+	// 点击标签行左侧留白 → 不切页
+	m2, _ = update(m, tea.MouseMsg{
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: pad - 1, Y: 0,
+	})
+	if m2.current != pageHome {
+		t.Errorf("点击左侧留白 (x=%d) 不应切页, current = %v", pad-1, m2.current)
+	}
+
+	// 悬停居中"队列"标签 → 下划线高亮
+	hx := pad + seps[1].col + 1
+	m2, _ = update(m, tea.MouseMsg{Action: tea.MouseActionMotion, X: hx, Y: 0})
+	if m2.hoverTab != int(pageQueue) {
+		t.Errorf("悬停居中“队列”（x=%d）后 hoverTab = %d, want %d", hx, m2.hoverTab, int(pageQueue))
+	}
+	if !strings.Contains(m2.View(), tabHoverStyle.Render("队列")) {
+		t.Error("悬停的居中标签应显示下划线高亮")
 	}
 }
 
