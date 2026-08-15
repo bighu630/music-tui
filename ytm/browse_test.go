@@ -482,6 +482,45 @@ func TestListPlaylistsPaginatesAndDedups(t *testing.T) {
 	}
 }
 
+// ---- 歌单 ID 规范化（VL 前缀）----
+
+func TestNormalizePlaylistID(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"VLPLrFEVPIgEYS2mI0ie-ZYotVULU-CKjfUD", "PLrFEVPIgEYS2mI0ie-ZYotVULU-CKjfUD"}, // 标准歌单
+		{"VLLM", "LM"},                       // 喜欢的音乐（Liked Music，私有）
+		{"VLSE", "SE"},                       // 平台特殊歌单（unviewable）
+		{"VLRDTMAK5uy_abc", "RDTMAK5uy_abc"}, // Replay Mix
+		{"PLAAA", "PLAAA"},                   // 无前缀原样
+		{"", ""},                             // 空串不变
+	}
+	for _, c := range cases {
+		if got := normalizePlaylistID(c.in); got != c.want {
+			t.Errorf("normalizePlaylistID(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// 源头规范化：真实 browse 响应的歌单 browseId 带 VL 前缀（VLPL.../VLLM/
+// VLSE/VLRD...），须在提取处剥掉，否则 yt-dlp 拉取报 HTTP 400；
+// 映射键/URL 构造/去重全部受益于源头规范化。
+func TestRemotePlaylistFromItemNormalizesVL(t *testing.T) {
+	r := map[string]any{
+		"title":              map[string]any{"runs": []any{map[string]any{"text": "我的最爱"}}},
+		"subtitle":           map[string]any{"runs": []any{map[string]any{"text": "5 首"}}},
+		"navigationEndpoint": map[string]any{"browseEndpoint": map[string]any{"browseId": "VLPLAAA"}},
+	}
+	p := remotePlaylistFromItem(r)
+	if p == nil {
+		t.Fatal("应提取到歌单")
+	}
+	if p.ID != "PLAAA" {
+		t.Errorf("ID = %q, want PLAAA（VL 前缀应剥除）", p.ID)
+	}
+	if p.Title != "我的最爱" || p.Count != 5 {
+		t.Errorf("p = %+v", p)
+	}
+}
+
 // 令牌提取：标准 continuationCommand.token / 直存 continuation /
 // commandExecutorCommand 嵌套三路径 + 无令牌。
 func TestExtractContinuationToken(t *testing.T) {

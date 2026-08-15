@@ -129,6 +129,10 @@ func (a *YouTubeAdapter) FetchPlaylist(ctx context.Context, playlistURL string, 
 	case cookies.FromBrowser != "":
 		args = append(args, "--cookies-from-browser", cookies.FromBrowser)
 	}
+	// yt-dlp 2026.07+ 对私有歌单默认执行网页 authcheck 验证，失败即报错并建议
+	// 跳过；这里显式跳过（youtubetab:skip=authcheck），私有歌单（如 LM）
+	// 直接凭 cookie 拉取，公开歌单不受影响。
+	args = append(args, "--extractor-args", "youtubetab:skip=authcheck")
 	args = append(args, playlistURL)
 	cmd := exec.CommandContext(ctx, a.ytdlpPath, args...)
 	var stderr bytes.Buffer

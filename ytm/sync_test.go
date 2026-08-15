@@ -531,6 +531,38 @@ func TestImportURLCookiesWhenLoggedIn(t *testing.T) {
 	}
 }
 
+// ImportURL 带 VL 前缀：用户粘贴的列表链接 ID 带 VL 前缀时，拉取 URL 用
+// 规范化（剥 VL）后的 ID 构造（fetcher 收到 PL 开头 URL），SyncEntry
+// 映射键也用规范化 ID。
+func TestImportURLNormalizesVL(t *testing.T) {
+	s, _ := newTestStore(t)
+	plsPath := filepath.Join(t.TempDir(), "playlists.json")
+	pls, err := playlists.NewStore(plsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetcher := &fakeFetcher{playlists: map[string]model.Playlist{
+		trackURL("PLIMPORT"): {ID: "PLIMPORT", Title: "公开歌单", Tracks: []model.Track{testTrack("i1")}},
+	}}
+	client := &Client{store: s, fetcher: fetcher, httpClient: &http.Client{}}
+
+	res, err := client.ImportURL(context.Background(), pls, "https://music.youtube.com/playlist?list=VLPLIMPORT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.New || res.ListName != "YT: 公开歌单" {
+		t.Errorf("res = %+v", res)
+	}
+	// fetcher 收到规范化（剥 VL）后的 URL
+	if len(fetcher.urls) != 1 || fetcher.urls[0] != trackURL("PLIMPORT") {
+		t.Errorf("fetcher URL = %v, want %s", fetcher.urls, trackURL("PLIMPORT"))
+	}
+	// SyncEntry 映射键为规范化 ID
+	if e, ok := s.FindSync("PLIMPORT"); !ok || e.Count != 1 {
+		t.Errorf("SyncEntry = %+v, %v（键应为规范化 ID）", e, ok)
+	}
+}
+
 // m5：已配置登录但 cookie 导出失败（浏览器未安装等）→ 上抛，不静默降级。
 func TestImportURLCookieExportFailurePropagates(t *testing.T) {
 	fakeBrowserHome(t) // 空配置目录：浏览器导出必然失败

@@ -95,6 +95,9 @@ func (c *Client) SyncOne(ctx context.Context, pl *playlists.Store, playlistID st
 
 // ImportURL 导入任意歌单 URL（公开歌单无需登录；私有歌单需已登录 cookie）。
 // 列表名 = "YT: <歌单标题>"；同名冲突自动加 " (2)" 后缀。
+// 拉取 URL 用规范化（剥 VL 前缀）后的 ID 构造：用户粘贴的链接若带 VL
+// 前缀（如 ?list=VLPL...）也能直接拉取成功；无 list 参数时保持原 URL
+// 语义（url: 前缀映射路径）。
 func (c *Client) ImportURL(ctx context.Context, pl *playlists.Store, playlistURL string) (SyncResult, error) {
 	args := search.CookieArgs{}
 	p, err := c.store.CookieFile()
@@ -107,11 +110,17 @@ func (c *Client) ImportURL(ctx context.Context, pl *playlists.Store, playlistURL
 		// 已配置但 cookie 不可用（导出/解密失败等）：上抛，避免私有歌单静默失败
 		return SyncResult{}, fmt.Errorf("获取登录 cookie 失败: %w", err)
 	}
-	fetched, err := c.fetcher.FetchPlaylist(ctx, playlistURL, args)
+	id := normalizePlaylistID(playlistIDFromURL(playlistURL))
+	fetchURL := playlistURL
+	if id != "" {
+		// list 参数存在：用规范化后的 ID 构造拉取 URL（剥 VL 前缀，yt-dlp 直接可用）
+		fetchURL = "https://music.youtube.com/playlist?list=" + url.QueryEscape(id)
+	}
+	fetched, err := c.fetcher.FetchPlaylist(ctx, fetchURL, args)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("拉取歌单失败: %w", err)
 	}
-	remote := RemotePlaylist{ID: playlistIDFromURL(playlistURL), Title: fetched.Title, Count: len(fetched.Tracks)}
+	remote := RemotePlaylist{ID: id, Title: fetched.Title, Count: len(fetched.Tracks)}
 	if remote.ID == "" {
 		remote.ID = "url:" + playlistURL // 无 list 参数时用 URL 做映射键
 	}
