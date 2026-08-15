@@ -36,6 +36,9 @@ func TestDefault(t *testing.T) {
 	if cfg.Cache.Dir != defaultDir(t) {
 		t.Errorf("Dir = %q, want %q", cfg.Cache.Dir, defaultDir(t))
 	}
+	if !cfg.LyricFile.Enabled {
+		t.Errorf("LyricFile.Enabled = false, want true")
+	}
 }
 
 func TestLoadMissingCreatesDefault(t *testing.T) {
