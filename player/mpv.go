@@ -41,6 +41,14 @@ type MpvPlayer struct {
 	binPath    string
 	socketPath string
 
+	// 取流附加配置（可选，均空时行为与旧版完全一致）：cookieFile 经
+	// --ytdl-raw-options=cookiefile= 传给 yt-dlp；headers 生成临时配置文件
+	// 经 config-locations= 指向（见 buildYtdlpConf）。ytdlpConfPath 由
+	// startProcess 写入/Close 删除（stateMu 保护）。
+	cookieFile    string
+	headers       map[string]string
+	ytdlpConfPath string
+
 	cmd    *exec.Cmd
 	waitCh chan error
 	conn   *mpvipc.Connection
@@ -84,10 +92,14 @@ type MpvPlayer struct {
 }
 
 // NewMpvPlayer 创建播放器实例。binPath 为 mpv 可执行文件路径。
-func NewMpvPlayer(binPath, socketPath string) *MpvPlayer {
+// cookieFile/headers 可选：附加到 mpv 的 --ytdl-raw-options（cookiefile=/
+// config-locations=），均空时不改变既有行为。
+func NewMpvPlayer(binPath, socketPath string, cookieFile string, headers map[string]string) *MpvPlayer {
 	return &MpvPlayer{
 		binPath:    binPath,
 		socketPath: socketPath,
+		cookieFile: cookieFile,
+		headers:    headers,
 		events:     make(chan Event, 256),
 	}
 }
@@ -109,14 +121,34 @@ func (p *MpvPlayer) Start() error {
 // cmd/waitCh/conn，不残留脏状态（Start 与自动重连共用）。
 func (p *MpvPlayer) startProcess() error {
 	_ = os.Remove(p.socketPath) // 清理上次残留的 socket 文件
+	// --ytdl-raw-options 动态拼接：打底 socket-timeout=15,retries=2（yt-dlp 取流
+	// 收紧：403/网络黑洞快速失败），cookieFile/headers 非空时追加 cookiefile= 与
+	// config-locations=（mpv 列表值语法：值含逗号时双引号包裹，内部 `"` 无法
+	// 转义表示）。headers 生成临时配置失败仅 log 警告并跳过 config-locations
+	// 段——绝不因 header 配置问题导致 mpv 启动失败（取流功能降级不崩溃）。
+	ytdlRawOpts := "socket-timeout=15,retries=2"
+	if p.cookieFile != "" {
+		ytdlRawOpts += ",cookiefile=" + quoteMpvOptionValue(p.cookieFile)
+	}
+	if len(p.headers) > 0 {
+		confPath, err := buildYtdlpConf(p.headers)
+		if err != nil {
+			log.Printf("生成 yt-dlp 临时配置失败，跳过 config-locations（取流降级继续）: %v", err)
+		} else {
+			p.stateMu.Lock()
+			p.ytdlpConfPath = confPath // 幂等：每次重新生成（覆盖写同一路径，重连场景）
+			p.stateMu.Unlock()
+			ytdlRawOpts += ",config-locations=" + quoteMpvOptionValue(confPath)
+		}
+	}
 	args := []string{
 		"--idle=yes",
-		"--no-video",              // 纯音频，避免 mpv 抢占终端
-		"--no-terminal",           // 禁用 mpv 的终端控制，避免与 TUI 抢键盘
-		"--keep-open=no",          // 播完即退出，可靠触发 end-file reason=eof
-		"--ytdl-format=bestaudio", // 纯音频播放器只需音频流：避免同时开视频+音频两个流（403 风控暴露面减半）
-		"--ytdl-raw-options=socket-timeout=15,retries=2", // yt-dlp 取流收紧：403/网络黑洞快速失败（默认 retries=10 可拖 1-2 分钟）
-		"--no-resume-playback",                           // 不写恢复播放状态文件
+		"--no-video",                        // 纯音频，避免 mpv 抢占终端
+		"--no-terminal",                     // 禁用 mpv 的终端控制，避免与 TUI 抢键盘
+		"--keep-open=no",                    // 播完即退出，可靠触发 end-file reason=eof
+		"--ytdl-format=bestaudio",           // 纯音频播放器只需音频流：避免同时开视频+音频两个流（403 风控暴露面减半）
+		"--ytdl-raw-options=" + ytdlRawOpts, // yt-dlp 取流收紧：403/网络黑洞快速失败（默认 retries=10 可拖 1-2 分钟）
+		"--no-resume-playback",              // 不写恢复播放状态文件
 		"--input-ipc-server=" + p.socketPath,
 	}
 	p.stateMu.Lock()
@@ -857,6 +889,13 @@ func (p *MpvPlayer) Close() error {
 	_ = p.killProcess()
 	p.clearProcess()
 	_ = os.Remove(p.socketPath)
+	p.stateMu.Lock()
+	confPath := p.ytdlpConfPath
+	p.ytdlpConfPath = ""
+	p.stateMu.Unlock()
+	if confPath != "" {
+		os.Remove(confPath) // 删除临时配置文件，失败忽略（TempDir 残留无害）
+	}
 	return nil
 }
 

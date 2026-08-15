@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"music-tui/cache"
@@ -349,5 +350,120 @@ func TestSaveRoundtripOpenAIBaseURL(t *testing.T) {
 	}
 	if got.OpenAI != cfg.OpenAI {
 		t.Errorf("openai roundtrip 不一致: got %+v, want %+v", got.OpenAI, cfg.OpenAI)
+	}
+}
+
+// ── Ytdlp 配置节 ─────────────────────────────────────────────────
+
+func TestDefaultYtdlpHeadersNil(t *testing.T) {
+	cfg, err := Default()
+	if err != nil {
+		t.Fatalf("Default() error: %v", err)
+	}
+	if cfg.Ytdlp.Headers != nil {
+		t.Errorf("Ytdlp.Headers = %v, want nil（默认不配置任何 header）", cfg.Ytdlp.Headers)
+	}
+}
+
+func TestLoadYtdlpMissingSectionNil(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"cache":{"enabled":false}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Ytdlp.Headers != nil {
+		t.Errorf("Ytdlp.Headers = %v, want nil（无 ytdlp 节 = 未配置）", cfg.Ytdlp.Headers)
+	}
+}
+
+func TestLoadYtdlpEmptyObjectNil(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"ytdlp":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Ytdlp.Headers != nil {
+		t.Errorf("Ytdlp.Headers = %v, want nil（ytdlp:{} = 未配置）", cfg.Ytdlp.Headers)
+	}
+}
+
+func TestLoadYtdlpHeadersNullNil(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"ytdlp":{"headers":null}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Ytdlp.Headers != nil {
+		t.Errorf("Ytdlp.Headers = %v, want nil（headers:null = 未配置）", cfg.Ytdlp.Headers)
+	}
+}
+
+func TestLoadYtdlpEmptyHeadersMap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"ytdlp":{"headers":{}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Ytdlp.Headers) != 0 {
+		t.Errorf("len(Ytdlp.Headers) = %d, want 0（headers:{} = 空 map）", len(cfg.Ytdlp.Headers))
+	}
+}
+
+func TestLoadYtdlpHeadersExplicit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"ytdlp":{"headers":{"User-Agent":"Mozilla/5.0 (X11; Linux x86_64)","X-YouTube-Client-Name":"1"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := map[string]string{
+		"User-Agent":            "Mozilla/5.0 (X11; Linux x86_64)",
+		"X-YouTube-Client-Name": "1",
+	}
+	if !reflect.DeepEqual(cfg.Ytdlp.Headers, want) {
+		t.Errorf("Ytdlp.Headers = %v, want %v", cfg.Ytdlp.Headers, want)
+	}
+}
+
+func TestLoadYtdlpHeadersInvalidType(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"ytdlp":{"headers":"oops"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("headers 为字符串时应整体解析报错（与 openai 节行为一致）")
+	}
+}
+
+func TestSaveRoundtripYtdlp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "config.json")
+	cfg := &Config{
+		Cache:  cache.Options{Enabled: false, MaxEntries: 42, Dir: "/tmp/some-cache"},
+		OpenAI: OpenAI{APIKey: "sk-789", Model: "gpt-4o-mini"},
+		Ytdlp:  Ytdlp{Headers: map[string]string{"User-Agent": "Mozilla/5.0", "X-Custom": "v"}},
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got.Ytdlp, cfg.Ytdlp) {
+		t.Errorf("ytdlp roundtrip 不一致: got %+v, want %+v", got.Ytdlp, cfg.Ytdlp)
 	}
 }

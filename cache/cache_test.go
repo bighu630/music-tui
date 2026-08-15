@@ -21,7 +21,7 @@ func newTestManager(t *testing.T, opts Options) *Manager {
 // 下载类测试用它真实走完 下载→注册 全链路。
 func newTestManagerWithYtdlp(t *testing.T, opts Options, ytdlpPath string) *Manager {
 	t.Helper()
-	cm, err := New(opts, ytdlpPath)
+	cm, err := New(opts, ytdlpPath, "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -48,7 +48,7 @@ func writeCacheFile(t *testing.T, dir, file string) {
 
 func TestNewCreatesDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "a", "b")
-	cm, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent")
+	cm, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent", "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestNewCreatesDir(t *testing.T) {
 }
 
 func TestNewEmptyDirError(t *testing.T) {
-	if _, err := New(Options{Enabled: true, Dir: ""}, "/nonexistent"); err == nil {
+	if _, err := New(Options{Enabled: true, Dir: ""}, "/nonexistent", "", nil); err == nil {
 		t.Fatal("New with empty Dir = nil error, want error")
 	}
 }
@@ -90,7 +90,7 @@ func TestNewMissingIndexIsEmpty(t *testing.T) {
 func TestNewCorruptIndexError(t *testing.T) {
 	dir := t.TempDir()
 	writeIndexFile(t, dir, "{invalid")
-	if _, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent"); err == nil {
+	if _, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent", "", nil); err == nil {
 		t.Fatal("New with corrupt index = nil error, want error")
 	}
 }
@@ -102,7 +102,7 @@ func TestNewPrunesMissingFiles(t *testing.T) {
 		{"id":"here","file":"here","last_played":"2024-01-02T00:00:00Z"}
 	]`)
 	writeCacheFile(t, dir, "here")
-	cm, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent")
+	cm, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent", "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestNewEvictsOverLimit(t *testing.T) {
 	for _, f := range []string{"old", "mid", "new"} {
 		writeCacheFile(t, dir, f)
 	}
-	cm, err := New(Options{Enabled: true, MaxEntries: 2, Dir: dir}, "/nonexistent")
+	cm, err := New(Options{Enabled: true, MaxEntries: 2, Dir: dir}, "/nonexistent", "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestNewDropsTraversalFileEntries(t *testing.T) {
 		{"id":"good","file":"good","last_played":"2024-01-04T00:00:00Z"}
 	]`)
 	writeCacheFile(t, dir, "good")
-	cm, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent")
+	cm, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent", "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestNewCleansPartFiles(t *testing.T) {
 		writeCacheFile(t, dir, f)
 	}
 	writeCacheFile(t, dir, "song.m4a") // 正常文件不受影响
-	cm, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent")
+	cm, err := New(Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent", "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

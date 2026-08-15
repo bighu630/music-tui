@@ -246,7 +246,7 @@ func TestLoadCacheCorruptIndexBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cm := loadCache(cache.Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent/yt-dlp")
+	cm := loadCache(cache.Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent/yt-dlp", "", nil)
 	if cm == nil {
 		t.Fatal("loadCache 不应返回 nil")
 	}
@@ -270,7 +270,7 @@ func TestLoadCacheFailsGracefullyDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cm := loadCache(cache.Options{Enabled: true, MaxEntries: 100, Dir: notDir}, "/nonexistent/yt-dlp")
+	cm := loadCache(cache.Options{Enabled: true, MaxEntries: 100, Dir: notDir}, "/nonexistent/yt-dlp", "", nil)
 	if cm == nil {
 		t.Fatal("loadCache 不应返回 nil")
 	}

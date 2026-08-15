@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -62,6 +63,11 @@ type YouTubeAdapter struct {
 	timeout   time.Duration
 	plTimeout time.Duration
 	limit     int
+	// cookieFile/headers 是全局附加的 yt-dlp 参数（SetGlobalYTDlp 设置）：
+	// cookieFile 非空 → 每次调用附加 --cookies <file>；headers 非空 →
+	// 按键排序附加 --add-header。未设置（零值）时行为与现状完全一致。
+	cookieFile string
+	headers    map[string]string
 }
 
 // NewYouTubeAdapter 创建 YouTube 搜索适配器，limit 固定 searchLimit 条。
@@ -74,17 +80,55 @@ func NewYouTubeAdapter(ytdlpPath string) *YouTubeAdapter {
 	}
 }
 
+// SetGlobalYTDlp 设置全局附加的 yt-dlp 参数，对 Search / FetchPlaylist 均生效：
+// cookieFile 非空时附加 --cookies <file>（FetchPlaylist 的 CookieArgs 参数优先，
+// 参数全空才回落全局）；headers 按键排序附加 --add-header "Name:Value"
+// （Value 先 TrimSpace，为空则跳过该条）。cookieFile 为空 / headers 为 nil
+// 或空 = 不附加，行为与不设置完全一致。
+func (a *YouTubeAdapter) SetGlobalYTDlp(cookieFile string, headers map[string]string) {
+	a.cookieFile = cookieFile
+	a.headers = headers
+}
+
+// headerArgs 返回按键排序的 --add-header 参数序列；值 TrimSpace 后为空的键
+// 跳过。无有效 header 时返回 nil（不附加任何参数）。
+func (a *YouTubeAdapter) headerArgs() []string {
+	if len(a.headers) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(a.headers))
+	for k := range a.headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var args []string
+	for _, k := range keys {
+		v := strings.TrimSpace(a.headers[k])
+		if v == "" {
+			continue
+		}
+		// 统一 "Name:Value" 格式：冒号后无空格
+		args = append(args, "--add-header", k+":"+v)
+	}
+	return args
+}
+
 // Search 执行 ytsearch 搜索并解析输出为 []model.Track。
 // 超时与 yt-dlp 报错均返回错误：超时（DeadlineExceeded）与父 ctx
 // 取消（Canceled）分别给出不同消息；非超时失败携带截断的 stderr
 // 诊断文本，便于用户看到 yt-dlp 的真实报错。
+// 参数 = 全局附加参数（--cookies + 排序后的 --add-header）+ 原有搜索参数。
 func (a *YouTubeAdapter) Search(ctx context.Context, query string) ([]model.Track, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
 	arg := fmt.Sprintf("ytsearch%d:%s", a.limit, query)
-	cmd := exec.CommandContext(ctx, a.ytdlpPath,
-		"--dump-json", "--no-warnings", "--flat-playlist", arg,
-	)
+	args := []string{}
+	if a.cookieFile != "" {
+		args = append(args, "--cookies", a.cookieFile)
+	}
+	args = append(args, a.headerArgs()...)
+	args = append(args, "--dump-json", "--no-warnings", "--flat-playlist", arg)
+	cmd := exec.CommandContext(ctx, a.ytdlpPath, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -116,7 +160,8 @@ func tail(s string, max int) string {
 
 // FetchPlaylist 用 yt-dlp --flat-playlist -J 拉取歌单标题与条目元数据。
 // cookies 参数可空：File 非空时加 --cookies <file>；否则 FromBrowser 非空时加
-// --cookies-from-browser <browser>；两者都空则不加 cookie 参数。
+// --cookies-from-browser <browser>；两者都空则回落全局 cookieFile（非空时加
+// --cookies <file>），全局也未设置则不加 cookie 参数。全局 headers 总是附加。
 // 错误分支与 Search 一致：超时（DeadlineExceeded）与父 ctx 取消（Canceled）
 // 分别给出不同消息；非超时失败携带截断的 stderr 诊断文本。
 func (a *YouTubeAdapter) FetchPlaylist(ctx context.Context, playlistURL string, cookies CookieArgs) (model.Playlist, error) {
@@ -128,7 +173,12 @@ func (a *YouTubeAdapter) FetchPlaylist(ctx context.Context, playlistURL string, 
 		args = append(args, "--cookies", cookies.File)
 	case cookies.FromBrowser != "":
 		args = append(args, "--cookies-from-browser", cookies.FromBrowser)
+	case a.cookieFile != "":
+		// 参数全空：回落全局 cookie 文件
+		args = append(args, "--cookies", a.cookieFile)
 	}
+	// 全局 headers 总是附加（与 CookieArgs 是否指定无关）
+	args = append(args, a.headerArgs()...)
 	// yt-dlp 2026.07+ 对私有歌单默认执行网页 authcheck 验证，失败即报错并建议
 	// 跳过；这里显式跳过（youtubetab:skip=authcheck），私有歌单（如 LM）
 	// 直接凭 cookie 拉取，公开歌单不受影响。

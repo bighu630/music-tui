@@ -28,11 +28,21 @@ type OpenAI struct {
 	BaseURL string `json:"base_url"`
 }
 
+// Ytdlp 是 yt-dlp 全局附加参数配置：Headers 非空时以 --add-header 附加到
+// 每次 yt-dlp 调用（cookie 文件由 ytm.Store 管理，不在配置文件中）。
+// Headers 为 nil/空 = 未配置（行为与不附加完全一致）。
+// header 名须匹配 [\w-]+（字母数字与连字符）：非法键（如含空格）会让
+// 整次 yt-dlp 调用报错。
+type Ytdlp struct {
+	Headers map[string]string `json:"headers"`
+}
+
 // Config 是顶层配置：缓存设置（嵌入 cache.Options，json tag 即文件格式）
-// + OpenAI 增强歌词配置。
+// + OpenAI 增强歌词配置 + yt-dlp 附加参数配置。
 type Config struct {
 	Cache  cache.Options `json:"cache"`
 	OpenAI OpenAI        `json:"openai"`
+	Ytdlp  Ytdlp         `json:"ytdlp"`
 }
 
 // Default 返回默认配置：缓存开启、上限 DefaultMaxEntries、
@@ -56,7 +66,8 @@ func Default() (*Config, error) {
 //   - 空文件 → 返回默认值（不写盘）
 //   - JSON 损坏 → 返回错误（原文件保持不动，由 main 层备份重建）
 //   - 字段缺失/非法 → 逐项回落默认：Enabled 缺失 → true（显式 false 保留）、
-//     MaxEntries<1 → DefaultMaxEntries、Dir=="" → 默认目录
+//     MaxEntries<1 → DefaultMaxEntries、Dir=="" → 默认目录；
+//     ytdlp.headers 缺失/null → nil，显式 {} → 空 map（均为未配置）
 //
 // 返回的 Config 始终是规范化后的完整值。
 func Load(path string) (*Config, error) {
@@ -90,6 +101,9 @@ func Load(path string) (*Config, error) {
 			Model   *string `json:"model"`
 			BaseURL *string `json:"base_url"`
 		} `json:"openai"`
+		Ytdlp struct {
+			Headers map[string]string `json:"headers"`
+		} `json:"ytdlp"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("解析配置文件: %w", err)
@@ -121,6 +135,11 @@ func Load(path string) (*Config, error) {
 	}
 	if raw.OpenAI.BaseURL != nil {
 		c.OpenAI.BaseURL = *raw.OpenAI.BaseURL
+	}
+	// Ytdlp：map 字段天然区分「缺失/null → nil」与「显式 {} → 空 map」；
+	// nil 与空 map 语义一致，均为未配置（不附加任何参数）。
+	if raw.Ytdlp.Headers != nil {
+		c.Ytdlp.Headers = raw.Ytdlp.Headers
 	}
 	return c, nil
 }

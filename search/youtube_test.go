@@ -371,3 +371,170 @@ func TestFetchPlaylistErrorIncludesStderr(t *testing.T) {
 		t.Errorf("err = %v, want 包含 stderr 诊断", err)
 	}
 }
+
+// ---- 全局 cookie/headers ----
+
+// searchArgsCaptureScript 生成假 yt-dlp：把收到的参数写入 argsFile，
+// 然后输出逐行搜索结果 JSON（Search 正常路径可解析）。
+func searchArgsCaptureScript(t *testing.T, argsFile string) string {
+	t.Helper()
+	return writeScript(t, fmt.Sprintf(
+		"#!/bin/sh\necho \"$@\" > %q\ncat <<'YTDLP_EOF'\n%s\nYTDLP_EOF\n",
+		argsFile, fakeYTDLPOutput))
+}
+
+func TestSearchGlobalCookieAndHeaders(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	a := NewYouTubeAdapter(searchArgsCaptureScript(t, argsFile))
+	a.SetGlobalYTDlp("/tmp/cookies.txt", map[string]string{
+		"X-Client-Data": "abc",
+		"User-Agent":    " Mozilla/5.0 ",
+	})
+	if _, err := a.Search(context.Background(), "hello world"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := strings.TrimSpace(string(got))
+	// 顺序：--cookies 在前，headers 按键排序（User-Agent < X-Client-Data）
+	wantOrder := []string{
+		"--cookies /tmp/cookies.txt",
+		"--add-header User-Agent:Mozilla/5.0",
+		"--add-header X-Client-Data:abc",
+	}
+	for i, w := range wantOrder {
+		idx := strings.Index(s, w)
+		if idx < 0 {
+			t.Fatalf("args = %q, want 包含 %q", s, w)
+		}
+		if i > 0 && strings.Index(s, wantOrder[i-1]) > idx {
+			t.Errorf("args = %q, %q 应排在 %q 之前（按键排序）", s, wantOrder[i-1], w)
+		}
+	}
+	// 原有搜索参数保持在后
+	if !strings.Contains(s, "--dump-json --no-warnings --flat-playlist ytsearch20:hello world") {
+		t.Errorf("args = %q, want 保留原有搜索参数", s)
+	}
+}
+
+func TestSearchNoGlobalArgsUnchanged(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	a := NewYouTubeAdapter(searchArgsCaptureScript(t, argsFile))
+	if _, err := a.Search(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--dump-json --no-warnings --flat-playlist ytsearch20:hello"
+	if s := strings.TrimSpace(string(got)); s != want {
+		t.Errorf("args = %q, want %q（未设全局时参数与现状逐字节一致）", s, want)
+	}
+}
+
+func TestFetchPlaylistGlobalCookieFallback(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	a := NewYouTubeAdapter(argsCaptureScript(t, argsFile))
+	a.SetGlobalYTDlp("/tmp/global-cookies.txt", nil)
+	const url = "https://music.youtube.com/playlist?list=PL1"
+	if _, err := a.FetchPlaylist(context.Background(), url, CookieArgs{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := strings.TrimSpace(string(got)); !strings.Contains(s, "--cookies /tmp/global-cookies.txt") {
+		t.Errorf("args = %q, want 回落全局 cookie 文件", s)
+	}
+}
+
+func TestFetchPlaylistCookieParamPrecedesGlobal(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	a := NewYouTubeAdapter(argsCaptureScript(t, argsFile))
+	a.SetGlobalYTDlp("/tmp/global-cookies.txt", nil)
+	const url = "https://music.youtube.com/playlist?list=PL1"
+	if _, err := a.FetchPlaylist(context.Background(), url, CookieArgs{File: "/tmp/param.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := strings.TrimSpace(string(got))
+	if !strings.Contains(s, "--cookies /tmp/param.txt") {
+		t.Errorf("args = %q, want 参数 cookie 优先", s)
+	}
+	if strings.Contains(s, "/tmp/global-cookies.txt") {
+		t.Errorf("args = %q, 参数非空时不应出现全局 cookie 文件", s)
+	}
+}
+
+func TestFetchPlaylistGlobalHeadersAlwaysAppended(t *testing.T) {
+	const url = "https://music.youtube.com/playlist?list=PL1"
+	// CookieArgs 为空：全局 headers 附加
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	a := NewYouTubeAdapter(argsCaptureScript(t, argsFile))
+	a.SetGlobalYTDlp("", map[string]string{"X-Custom": "v1"})
+	if _, err := a.FetchPlaylist(context.Background(), url, CookieArgs{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := strings.TrimSpace(string(got)); !strings.Contains(s, "--add-header X-Custom:v1") {
+		t.Errorf("args = %q, CookieArgs 为空时也应附加全局 headers", s)
+	}
+
+	// CookieArgs 非空（FromBrowser）：headers 仍然附加，且全局 cookie 不出现
+	argsFile2 := filepath.Join(t.TempDir(), "args2.txt")
+	b := NewYouTubeAdapter(argsCaptureScript(t, argsFile2))
+	b.SetGlobalYTDlp("/tmp/global.txt", map[string]string{"X-Custom": "v1"})
+	if _, err := b.FetchPlaylist(context.Background(), url, CookieArgs{FromBrowser: "chrome"}); err != nil {
+		t.Fatal(err)
+	}
+	got2, err := os.ReadFile(argsFile2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2 := strings.TrimSpace(string(got2))
+	if !strings.Contains(s2, "--add-header X-Custom:v1") {
+		t.Errorf("args = %q, CookieArgs 非空时也应附加全局 headers", s2)
+	}
+	if !strings.Contains(s2, "--cookies-from-browser chrome") {
+		t.Errorf("args = %q, 参数 cookie 应保留", s2)
+	}
+	if strings.Contains(s2, "/tmp/global.txt") {
+		t.Errorf("args = %q, 参数非空时不应出现全局 cookie 文件", s2)
+	}
+}
+
+func TestSetGlobalYTDlpEmptyNoOp(t *testing.T) {
+	// 空 cookieFile + 全空/空白 value：不附加任何 --cookies/--add-header
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	a := NewYouTubeAdapter(argsCaptureScript(t, argsFile))
+	a.SetGlobalYTDlp("", map[string]string{
+		"X-Empty": "",
+		"X-Space": "   ",
+	})
+	const url = "https://music.youtube.com/playlist?list=PL1"
+	if _, err := a.FetchPlaylist(context.Background(), url, CookieArgs{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := strings.TrimSpace(string(got))
+	if strings.Contains(s, "--cookies") || strings.Contains(s, "--add-header") {
+		t.Errorf("args = %q, 空 cookieFile/空 value 不应附加任何参数", s)
+	}
+	want := "--flat-playlist -J --no-warnings --extractor-args youtubetab:skip=authcheck " + url
+	if s != want {
+		t.Errorf("args = %q, want %q（与未设置全局完全一致）", s, want)
+	}
+}

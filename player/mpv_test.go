@@ -174,7 +174,7 @@ func (f *fakeMpvServer) Close() error {
 // 监听者就绪，保证返回后测试事件可靠送达。
 func connectTestPlayer(t *testing.T, fake *fakeMpvServer) *MpvPlayer {
 	t.Helper()
-	p := NewMpvPlayer("", fake.Path())
+	p := NewMpvPlayer("", fake.Path(), "", nil)
 	if err := p.connect(); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -678,7 +678,7 @@ func TestLoadWatchdogResetOnNewLoad(t *testing.T) {
 
 // 回归（审查 P1）：断开清理必须清除加载看门狗状态——若 onDisconnect 只清
 // lastLoadID 而残留 loadDeadline，重连后新 watchdogLoop 继承旧 deadline
-//（最多还有 30s）到期误报 LoadTimeoutError → UI 无用户操作自动重播断线前
+// （最多还有 30s）到期误报 LoadTimeoutError → UI 无用户操作自动重播断线前
 // 曲目。断线时刻在途加载必然已死：deadline 归零 + loadResolved=true（重连后
 // 无活跃加载）。
 func TestOnDisconnectClearsLoadDeadline(t *testing.T) {
@@ -714,7 +714,7 @@ func TestOnDisconnectClearsLoadDeadline(t *testing.T) {
 }
 
 // 回归（审查 P1）：superseded 检查必须先于 expired 认领。旧实现先 claim
-//（清 deadline）再查代际——重连后旧代际 loop 最后一片 tick 会先认领（吞掉
+// （清 deadline）再查代际——重连后旧代际 loop 最后一片 tick 会先认领（吞掉
 // 新代际的 deadline）再退出；emit 在 superseded 检查之后执行，不会真的误报
 // 超时，真正的破坏是 deadline 被清空。本测试只推进代际（模拟重连已建立新连
 // 接），不启动新 loop：若旧 loop 先认领，deadline 被清空；修复后旧 loop 直
@@ -933,7 +933,7 @@ func TestMpvPlayerCommandsTimeoutWhenMpvHangs(t *testing.T) {
 
 // 未连接（未 Start/connect）时所有命令都应报错而非 panic。
 func TestMpvPlayerCommandsFailWhenNotConnected(t *testing.T) {
-	p := NewMpvPlayer("", "")
+	p := NewMpvPlayer("", "", "", nil)
 
 	for _, tc := range []struct {
 		name string
@@ -960,7 +960,7 @@ func TestMpvPlayerStartFailureLeavesNoDirtyState(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	p := NewMpvPlayer(script, filepath.Join(dir, "mpv.sock"))
+	p := NewMpvPlayer(script, filepath.Join(dir, "mpv.sock"), "", nil)
 
 	if err := p.Start(); err == nil {
 		t.Fatal("进程立即退出（不建 socket）时 Start 应报错")
@@ -991,7 +991,7 @@ func TestMpvStartProcessYtdlFormatArg(t *testing.T) {
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
 	script := writeFakeMpvWrapperScript(t, dir)
 
-	p := NewMpvPlayer(script, socketPath)
+	p := NewMpvPlayer(script, socketPath, "", nil)
 	if err := p.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1006,6 +1006,95 @@ func TestMpvStartProcessYtdlFormatArg(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "--ytdl-raw-options=socket-timeout=15,retries=2") {
 		t.Errorf("mpv 启动参数应含 --ytdl-raw-options=socket-timeout=15,retries=2:\n%s", data)
+	}
+	// 无配置（cookieFile/headers 均空）时不得附加 cookiefile/config-locations：
+	// 行为与旧版完全一致（可选配置不回归）。
+	if strings.Contains(string(data), "cookiefile") || strings.Contains(string(data), "config-locations") {
+		t.Errorf("无配置时不应含 cookiefile/config-locations:\n%s", data)
+	}
+}
+
+// 配置 cookie + headers 时：--ytdl-raw-options 动态拼接为单一参数
+// socket-timeout=15,retries=2,cookiefile=<path>,config-locations=<path>（顺序固定）；
+// 临时配置内容 = 按键排序的 --add-header 行（值含空格引号包裹）；Close() 删除临时配置。
+func TestMpvStartProcessYtdlRawOptionsWithCookieAndHeaders(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "empty-xdg")) // 隔离用户默认配置
+	t.Setenv("HOME", filepath.Join(dir, "empty-home"))
+	socketPath := filepath.Join(dir, "mpv.sock")
+	logPath := filepath.Join(dir, "starts.log")
+	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
+	script := writeFakeMpvWrapperScript(t, dir)
+
+	cookieFile := filepath.Join(dir, "cookies.txt")
+	p := NewMpvPlayer(script, socketPath, cookieFile, map[string]string{"X-Zeta": "z", "X-Alpha": "a value"})
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+
+	confPath := filepath.Join(os.TempDir(), fmt.Sprintf("music-tui-ytdlp-%d.conf", os.Getpid()))
+	t.Cleanup(func() { os.Remove(confPath) }) // 断言失败也兜底清理
+	wantArg := "--ytdl-raw-options=socket-timeout=15,retries=2,cookiefile=" + cookieFile + ",config-locations=" + confPath
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取日志: %v", err)
+	}
+	if n := strings.Count(string(data), "--ytdl-raw-options="); n != 1 {
+		t.Errorf("--ytdl-raw-options 出现次数 = %d, want 1（单一参数）:\n%s", n, data)
+	}
+	if !strings.Contains(string(data), wantArg) {
+		t.Errorf("mpv 启动参数应含 %s:\n%s", wantArg, data)
+	}
+	// 临时配置内容：按键排序 --add-header；值含空格 → 引号包裹
+	conf, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatalf("读临时配置: %v", err)
+	}
+	wantConf := "--add-header \"X-Alpha:a value\"\n--add-header X-Zeta:z\n"
+	if string(conf) != wantConf {
+		t.Errorf("临时配置内容 = %q, want %q", conf, wantConf)
+	}
+	// Close 删除临时配置文件
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(confPath); !os.IsNotExist(err) {
+		t.Errorf("Close 后临时配置仍存在: %v", err)
+	}
+}
+
+// cookie 路径含逗号 → mpv 选项值双引号包裹（cookiefile="/tmp/a,b/cookies.txt"）；
+// 无 headers 时不生成临时配置（不出现 config-locations）。
+func TestMpvStartProcessYtdlRawOptionsQuotesCommaCookiePath(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "empty-xdg"))
+	socketPath := filepath.Join(dir, "mpv.sock")
+	logPath := filepath.Join(dir, "starts.log")
+	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
+	script := writeFakeMpvWrapperScript(t, dir)
+
+	cookieFile := "/tmp/a,b/cookies.txt" // 含逗号 → 引号包裹
+	p := NewMpvPlayer(script, socketPath, cookieFile, nil)
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+
+	wantArg := `--ytdl-raw-options=socket-timeout=15,retries=2,cookiefile="/tmp/a,b/cookies.txt"`
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取日志: %v", err)
+	}
+	if !strings.Contains(string(data), wantArg) {
+		t.Errorf("mpv 启动参数应含 %s:\n%s", wantArg, data)
+	}
+	if strings.Contains(string(data), "config-locations") {
+		t.Errorf("无 headers 时不应含 config-locations:\n%s", data)
+	}
+	// 无 headers → 不生成临时配置
+	if _, err := os.Stat(filepath.Join(os.TempDir(), fmt.Sprintf("music-tui-ytdlp-%d.conf", os.Getpid()))); !os.IsNotExist(err) {
+		t.Errorf("无 headers 时不应生成临时配置: %v", err)
 	}
 }
 
@@ -1138,7 +1227,7 @@ func TestMpvPlayerVolume(t *testing.T) {
 func TestMpvPlayerVolumeFailsWhenNotConnected(t *testing.T) {
 	// binPath 用不存在的路径：ensureConnected 会触发重连但 exec 必然失败，
 	// 命令应快速返回错误（不能用 "mpv"——本机真实 mpv 会被启动并连接成功）。
-	p := NewMpvPlayer(filepath.Join(t.TempDir(), "no-such-mpv"), filepath.Join(t.TempDir(), "x.sock"))
+	p := NewMpvPlayer(filepath.Join(t.TempDir(), "no-such-mpv"), filepath.Join(t.TempDir(), "x.sock"), "", nil)
 	if _, err := p.Volume(); err == nil {
 		t.Fatal("未连接时 Volume 应报错")
 	}
@@ -1382,7 +1471,7 @@ func TestMpvPlayerAutoReconnectAfterProcessDeath(t *testing.T) {
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
 	script := writeFakeMpvWrapperScript(t, dir)
 
-	p := NewMpvPlayer(script, socketPath)
+	p := NewMpvPlayer(script, socketPath, "", nil)
 	if err := p.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1419,7 +1508,7 @@ func TestMpvPlayerLazyReconnectOnPlay(t *testing.T) {
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", filepath.Join(dir, "starts.log"))
 	script := writeFakeMpvWrapperScript(t, dir)
 
-	p := NewMpvPlayer(script, socketPath)
+	p := NewMpvPlayer(script, socketPath, "", nil)
 	if err := p.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1443,7 +1532,7 @@ func TestMpvPlayerReconnectFailureGivesClearError(t *testing.T) {
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", filepath.Join(dir, "starts.log"))
 	script := writeFakeMpvWrapperScript(t, dir)
 
-	p := NewMpvPlayer(script, socketPath)
+	p := NewMpvPlayer(script, socketPath, "", nil)
 	if err := p.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1511,7 +1600,7 @@ func TestMpvPlayerReconnectSingleFlight(t *testing.T) {
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
 	script := writeFakeMpvWrapperScript(t, dir)
 
-	p := NewMpvPlayer(script, socketPath)
+	p := NewMpvPlayer(script, socketPath, "", nil)
 	if err := p.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1557,7 +1646,7 @@ func TestMpvPlayerReconnectCrashLoop(t *testing.T) {
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
 	script := writeFakeMpvWrapperScript(t, dir)
 
-	p := NewMpvPlayer(script, socketPath)
+	p := NewMpvPlayer(script, socketPath, "", nil)
 	if err := p.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1600,7 +1689,7 @@ func TestMpvPlayerDisconnectDuringReconnectRecovers(t *testing.T) {
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", filepath.Join(dir, "starts.log"))
 	script := writeFakeMpvWrapperScript(t, dir)
 
-	p := NewMpvPlayer(script, socketPath)
+	p := NewMpvPlayer(script, socketPath, "", nil)
 	if err := p.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

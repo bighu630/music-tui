@@ -54,14 +54,14 @@ func newResumeTestModel(t *testing.T, st *session.State, onTrack func(*model.Tra
 	}
 	// 缓存指向不存在的 yt-dlp：恢复路径不会触发 CacheAsync，即使触发
 	// 后台下载也立即失败退出（无网络无泄漏）。
-	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, "/nonexistent/yt-dlp")
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, "/nonexistent/yt-dlp", "", nil)
 	ytStore, err := ytm.NewStore(filepath.Join(t.TempDir(), "ytm.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := NewModel(fp, &fakeSearchAdapter{},
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, pls, cm, ytm.NewClient(ytStore, &fakeYTFetcher{}), onTrack)
+		cf, hist, sess, pls, cm, ytm.NewClient(ytStore, &fakeYTFetcher{}), onTrack, false)
 	return m, fp
 }
 
