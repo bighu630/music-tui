@@ -229,15 +229,24 @@ func continuationTokenFromRenderer(r map[string]any) string {
 	return ""
 }
 
+// normalizePlaylistID 规范化歌单 browseId：真实浏览响应中的歌单 ID 常带
+// "VL" 前缀（VLPL.../VLLM/VLSE/VLRD...），yt-dlp 用带前缀 ID 拉取会
+// 报 HTTP 400；剥掉前缀后的 PL.../LM/SE/RD... 才可直接拉取。
+// 无 VL 前缀（或空串）原样返回。
+func normalizePlaylistID(id string) string {
+	return strings.TrimPrefix(id, "VL")
+}
+
 // remotePlaylistFromItem 从 musicTwoRowItemRenderer 对象提取歌单；
-// 缺少 browseId 返回 nil。
+// 缺少 browseId 返回 nil。browseId 提取后立即规范化（源头剥 VL 前缀，
+// 映射键/URL 构造/去重全部受益）。
 func remotePlaylistFromItem(r map[string]any) *RemotePlaylist {
 	id := getStringPath(r, "navigationEndpoint", "browseEndpoint", "browseId")
 	if id == "" {
 		return nil
 	}
 	return &RemotePlaylist{
-		ID:    id,
+		ID:    normalizePlaylistID(id),
 		Title: firstRunText(r["title"]),
 		Count: subtitleCount(r["subtitle"]),
 	}

@@ -291,7 +291,32 @@ func TestFetchPlaylistCookieArgs(t *testing.T) {
 					t.Errorf("args = %q, 不应包含 %q", s, n)
 				}
 			}
+			// 所有路径都必须跳过 authcheck（私有歌单默认网页验证会失败）
+			if !strings.Contains(s, "--extractor-args youtubetab:skip=authcheck") {
+				t.Errorf("args = %q, 必须包含 --extractor-args youtubetab:skip=authcheck", s)
+			}
 		})
+	}
+}
+
+// authcheck 跳过：断言 FetchPlaylist 的完整参数序列
+// （--extractor-args youtubetab:skip=authcheck 位于 cookie 参数与 URL 之间；
+// yt-dlp 2026.07+ 对私有歌单默认网页 authcheck 验证，失败即报错建议跳过，
+// 跳过对公开/私有歌单均无害）。
+func TestFetchPlaylistAuthcheckSkipped(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	a := NewYouTubeAdapter(argsCaptureScript(t, argsFile))
+	const url = "https://music.youtube.com/playlist?list=PL1"
+	if _, err := a.FetchPlaylist(context.Background(), url, CookieArgs{File: "/tmp/c.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--flat-playlist -J --no-warnings --cookies /tmp/c.txt --extractor-args youtubetab:skip=authcheck " + url
+	if got := strings.TrimSpace(string(got)); got != want {
+		t.Errorf("args = %q, want %q", got, want)
 	}
 }
 
