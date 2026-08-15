@@ -599,12 +599,12 @@ cache/
 ├── options.go    # Options{Enabled, MaxEntries, Dir}——配置结构真源（json tag 即配置文件格式）
 ├── index.go      # LRU 索引：Entry{ID, File, LastPlayed}，JSON 持久化（原子写盘）
 ├── name.go       # SafeName(id)：文件名安全化
-├── download.go   # 下载器：yt-dlp 取直链 + http 下载 + 失败重试 1 次
+├── download.go   # 下载器：yt-dlp 直接下载（-o 模板落盘）+ 403 风控整进程重跑
 └── cache.go      # Manager：并发安全门面 + in-flight 去重 + 启动清理
 ```
-- **索引条目**：`Track.ID → {文件名, 最后播放时间}`；文件名 = `SafeName(ID)`（保留 `[A-Za-z0-9._-]`，其余转 `_`，空结果用 `unknown`）+ 可选扩展名（yt-dlp `--print "%(url)s %(ext)s"` 一次取直链与格式）
+- **索引条目**：`Track.ID → {文件名, 最后播放时间}`；文件名 = `SafeName(ID)`（保留 `[A-Za-z0-9._-]`，其余转 `_`，空结果用 `unknown`）+ 实际扩展名（yt-dlp `-o "<SafeName>.%(ext)s"` 模板直接落盘，扩展名由 yt-dlp 产出决定，成功路径返回产物 basename）
 - **LRU 语义**：按 LastPlayed 升序排列，最旧在前；`Register`（下载完成/新文件入册）追加到最新，超限淘汰最旧并删除文件；`Lookup` 命中即刷新 LastPlayed（一次播放 = 一次刷新）；`Remove` 删文件+条目
-- **下载流程**（CacheAsync，goroutine，不阻塞播放）：去重（同 ID 在途跳过）→ 总超时 5 分钟 → `yt-dlp -f bestaudio --no-playlist --no-warnings --print "%(url)s %(ext)s" <URL>` 取直链（60s 超时）→ http GET 直链，失败重试 1 次（2s 退避）→ 写 `.part` 临时文件 → rename 为正式文件 → Register → 超限淘汰。任何失败仅日志，不影响播放
+- **下载流程**（CacheAsync，goroutine，不阻塞播放）：去重（同 ID 在途跳过）→ 总超时 5 分钟 → `yt-dlp -f bestaudio --no-playlist --no-warnings -o "<SafeName>.%(ext)s" <URL>` 直接下载落盘（单次尝试 90s 子超时）→ 产物校验（非空、非 .part）→ Register → 超限淘汰。YouTube 对音频直链有**概率性 403 风控**（同一 CDN/同一客户端，换 URL 换结果；该错误 yt-dlp 内部不重试）——因此失败**整进程重跑** = 重新运行 yt-dlp = 重新提取新 URL，每次重跑都是新“彩票”；预算内最多 5 次（2s 退避，总超时内）。任何失败仅日志，不影响播放
 - **并发安全**：Manager.mu 保护索引与 in-flight 集合；下载在锁外执行；-race 全绿
 - **启动清理**（New 时）：条目文件缺失 → 删条目；超限 → 淘汰最旧（删文件）；有变化则持久化。孤儿文件（无条目）不清理
 - **降级**：缓存目录不可用/索引损坏且备份重建失败 → `cache.Disabled()` 禁用态（Lookup 永 miss、CacheAsync no-op），警告日志，绝不影响播放
@@ -622,13 +622,14 @@ cache/
 | 模块 | 策略 |
 |---|---|
 | config | 缺失生成默认、部分字段回落、<1 上限回落、损坏报错、空文件默认、原子写盘 |
-| cache | SafeName 边界；LRU 淘汰/命中刷新/Remove/Prune（缺文件清条目、超限淘汰）；索引 roundtrip/损坏报错；下载器 httptest（200/404/500 重试后成功/超时）、取直链注入 stub；Manager 并发 -race、in-flight 去重、Disabled 态 |
+| cache | SafeName 边界；LRU 淘汰/命中刷新/Remove/Prune（缺文件清条目、超限淘汰）；索引 roundtrip/损坏报错；下载器假 yt-dlp 脚本（成功落盘/失败 stderr 诊断/未产出/0 字节/.part 残留与清理）、403 整进程重跑重试（前 2 败第 3 胜）；Manager 并发 -race、in-flight 去重、Disabled 态 |
 | ui | 命中播本地路径、未命中播 URL + 后台下载启动不阻塞、LoadFailed 损坏回退删条目重试走 URL、恢复命中 PlayPaused 本地路径 |
 | main | loadConfig 缺失/损坏备份重建（同 loadHistory 模式） |
 
 ### 17.6 已知限制
 - **LoadFailed 陈旧事件可能误删新曲目的有效缓存**：**主场景已修复，残留亚毫秒级窗口**——player 层按 playlist_entry_id 归属过滤陈旧 end-file error（mpv ≥0.33 的 end-file 事件与 loadfile 命令响应均携带 playlist_entry_id，且响应先于事件到达）：事件 id 与最近一次成功 loadfile 的 id 不一致 = 旧曲取流失败晚到，丢弃防 UI 按“当前曲目”误删健康缓存；旧版 mpv 无该字段时过滤禁用、保守放行（loadfile 响应无 id 同样保守放行）。**残差**：旧曲取流失败事件恰在切歌的 loadfile 命令处理前写出（亚毫秒级窗口）时仍可能被归属为当前曲，后果为缓存条目被删后可重新下载自愈；UI 层无法区分同代际事件，接受该残差。UI 层同步区分：IPC 层恢复失败不再删缓存（与缓存文件无关），真实损坏由异步 LoadFailedError 路径移除条目，提示区分“缓存文件损坏”与网络取流失败
 - **多实例共享缓存目录**：与 index.json/session.json 同款单实例假设，多实例并发写索引的互相覆盖问题仍为已知限制
+- **下载 403 风控耗尽预算**：整进程重跑最多 5 次仍失败 → 本次放弃缓存（仅日志），不阻塞播放；下次播放再触发 CacheAsync 重新下载自愈
 ## 18. YouTube Music 播放列表同步（追加需求）
 
 ### 18.1 概述

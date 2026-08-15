@@ -1,25 +1,27 @@
 package cache
 
 import (
-	"context"
-	"errors"
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sync/atomic"
+	"strings"
 	"testing"
 	"time"
 
 	"music-tui/model"
 )
 
-// newTestManager 构造测试用 Manager（真实文件系统，stub extract 由各测试注入）。
+// newTestManager 构造测试用 Manager（真实文件系统，yt-dlp 指向不存在的路径：
+// 不触发下载的测试场景用）。
 func newTestManager(t *testing.T, opts Options) *Manager {
 	t.Helper()
-	cm, err := New(opts, "/nonexistent/yt-dlp")
+	return newTestManagerWithYtdlp(t, opts, "/nonexistent/yt-dlp")
+}
+
+// newTestManagerWithYtdlp 同 newTestManager，但注入假 yt-dlp 脚本路径：
+// 下载类测试用它真实走完 下载→注册 全链路。
+func newTestManagerWithYtdlp(t *testing.T, opts Options, ytdlpPath string) *Manager {
+	t.Helper()
+	cm, err := New(opts, ytdlpPath)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -347,83 +349,93 @@ func TestDisabledManager(t *testing.T) {
 	}
 }
 
+// callCounterBody 返回假脚本体：每次被调用向 <缓存目录>/calls 追加一行
+// （<dirname(-o)> 即缓存目录），测试用行数断言调用次数。配合成功落盘
+// $out 使用——下载一次即退出，不留跨测试存活的下载 goroutine
+// （避免 -race 下与后续测试改包级变量竞争）。
+func callCounterBody() string {
+	return `mkdir -p "$(dirname "$out")"
+echo x >> "$(dirname "$out")/calls"`
+}
+
 func TestCacheAsyncDedupSameID(t *testing.T) {
-	cm := newTestManager(t, testOpts(t))
-	var calls int32
-	called := make(chan struct{}, 16)
-	cm.extract = func(ctx context.Context, url string) (string, string, error) {
-		atomic.AddInt32(&calls, 1)
-		called <- struct{}{}
-		return "", "", errors.New("stop-here")
-	}
+	dir := t.TempDir()
+	callsFile := filepath.Join(dir, "calls")
+	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+		writeFakeYtDlp(t, fakeYtDlpBody(`printf 'fake-audio-bytes' > "$out"`+"\n"+callCounterBody())))
 	const id = "dedup-id-1"
 	for i := 0; i < 10; i++ {
 		cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
 	}
-	select {
-	case <-called:
-	case <-time.After(5 * time.Second):
-		t.Fatal("extract never called")
+	// 等脚本被调用（calls 文件出现）
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(callsFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("假脚本从未被调用")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	time.Sleep(100 * time.Millisecond) // 让其余 goroutine 有机会跑（应全部 no-op）
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Errorf("extract calls = %d, want 1", got)
+	if got := callCount(callsFile); got != 1 {
+		t.Errorf("脚本调用次数 = %d, want 1（同 ID 去重）", got)
 	}
 }
 
-func TestCacheAsyncDifferentIDs(t *testing.T) {
-	cm := newTestManager(t, testOpts(t))
-	var calls int32
-	done := make(chan struct{}, 16)
-	cm.extract = func(ctx context.Context, url string) (string, string, error) {
-		atomic.AddInt32(&calls, 1)
-		done <- struct{}{}
-		return "", "", errors.New("stop-here")
+// callCount 读 calls 文件返回行数（不存在 = 0）。
+func callCount(callsFile string) int {
+	data, err := os.ReadFile(callsFile)
+	if err != nil {
+		return 0
 	}
+	return strings.Count(string(data), "\n")
+}
+
+func TestCacheAsyncDifferentIDs(t *testing.T) {
+	dir := t.TempDir()
+	callsFile := filepath.Join(dir, "calls")
+	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+		writeFakeYtDlp(t, fakeYtDlpBody(`printf 'fake-audio-bytes' > "$out"`+"\n"+callCounterBody())))
 	for _, id := range []string{"id-1", "id-2", "id-3"} {
 		cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
 	}
-	for i := 0; i < 3; i++ {
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("extract call timeout")
+	// 等 3 个脚本调用全部到达
+	deadline := time.Now().Add(5 * time.Second)
+	for callCount(callsFile) < 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("脚本调用数未达 3（超时）")
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if got := atomic.LoadInt32(&calls); got != 3 {
-		t.Errorf("extract calls = %d, want 3", got)
+	if got := callCount(callsFile); got != 3 {
+		t.Errorf("脚本调用次数 = %d, want 3", got)
 	}
 }
 
 func TestCacheAsyncSkipsExistingEntry(t *testing.T) {
 	dir := t.TempDir()
-	cm := newTestManager(t, Options{Enabled: true, MaxEntries: 100, Dir: dir})
+	callsFile := filepath.Join(dir, "calls")
+	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+		writeFakeYtDlp(t, fakeYtDlpBody(callCounterBody())))
 	writeCacheFile(t, dir, SafeName("already"))
 	if err := cm.Register("already"); err != nil {
 		t.Fatal(err)
 	}
-	var calls int32
-	cm.extract = func(ctx context.Context, url string) (string, string, error) {
-		atomic.AddInt32(&calls, 1)
-		return "", "", errors.New("stop-here")
-	}
 	cm.CacheAsync(model.Track{ID: "already", URL: "https://youtube.com/watch?v=already"})
 	time.Sleep(100 * time.Millisecond)
-	if got := atomic.LoadInt32(&calls); got != 0 {
-		t.Errorf("extract calls = %d, want 0 (entry exists)", got)
+	if _, err := os.Stat(callsFile); !os.IsNotExist(err) {
+		t.Errorf("条目已存在仍调用 yt-dlp（calls 文件被创建）")
 	}
 }
 
 func TestCacheAsyncDownloadsAndRegisters(t *testing.T) {
 	dir := t.TempDir()
-	cm := newTestManager(t, Options{Enabled: true, MaxEntries: 100, Dir: dir})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "stream-audio-bytes")
-	}))
-	defer srv.Close()
-	cm.extract = func(ctx context.Context, url string) (string, string, error) {
-		return srv.URL + "/stream", "m4a", nil
-	}
+	callsFile := filepath.Join(dir, "calls")
+	// 脚本同时落盘音频字节并计数：全链路真实走完 下载→注册
+	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+		writeFakeYtDlp(t, fakeYtDlpBody(`printf 'stream-audio-bytes' > "$out"`+"\n"+callCounterBody())))
 	id := "dl-abcd1234"
 	cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
 
@@ -440,8 +452,8 @@ func TestCacheAsyncDownloadsAndRegisters(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// ext 拼接：文件名为 SafeName(id)+".m4a"
-	wantFile := SafeName(id) + ".m4a"
+	// 假脚本把 %(ext)s 替换为 webm：文件名为 SafeName(id)+".webm"
+	wantFile := SafeName(id) + ".webm"
 	if want := filepath.Join(dir, wantFile); path != want {
 		t.Errorf("path = %q, want %q", path, want)
 	}
@@ -452,39 +464,45 @@ func TestCacheAsyncDownloadsAndRegisters(t *testing.T) {
 	if string(data) != "stream-audio-bytes" {
 		t.Errorf("cached content = %q", data)
 	}
-	// inflight 已清除：再次 CacheAsync 应 no-op（条目已存在）
-	var calls int32
-	cm.extract = func(ctx context.Context, url string) (string, string, error) {
-		atomic.AddInt32(&calls, 1)
-		return "", "", errors.New("stop-here")
+	// inflight 已清除：再次 CacheAsync 应 no-op（条目已存在）→ 脚本调用次数不再增长
+	if got := callCount(callsFile); got != 1 {
+		t.Fatalf("前置：脚本调用次数 = %d, want 1", got)
 	}
 	cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
 	time.Sleep(50 * time.Millisecond)
-	if got := atomic.LoadInt32(&calls); got != 0 {
-		t.Errorf("second CacheAsync extract calls = %d, want 0", got)
+	if got := callCount(callsFile); got != 1 {
+		t.Errorf("再次 CacheAsync 后脚本调用次数 = %d, want 1（条目已存在应 no-op）", got)
 	}
 }
 
 func TestCacheAsyncDisabledNoGoroutine(t *testing.T) {
 	cm := Disabled()
-	var calls int32
-	cm.extract = func(ctx context.Context, url string) (string, string, error) {
-		atomic.AddInt32(&calls, 1)
-		return "", "", nil
-	}
+	dir := t.TempDir()
+	callsFile := filepath.Join(dir, "calls")
+	// 假脚本路径不会传给 Disabled manager（ytdlpPath 为空）——直接调内部
+	// download 也应被防御检查拦截，脚本不可能被调用
+	writeFakeYtDlp(t, fakeYtDlpBody(`echo x >> "`+callsFile+`"`))
 	cm.CacheAsync(model.Track{ID: "x", URL: "https://youtube.com/watch?v=x"})
+	cm.download(model.Track{ID: "x", URL: "https://youtube.com/watch?v=x"})
 	time.Sleep(50 * time.Millisecond)
-	if got := atomic.LoadInt32(&calls); got != 0 {
-		t.Errorf("extract calls = %d, want 0", got)
+	if _, err := os.Stat(callsFile); !os.IsNotExist(err) {
+		t.Error("Disabled manager 不应调用 yt-dlp（calls 文件被创建）")
+	}
+	if cm.idx.len() != 0 {
+		t.Error("Disabled manager mutated index")
 	}
 }
 
 func TestCacheAsyncFailureOnlyLogs(t *testing.T) {
-	// extract 失败不应 panic（log.Printf 输出即可）
-	cm := newTestManager(t, testOpts(t))
-	cm.extract = func(ctx context.Context, url string) (string, string, error) {
-		return "", "", fmt.Errorf("boom")
-	}
+	// yt-dlp 下载失败不应 panic（log.Printf 输出即可）；调小预算与退避加速
+	defer func(old time.Duration) { DownloadRetryBackoff = old }(DownloadRetryBackoff)
+	defer func(old int) { MaxDownloadAttempts = old }(MaxDownloadAttempts)
+	DownloadRetryBackoff = time.Millisecond
+	MaxDownloadAttempts = 2
+
+	dir := t.TempDir()
+	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+		writeFakeYtDlp(t, fakeYtDlpBody(callCounterBody()+"\necho \"HTTP Error 403\" >&2\nexit 1")))
 	cm.CacheAsync(model.Track{ID: "fail-id", URL: "https://youtube.com/watch?v=fail"})
 	// 等待 goroutine 结束：inflight 清除
 	deadline := time.Now().Add(5 * time.Second)
@@ -499,5 +517,62 @@ func TestCacheAsyncFailureOnlyLogs(t *testing.T) {
 			t.Fatal("inflight 未清除")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	// 预算耗尽才放弃：脚本调用次数 = MaxDownloadAttempts
+	if got := callCount(filepath.Join(dir, "calls")); got != MaxDownloadAttempts {
+		t.Errorf("脚本调用次数 = %d, want %d（预算耗尽）", got, MaxDownloadAttempts)
+	}
+}
+
+// 403 概率性风控：下载失败整进程重跑（每次重新运行 yt-dlp = 重新提取新 URL），
+// 预算内前 2 次失败、第 3 次成功 → 最终命中缓存。
+func TestCacheAsyncRetriesThenSucceeds(t *testing.T) {
+	defer func(old time.Duration) { DownloadRetryBackoff = old }(DownloadRetryBackoff)
+	DownloadRetryBackoff = time.Millisecond
+
+	dir := t.TempDir()
+	body := `
+callfile="$(dirname "$out")/calls"
+mkdir -p "$(dirname "$out")"
+n=0
+[ -f "$callfile" ] && n=$(wc -l < "$callfile")
+n=$((n + 1))
+echo x >> "$callfile"
+if [ "$n" -le 2 ]; then
+  echo "HTTP Error 403" >&2
+  exit 1
+fi
+printf 'fake-audio-bytes' > "$out"
+`
+	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+		writeFakeYtDlp(t, fakeYtDlpBody(body)))
+	id := "retry-403-1"
+	cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
+
+	deadline := time.Now().Add(5 * time.Second)
+	var path string
+	for {
+		var ok bool
+		if path, ok = cm.Lookup(id); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("403 重跑后仍未命中缓存（超时）")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if want := filepath.Join(dir, SafeName(id)+".webm"); path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read cached file: %v", err)
+	}
+	if string(data) != "fake-audio-bytes" {
+		t.Errorf("cached content = %q", data)
+	}
+	// 前 2 次失败 + 第 3 次成功 = 共 3 次调用
+	if got := callCount(filepath.Join(dir, "calls")); got != 3 {
+		t.Errorf("脚本调用次数 = %d, want 3（2 败 1 胜）", got)
 	}
 }

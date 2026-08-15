@@ -4,16 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
-	"strings"
-	"time"
+	"path/filepath"
 )
-
-// userAgent 是下载请求的 User-Agent（裸 Go 客户端默认无 UA，YouTube 直链易 403）。
-const userAgent = "music-tui/0.1.0"
 
 // maxStderrTail 是错误分支拼入错误消息的 stderr 诊断文本最大长度（与 search 包同款）。
 const maxStderrTail = 512
@@ -26,104 +20,56 @@ func tail(s string, max int) string {
 	return s[len(s)-max:]
 }
 
-// extractFunc 从页面 URL 提取音频直链与扩展名（测试可注入 stub）。
-type extractFunc func(ctx context.Context, url string) (streamURL, ext string, err error)
-
-// realExtract 用 yt-dlp 提取直链：--print 输出一行 "URL EXT"。
-func realExtract(ctx context.Context, ytdlpPath, url string) (streamURL, ext string, err error) {
+// realDownload 用 yt-dlp 直接把音频下载到 destBase+".%(ext)s" 模板落盘：
+// exec `yt-dlp --no-playlist --no-warnings -f bestaudio -o <destBase>.%(ext)s <url>`。
+// 成功返回最终文件 basename（register 用）；失败清理 destBase.* 残留（含 .part）后返回错误。
+//
+// 背景：YouTube 对音频直链做概率性 403 风控（同一 CDN/同一客户端，换 URL 换结果），
+// 而每次运行 yt-dlp = 重新提取 = 新 URL。因此下载失败的重试交给上层整进程重跑
+// （download 循环），每次重跑重新提取新 URL，天然绕开 403——单次尝试内不重试。
+func realDownload(ctx context.Context, ytdlpPath, url, destBase string) (string, error) {
 	cmd := exec.CommandContext(ctx, ytdlpPath,
 		"--no-playlist", "--no-warnings", "-f", "bestaudio",
-		"--print", "%(url)s %(ext)s", url)
+		"-o", destBase+".%(ext)s", url)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
+	if err := cmd.Run(); err != nil {
 		msg := tail(stderr.String(), maxStderrTail)
 		if msg == "" {
 			msg = "<无输出>"
 		}
-		return "", "", fmt.Errorf("yt-dlp 提取直链: %w（stderr: %s）", err, msg)
+		cleanDestBase(destBase)
+		return "", fmt.Errorf("yt-dlp 下载: %w（stderr: %s）", err, msg)
 	}
-	line := string(out)
-	if i := strings.IndexByte(line, '\n'); i >= 0 {
-		line = line[:i] // 只取第一行
+	// yt-dlp 成功落盘 <destBase>.<ext>：glob 排除 .part 临时文件取最终产物（理论唯一）
+	matches, err := filepath.Glob(destBase + ".*")
+	if err != nil {
+		return "", fmt.Errorf("glob 下载产物: %w", err)
 	}
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return "", "", fmt.Errorf("yt-dlp 输出为空")
+	var final string
+	for _, m := range matches {
+		if filepath.Ext(m) == ".part" {
+			continue // yt-dlp 自己的临时文件，非最终产物
+		}
+		final = m
 	}
-	streamURL = fields[0]
-	if len(fields) >= 2 && safeExt(fields[1]) {
-		ext = fields[1]
+	if final == "" {
+		cleanDestBase(destBase)
+		return "", fmt.Errorf("yt-dlp 未产出文件")
 	}
-	return streamURL, ext, nil
+	fi, err := os.Stat(final)
+	if err != nil || fi.Size() == 0 {
+		cleanDestBase(destBase)
+		return "", fmt.Errorf("下载产物无效（缺失或 0 字节）")
+	}
+	return filepath.Base(final), nil
 }
 
-// safeExt 校验扩展名：仅 1-8 位字母数字。
-func safeExt(s string) bool {
-	if len(s) < 1 || len(s) > 8 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
-			return false
+// cleanDestBase 删除 destBase.* 残留（含 .part），失败忽略（New 启动清理兜底）。
+func cleanDestBase(destBase string) {
+	if matches, err := filepath.Glob(destBase + ".*"); err == nil {
+		for _, m := range matches {
+			os.Remove(m)
 		}
 	}
-	return true
-}
-
-// downloadFile 下载 url 到 dest：先写 dest+".part" 再 rename，0 字节视为错误；
-// 失败（含 5xx）等 DownloadRetryBackoff 后重试 1 次（总 2 次尝试）。
-func downloadFile(ctx context.Context, client *http.Client, url, dest string) (int64, error) {
-	n, err := attemptDownload(ctx, client, url, dest)
-	if err == nil {
-		return n, nil
-	}
-	select {
-	case <-time.After(DownloadRetryBackoff):
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	}
-	return attemptDownload(ctx, client, url, dest)
-}
-
-// attemptDownload 单次下载尝试。
-func attemptDownload(ctx context.Context, client *http.Client, url, dest string) (int64, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return 0, fmt.Errorf("构造下载请求: %w", err)
-	}
-	req.Header.Set("User-Agent", userAgent)
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("发起下载: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	part := dest + ".part"
-	f, err := os.Create(part) // Create 自带截断覆盖
-	if err != nil {
-		return 0, fmt.Errorf("创建临时文件: %w", err)
-	}
-	n, copyErr := io.Copy(f, resp.Body)
-	closeErr := f.Close()
-	if copyErr != nil {
-		os.Remove(part)
-		return 0, fmt.Errorf("写入临时文件: %w", copyErr)
-	}
-	if closeErr != nil {
-		os.Remove(part)
-		return 0, fmt.Errorf("关闭临时文件: %w", closeErr)
-	}
-	if n == 0 {
-		os.Remove(part)
-		return 0, fmt.Errorf("下载内容为空")
-	}
-	if err := os.Rename(part, dest); err != nil {
-		return 0, fmt.Errorf("移动临时文件: %w", err)
-	}
-	return n, nil
 }

@@ -2,150 +2,27 @@ package cache
 
 import (
 	"context"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 )
 
-func TestDownloadFileSuccess(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "hello audio data")
-	}))
-	defer srv.Close()
-
-	dest := filepath.Join(t.TempDir(), "song.m4a")
-	client := &http.Client{}
-	n, err := downloadFile(context.Background(), client, srv.URL, dest)
-	if err != nil {
-		t.Fatalf("downloadFile: %v", err)
-	}
-	if n != int64(len("hello audio data")) {
-		t.Errorf("n = %d, want %d", n, len("hello audio data"))
-	}
-	data, err := os.ReadFile(dest)
-	if err != nil {
-		t.Fatalf("read dest: %v", err)
-	}
-	if string(data) != "hello audio data" {
-		t.Errorf("content = %q", data)
-	}
-	if _, err := os.Stat(dest + ".part"); !os.IsNotExist(err) {
-		t.Errorf(".part residue: %v", err)
-	}
-}
-
-func TestDownloadFile404(t *testing.T) {
-	defer func(old time.Duration) { DownloadRetryBackoff = old }(DownloadRetryBackoff)
-	DownloadRetryBackoff = 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	dest := filepath.Join(t.TempDir(), "song.m4a")
-	if _, err := downloadFile(context.Background(), &http.Client{}, srv.URL, dest); err == nil {
-		t.Fatal("downloadFile 404 = nil error, want error")
-	}
-	if _, err := os.Stat(dest); !os.IsNotExist(err) {
-		t.Errorf("dest exists after 404: %v", err)
-	}
-	if _, err := os.Stat(dest + ".part"); !os.IsNotExist(err) {
-		t.Errorf(".part exists after 404: %v", err)
-	}
-}
-
-func TestDownloadFileRetrySucceeds(t *testing.T) {
-	defer func(old time.Duration) { DownloadRetryBackoff = old }(DownloadRetryBackoff)
-	DownloadRetryBackoff = 0
-
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&calls, 1) == 1 {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		io.WriteString(w, "retried ok")
-	}))
-	defer srv.Close()
-
-	dest := filepath.Join(t.TempDir(), "song.m4a")
-	n, err := downloadFile(context.Background(), &http.Client{}, srv.URL, dest)
-	if err != nil {
-		t.Fatalf("downloadFile after retry: %v", err)
-	}
-	if n != int64(len("retried ok")) {
-		t.Errorf("n = %d, want %d", n, len("retried ok"))
-	}
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Errorf("calls = %d, want 2", got)
-	}
-	data, _ := os.ReadFile(dest)
-	if string(data) != "retried ok" {
-		t.Errorf("content = %q, want retried ok", data)
-	}
-}
-
-func TestDownloadFileRetryGivesUp(t *testing.T) {
-	defer func(old time.Duration) { DownloadRetryBackoff = old }(DownloadRetryBackoff)
-	DownloadRetryBackoff = 0
-
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	dest := filepath.Join(t.TempDir(), "song.m4a")
-	if _, err := downloadFile(context.Background(), &http.Client{}, srv.URL, dest); err == nil {
-		t.Fatal("downloadFile 500x2 = nil error, want error")
-	}
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Errorf("calls = %d, want 2 (retry once)", got)
-	}
-}
-
-func TestDownloadFileEmptyBody(t *testing.T) {
-	defer func(old time.Duration) { DownloadRetryBackoff = old }(DownloadRetryBackoff)
-	DownloadRetryBackoff = 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK) // 空体
-	}))
-	defer srv.Close()
-
-	dest := filepath.Join(t.TempDir(), "song.m4a")
-	if _, err := downloadFile(context.Background(), &http.Client{}, srv.URL, dest); err == nil {
-		t.Fatal("downloadFile empty body = nil error, want error")
-	}
-	if _, err := os.Stat(dest); !os.IsNotExist(err) {
-		t.Errorf("dest exists after empty body: %v", err)
-	}
-	if _, err := os.Stat(dest + ".part"); !os.IsNotExist(err) {
-		t.Errorf(".part exists after empty body: %v", err)
-	}
-}
-
-func TestAttemptDownloadSetsUserAgent(t *testing.T) {
-	var gotUA string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotUA = r.Header.Get("User-Agent")
-		io.WriteString(w, "ok")
-	}))
-	defer srv.Close()
-
-	dest := filepath.Join(t.TempDir(), "song.m4a")
-	if _, err := attemptDownload(context.Background(), &http.Client{}, srv.URL, dest); err != nil {
-		t.Fatalf("attemptDownload: %v", err)
-	}
-	if gotUA != userAgent {
-		t.Errorf("User-Agent = %q, want %q", gotUA, userAgent)
-	}
+// fakeYtDlpBody 返回假 yt-dlp 脚本体：先遍历参数解析 -o 模板得到输出路径 $out
+// （%(ext)s → webm，与真实 yt-dlp -o 落盘同语义），再执行 extra（其中可用 $out
+// 写文件）。与真实命令 `yt-dlp ... -o <destBase>.%(ext)s <url>` 对齐。
+func fakeYtDlpBody(extra string) string {
+	return `
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    out=$(printf '%s' "$a" | sed 's/%(ext)s/webm/')
+  fi
+  prev="$a"
+done
+[ -n "$out" ] || exit 9
+` + extra
 }
 
 func writeFakeYtDlp(t *testing.T, body string) string {
@@ -157,79 +34,93 @@ func writeFakeYtDlp(t *testing.T, body string) string {
 	return script
 }
 
-func TestRealExtractFakeScript(t *testing.T) {
-	script := writeFakeYtDlp(t, `echo "http://stream.example/a.m4a m4a"`)
-	streamURL, ext, err := realExtract(context.Background(), script, "https://youtube.com/watch?v=abc")
+func TestRealDownloadFakeScript(t *testing.T) {
+	script := writeFakeYtDlp(t, fakeYtDlpBody(`printf 'fake-audio-bytes' > "$out"`))
+	destBase := filepath.Join(t.TempDir(), "song")
+	file, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase)
 	if err != nil {
-		t.Fatalf("realExtract: %v", err)
+		t.Fatalf("realDownload: %v", err)
 	}
-	if streamURL != "http://stream.example/a.m4a" {
-		t.Errorf("streamURL = %q", streamURL)
+	if want := "song.webm"; file != want {
+		t.Errorf("file = %q, want %q", file, want)
 	}
-	if ext != "m4a" {
-		t.Errorf("ext = %q, want m4a", ext)
+	if filepath.Base(file) != file {
+		t.Errorf("返回值应为 basename（register 用）: %q", file)
 	}
-}
-
-func TestRealExtractSingleFieldNoExt(t *testing.T) {
-	script := writeFakeYtDlp(t, `echo "http://stream.example/a"`)
-	streamURL, ext, err := realExtract(context.Background(), script, "https://youtube.com/watch?v=abc")
+	data, err := os.ReadFile(destBase + ".webm")
 	if err != nil {
-		t.Fatalf("realExtract: %v", err)
+		t.Fatalf("read output: %v", err)
 	}
-	if streamURL != "http://stream.example/a" {
-		t.Errorf("streamURL = %q", streamURL)
-	}
-	if ext != "" {
-		t.Errorf("ext = %q, want empty", ext)
+	if string(data) != "fake-audio-bytes" {
+		t.Errorf("content = %q, want fake-audio-bytes", data)
 	}
 }
 
-func TestRealExtractEmptyOutput(t *testing.T) {
-	script := writeFakeYtDlp(t, `echo ""`)
-	if _, _, err := realExtract(context.Background(), script, "https://youtube.com/watch?v=abc"); err == nil {
-		t.Fatal("realExtract empty output = nil error, want error")
-	}
-}
-
-func TestRealExtractNonZeroExit(t *testing.T) {
-	script := writeFakeYtDlp(t, `echo "oops" >&2; exit 1`)
-	if _, _, err := realExtract(context.Background(), script, "https://youtube.com/watch?v=abc"); err == nil {
-		t.Fatal("realExtract exit 1 = nil error, want error")
-	}
-}
-
-func TestRealExtractErrorIncludesStderr(t *testing.T) {
-	script := writeFakeYtDlp(t, `echo "some diagnostic" >&2; exit 1`)
-	_, _, err := realExtract(context.Background(), script, "https://youtube.com/watch?v=abc")
+func TestRealDownloadScriptFails(t *testing.T) {
+	script := writeFakeYtDlp(t, fakeYtDlpBody(`echo "HTTP Error 403" >&2; exit 1`))
+	destBase := filepath.Join(t.TempDir(), "song")
+	_, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase)
 	if err == nil {
-		t.Fatal("realExtract exit 1 = nil error, want error")
+		t.Fatal("realDownload exit 1 = nil error, want error")
 	}
-	if !strings.Contains(err.Error(), "some diagnostic") {
+	if !strings.Contains(err.Error(), "HTTP Error 403") {
 		t.Errorf("error %q 缺少 stderr 诊断信息", err)
 	}
 }
 
-func TestSafeExt(t *testing.T) {
-	cases := []struct {
-		in   string
-		want bool
-	}{
-		{"m4a", true},
-		{"M4A", true},
-		{"webm", true},
-		{"mp3", true},
-		{"12345678", true},
-		{"a1B2", true},
-		{"", false},
-		{"a/b", false},
-		{"abcdefghi", false}, // 9 字符超限
-		{"a-b", false},
-		{"a b", false},
+func TestRealDownloadNoOutputFile(t *testing.T) {
+	script := writeFakeYtDlp(t, fakeYtDlpBody(`exit 0`)) // 成功退出但什么都没写
+	destBase := filepath.Join(t.TempDir(), "song")
+	_, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase)
+	if err == nil {
+		t.Fatal("realDownload 未产出文件 = nil error, want error")
 	}
-	for _, c := range cases {
-		if got := safeExt(c.in); got != c.want {
-			t.Errorf("safeExt(%q) = %v, want %v", c.in, got, c.want)
-		}
+	if !strings.Contains(err.Error(), "未产出文件") {
+		t.Errorf("error = %q, want 含未产出文件", err)
+	}
+}
+
+func TestRealDownloadZeroByteFile(t *testing.T) {
+	script := writeFakeYtDlp(t, fakeYtDlpBody(`: > "$out"`)) // 写 0 字节产物
+	destBase := filepath.Join(t.TempDir(), "song")
+	_, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase)
+	if err == nil {
+		t.Fatal("realDownload 0 字节 = nil error, want error")
+	}
+	if !strings.Contains(err.Error(), "0 字节") {
+		t.Errorf("error = %q, want 含 0 字节", err)
+	}
+	if _, err := os.Stat(destBase + ".webm"); !os.IsNotExist(err) {
+		t.Errorf("0 字节产物残留未被清理: %v", err)
+	}
+}
+
+func TestRealDownloadPartOnly(t *testing.T) {
+	script := writeFakeYtDlp(t, fakeYtDlpBody(`: > "$out.part"`)) // 只产出 .part 临时文件
+	destBase := filepath.Join(t.TempDir(), "song")
+	_, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase)
+	if err == nil {
+		t.Fatal("realDownload 仅 .part = nil error, want error")
+	}
+	if !strings.Contains(err.Error(), "未产出文件") {
+		t.Errorf("error = %q, want 含未产出文件", err)
+	}
+}
+
+func TestRealDownloadCleansPartOnFailure(t *testing.T) {
+	script := writeFakeYtDlp(t, fakeYtDlpBody(`
+: > "$out.part"
+echo "HTTP Error 403" >&2
+exit 1
+`))
+	destBase := filepath.Join(t.TempDir(), "song")
+	if _, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase); err == nil {
+		t.Fatal("realDownload exit 1 = nil error, want error")
+	}
+	if _, err := os.Stat(destBase + ".part"); !os.IsNotExist(err) {
+		t.Errorf(".part 残留未被清理: %v", err)
+	}
+	if _, err := os.Stat(destBase + ".webm"); !os.IsNotExist(err) {
+		t.Errorf("webm 残留未被清理: %v", err)
 	}
 }

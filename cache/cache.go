@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -15,9 +14,10 @@ import (
 
 // 包级可调变量（测试可临时调小）。
 var (
-	DownloadTimeout      = 5 * time.Minute  // 单次后台下载总超时
-	ExtractTimeout       = 60 * time.Second // yt-dlp 取直链超时
-	DownloadRetryBackoff = 2 * time.Second  // 下载失败重试间隔
+	DownloadTimeout        = 5 * time.Minute  // 单次后台下载总超时（所有尝试共享）
+	DownloadAttemptTimeout = 90 * time.Second // 单次 yt-dlp 下载尝试超时
+	DownloadRetryBackoff   = 2 * time.Second  // 下载失败整进程重跑间隔
+	MaxDownloadAttempts    = 5                // 下载失败整进程重跑预算（每次重新提取新 URL）
 )
 
 // defaultMaxEntries 与 config.DefaultMaxEntries 保持一致（本地常量避免循环 import）。
@@ -35,8 +35,6 @@ type Manager struct {
 	idx        index
 	inflight   map[string]bool
 	ytdlpPath  string
-	client     *http.Client
-	extract    extractFunc
 }
 
 // New 创建 Manager：MkdirAll → 加载索引（缺失=空，损坏=返回错误）→
@@ -56,10 +54,6 @@ func New(opts Options, ytdlpPath string) (*Manager, error) {
 		maxEntries: maxEntries,
 		inflight:   map[string]bool{},
 		ytdlpPath:  ytdlpPath,
-		client:     &http.Client{},
-	}
-	m.extract = func(ctx context.Context, url string) (string, string, error) {
-		return realExtract(ctx, m.ytdlpPath, url)
 	}
 	if err := os.MkdirAll(opts.Dir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建缓存目录: %w", err)
@@ -168,39 +162,47 @@ func (m *Manager) CacheAsync(track model.Track) {
 	go m.download(track)
 }
 
-// download 执行一次后台下载：取直链 → 下载到缓存目录 → 注册进索引。
-// 任一步失败仅 log.Printf；结束必清除 inflight 标记。
+// download 执行一次后台下载：yt-dlp 直接下载到缓存目录（-o 模板落盘）→ 注册进索引。
+// YouTube 对音频直链有概率性 403 风控：同一直链重试无意义（换 URL 才换结果），
+// 因此失败整进程重跑 = 重新运行 yt-dlp = 重新提取新 URL；预算内最多
+// MaxDownloadAttempts 次（每次尝试有 DownloadAttemptTimeout 子超时，总超时
+// DownloadTimeout 封顶）。任一步失败仅 log.Printf；结束必清除 inflight 标记。
 func (m *Manager) download(track model.Track) {
 	defer func() {
 		m.mu.Lock()
 		delete(m.inflight, track.ID)
 		m.mu.Unlock()
 	}()
-	if !m.enabled || m.dir == "" || m.extract == nil {
+	if !m.enabled || m.dir == "" || m.ytdlpPath == "" {
 		return // Disabled 安全（正常流程 CacheAsync 已拦截，此处为防御）
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), DownloadTimeout)
 	defer cancel()
 
-	extractCtx, cancelExtract := context.WithTimeout(ctx, ExtractTimeout)
-	streamURL, ext, err := m.extract(extractCtx, track.URL)
-	cancelExtract()
-	if err != nil {
-		log.Printf("缓存下载失败(%s): %v", track.ID, err)
-		return
+	destBase := filepath.Join(m.dir, SafeName(track.ID))
+	var lastErr error
+	for attempt := 0; attempt < MaxDownloadAttempts; attempt++ {
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, DownloadAttemptTimeout)
+		file, err := realDownload(attemptCtx, m.ytdlpPath, track.URL, destBase)
+		cancelAttempt()
+		if err == nil {
+			if rerr := m.register(track.ID, file); rerr != nil {
+				log.Printf("缓存下载失败(%s): %v", track.ID, rerr)
+			}
+			return
+		}
+		lastErr = err
+		if attempt+1 < MaxDownloadAttempts {
+			select {
+			case <-time.After(DownloadRetryBackoff):
+			case <-ctx.Done():
+				log.Printf("缓存下载失败(%s): %v", track.ID, ctx.Err())
+				return
+			}
+		}
 	}
-	dest := filepath.Join(m.dir, SafeName(track.ID))
-	if ext != "" {
-		dest += "." + ext
-	}
-	if _, err := downloadFile(ctx, m.client, streamURL, dest); err != nil {
-		log.Printf("缓存下载失败(%s): %v", track.ID, err)
-		return
-	}
-	if err := m.register(track.ID, filepath.Base(dest)); err != nil {
-		log.Printf("缓存下载失败(%s): %v", track.ID, err)
-	}
+	log.Printf("缓存下载失败(%s): %v", track.ID, lastErr)
 }
 
 // Register 把已存在的缓存文件注册进索引（下载完成/测试预置用）：
