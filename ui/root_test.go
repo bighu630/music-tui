@@ -2433,4 +2433,19 @@ func TestTrackInsertNextMsg(t *testing.T) {
 	if fp.playCount() != 1 {
 		t.Errorf("插入不应触发新播放, playCount = %d", fp.playCount())
 	}
+
+	// 无当前曲时插队首：直接入队为首项，不触发播放
+	fp0 := newFakePlayer()
+	m0 := newTestModel(t, fp0, &fakeSearchAdapter{}, nil)
+	m0, _ = update(m0, trackInsertNextMsg{track: testTrack("t0")})
+	got0 := m0.queue.Tracks()
+	if len(got0) != 1 || got0[0].ID != "t0" {
+		t.Fatalf("Tracks = %+v, want [t0]", idsOf(got0))
+	}
+	if m0.queue.CurrentIndex() != -1 {
+		t.Errorf("CurrentIndex = %d, want -1", m0.queue.CurrentIndex())
+	}
+	if fp0.playCount() != 0 {
+		t.Errorf("无当前曲插入不应触发播放, playCount = %d", fp0.playCount())
+	}
 }

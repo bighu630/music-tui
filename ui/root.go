@@ -449,6 +449,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case trackInsertNextMsg:
 		// 插入到当前曲之后（下一首播放）：不打断当前播放，也不自动开播
 		m.queue.InsertNext(msg.track)
+		// 队列形态变化：下一首候选已变，重新计算预加载目标
+		m.refreshPreload()
 		return m.syncQueueViews(), nil
 
 	case queuePlayMsg:
