@@ -1816,6 +1816,32 @@ func TestStatusBarLayout(t *testing.T) {
 	}
 }
 
+// TestStatusBarPinnedToBottom 回归：内容不满一屏的页面（搜索空态等）body
+// 填充到页面高度，状态栏恒在屏幕最后一行——曾因 body 行数不足状态栏随内容
+// 上浮不贴底。
+func TestStatusBarPinnedToBottom(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	// 切到搜索页空态（内容仅 4 行，远不满屏）
+	m = m.switchPage("4")
+	lines := strings.Split(m.View(), "\n")
+	if got := len(lines); got != 24 {
+		t.Fatalf("搜索页空态 View 行数 = %d, want 24（body 填充到页面高度）", got)
+	}
+	if last := lines[23]; strings.TrimSpace(last) == "" {
+		t.Error("搜索页状态栏应贴屏幕底（末行非空）")
+	}
+	// 队列页空态同样贴底
+	m = m.switchPage("2")
+	lines = strings.Split(m.View(), "\n")
+	if got := len(lines); got != 24 {
+		t.Fatalf("队列页空态 View 行数 = %d, want 24", got)
+	}
+	if strings.TrimSpace(lines[23]) == "" {
+		t.Error("队列页状态栏应贴屏幕底（末行非空）")
+	}
+}
+
 // TestStatusBarNarrowWindowFits 回归：极端窄窗口（宽度 < 右侧顺序文本）下右侧
 // 截断兜底，状态栏恒 1 行不折行（曾因右侧永不截断致行宽 > 窗口宽度折行）。
 func TestStatusBarNarrowWindowFits(t *testing.T) {
