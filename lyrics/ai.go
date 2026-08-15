@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -49,8 +50,9 @@ func NewOpenAIClientWithBaseURL(apiKey, model, baseURL string) *OpenAIClient {
 	}
 }
 
-// Identify 识别媒体标题是否为歌曲并提取歌名/歌手。瞬时错误（网络、
-// 429、5xx）重试一次；4xx 等确定性错误不重试（省配额）。
+// Identify 识别媒体标题是否为歌曲并提取歌名/歌手。仅瞬时错误（网络
+// 传输失败、429、5xx）重试一次；ctx 取消/超时、4xx、响应解析失败等
+// 确定性错误不重试（不白付调用费）。
 func (c *OpenAIClient) Identify(ctx context.Context, title, artist string) (AIResult, error) {
 	var lastErr error
 	for attempt := 0; attempt < maxAIAttempts; attempt++ {
@@ -59,7 +61,7 @@ func (c *OpenAIClient) Identify(ctx context.Context, title, artist string) (AIRe
 			return res, nil
 		}
 		lastErr = err
-		if !retryableAIErr(err) {
+		if !retryableAIErr(ctx, err) {
 			return AIResult{}, err
 		}
 	}
@@ -121,14 +123,19 @@ func (e *aiStatusError) Error() string {
 	return fmt.Sprintf("OpenAI API 错误: HTTP %d", e.code)
 }
 
-// retryableAIErr 判断错误是否值得重试：网络错误与 429/5xx 重试，
-// 4xx（key 无效/配额等确定性错误）不重试。
-func retryableAIErr(err error) bool {
+// retryableAIErr 判断错误是否值得重试：仅网络传输错误（*url.Error，
+// 排除 ctx 取消）与 429/5xx 重试；ctx 取消/超时、4xx、响应解析失败等
+// 确定性错误不重试。
+func retryableAIErr(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false // 取消/超时：重试只会立即再失败
+	}
 	var se *aiStatusError
 	if errors.As(err, &se) {
 		return se.code == http.StatusTooManyRequests || se.code >= 500
 	}
-	return true
+	var ue *url.Error
+	return errors.As(err, &ue)
 }
 
 // AIResult 是 AI 对媒体标题的识别结果。

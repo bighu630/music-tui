@@ -6,8 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"music-tui/model"
 )
@@ -351,5 +353,82 @@ func TestEnhancedLRCCachePersistsAcrossRestart(t *testing.T) {
 	}
 	if aiGetCount != 1 {
 		t.Errorf("AI 重查 %d 次, want 1（重启后歌词缓存命中，不再请求）", aiGetCount)
+	}
+}
+
+// TestEnhancedConcurrentSameTrackSingleFlight 并发播放同一标题：AI 只
+// 调用一次（single-flight），等待者复用执行者结果。
+func TestEnhancedConcurrentSameTrackSingleFlight(t *testing.T) {
+	var aiCalls int32
+	aiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&aiCalls, 1)
+		time.Sleep(200 * time.Millisecond) // 拉长识别窗口，让并发请求重叠
+		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
+	}))
+	defer aiServer.Close()
+	lrclib := httptest.NewServer(http.HandlerFunc(lrclibAIMatch(nil)))
+	defer lrclib.Close()
+
+	c, err := NewEnhancedClient(
+		NewClientWithBaseURL(lrclib.URL, testUA),
+		NewOpenAIClientWithBaseURL("sk-test", "", aiServer.URL),
+		t.TempDir(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := model.Track{Title: "【周杰倫】晴天 MV", Artist: "周杰倫官方頻道", Duration: 269.0}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const n = 4
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = c.Fetch(ctx, track)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("并发 Fetch %d: %v", i, err)
+		}
+	}
+	if aiCalls != 1 {
+		t.Errorf("AI 调用 %d 次, want 1（single-flight 应合并并发识别）", aiCalls)
+	}
+}
+
+// TestEnhancedPassesThroughNonNotFound 确定性路径的非 NotFound 错误
+// （如 lrclib 5xx）必须原样透传，不得吞成 ErrNotFound 或触发 AI。
+func TestEnhancedPassesThroughNonNotFound(t *testing.T) {
+	var aiCalls int32
+	aiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&aiCalls, 1)
+		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
+	}))
+	defer aiServer.Close()
+	lrclib := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer lrclib.Close()
+
+	c, err := NewEnhancedClient(
+		NewClientWithBaseURL(lrclib.URL, testUA),
+		NewOpenAIClientWithBaseURL("sk-test", "", aiServer.URL),
+		t.TempDir(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
+	if err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want 非 NotFound 原样透传", err)
+	}
+	if aiCalls != 0 {
+		t.Errorf("AI 调用 %d 次, want 0（服务端错误不应进入 AI 路径）", aiCalls)
 	}
 }

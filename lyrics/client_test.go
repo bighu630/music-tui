@@ -451,3 +451,24 @@ func TestFetchForQueryEmptyArtistSkipsGet(t *testing.T) {
 		t.Error("未走 /api/search")
 	}
 }
+
+// TestFetchForQueryRejectsGetHitBeyond3s /api/get 命中但时长差距 >3s
+// （非标准服务端不遵守 ±2s 契约）：不采用，降级 search。
+func TestFetchForQueryRejectsGetHitBeyond3s(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			_ = json.NewEncoder(w).Encode(lrclibSong{
+				TrackName: "晴天", ArtistName: "周杰伦", Duration: 300.0, // Δ=31s
+				SyncedLyrics: "[00:01.00]现场版",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]lrclibSong{})
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	if _, err := c.FetchForQuery(context.Background(), "晴天", "周杰伦", 269.0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound（get 命中但 Δ=31s > 3s 必须弃用）", err)
+	}
+}

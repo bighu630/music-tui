@@ -106,20 +106,21 @@ func TestAICacheConcurrentPut(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	// 重建后逐条可命中
+	// 重建后 10 个唯一键全部可命中（重复写被去重但不丢首次值）
 	c2, err := newAICache(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
+	const uniq = 10
 	hit := 0
-	for i := 0; i < n; i++ {
+	for i := 0; i < uniq; i++ {
 		key := strings.Repeat("k", 1) + string(rune('0'+i%10))
 		if _, ok := c2.Get(key); ok {
 			hit++
 		}
 	}
-	if hit == 0 {
-		t.Error("并发写入全部丢失")
+	if hit != uniq {
+		t.Errorf("命中 %d/%d 个唯一键, want 全部", hit, uniq)
 	}
 }
 
@@ -168,5 +169,44 @@ func TestAICacheUnmarshal(t *testing.T) {
 	}
 	if line.Key != "k" || line.IsSong || line.Title != "t" || line.Artist != "a" {
 		t.Errorf("got %+v", line)
+	}
+}
+
+// TestAICacheHugeLineSkipped 超长行（>Scanner 缓冲上限）视同损坏行：
+// 跳过并重写，不阻止加载与使用。
+func TestAICacheHugeLineSkipped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ai.jsonl")
+	huge := "{\"key\":\"H\",\"is_song\":true,\"title\":\"" + strings.Repeat("晴", 400*1024) + "\"}"
+	data := "{\"key\":\"A|B\",\"is_song\":true,\"title\":\"A\",\"artist\":\"B\"}\n" + huge + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := newAICache(path)
+	if err != nil {
+		t.Fatalf("newAICache: %v", err)
+	}
+	if _, ok := c.Get("A|B"); !ok {
+		t.Error("超长行前的好行丢失")
+	}
+	if _, ok := c.Get("H"); ok {
+		t.Error("超长行竟然被加载")
+	}
+	// 文件被重写：超长行已清除
+	cleaned, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleaned) > 1024 {
+		t.Errorf("重写后文件仍含超长行: %d 字节", len(cleaned))
+	}
+}
+
+// TestAICacheKeyNoCollision 长度前缀编码：title 含 "|" 与 artist 含 "|"
+// 的不同组合不得碰撞。
+func TestAICacheKeyNoCollision(t *testing.T) {
+	a := aiCacheKey("A|B", "C")
+	b := aiCacheKey("A", "B|C")
+	if a == b {
+		t.Errorf("键碰撞: %q == %q（title 的 | 与 artist 的 | 必须可区分）", a, b)
 	}
 }

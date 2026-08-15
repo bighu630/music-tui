@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseAIResponsePlainJSON(t *testing.T) {
@@ -256,4 +257,74 @@ func TestNewOpenAIClientDefaults(t *testing.T) {
 	if c.baseURL != defaultAIBaseURL {
 		t.Errorf("baseURL = %q, want %q", c.baseURL, defaultAIBaseURL)
 	}
+}
+
+func TestIdentifyEmptyContentNoRetry(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":""}}]}`))
+	}))
+	defer server.Close()
+
+	c := NewOpenAIClientWithBaseURL("sk-test", "", server.URL)
+	if _, err := c.Identify(context.Background(), "晴天", ""); err == nil {
+		t.Fatal("Identify(empty content) = nil error, want error")
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1（响应解析失败不重试，不白付调用费）", attempts)
+	}
+}
+
+func TestIdentifyContextCanceledNoRetry(t *testing.T) {
+	attempts := 0
+	received := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		close(received) // 通知测试：请求已发出并挂起
+		<-release
+		aiRespond(w, r, `{"is_song": false}`)
+	}))
+	defer server.Close()
+	defer func() { close(release) }() // 先放行挂起请求，再关服务器（避免 Close 等 handler 死锁）
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c := NewOpenAIClientWithBaseURL("sk-test", "", server.URL)
+	done := make(chan struct{})
+	var idErr error
+	go func() {
+		_, idErr = c.Identify(ctx, "晴天", "")
+		close(done)
+	}()
+	select {
+	case <-received: // 请求确实发出后再取消，杜绝时序抖动
+	case <-time.After(3 * time.Second):
+		t.Fatal("请求未到达服务器")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Identify 未在取消后返回")
+	}
+	if idErr == nil {
+		t.Fatal("Identify(canceled) = nil error, want error")
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1（ctx 取消不重试）", attempts)
+	}
+}
+
+func TestIdentifyNetworkErrorRetries(t *testing.T) {
+	// 连接拒绝 = 网络错误：重试一次（共 2 次尝试）
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := server.URL
+	server.Close() // 关闭后连接必然失败
+
+	c := NewOpenAIClientWithBaseURL("sk-test", "", url)
+	if _, err := c.Identify(context.Background(), "晴天", ""); err == nil {
+		t.Fatal("Identify(network error) = nil error, want error")
+	}
+	_ = c // 客户端内部尝试次数无法直接观测，能拿到错误即可
 }

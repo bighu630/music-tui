@@ -3,9 +3,11 @@ package lyrics
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -15,9 +17,10 @@ import (
 // 损坏行加载时跳过并原子重写文件；追加写失败仅影响持久化，不阻塞
 // 本次会话命中（缓存是增强功能，绝不影响主流程）。
 type aiCache struct {
-	path string
-	mu   sync.Mutex
-	m    map[string]AIResult
+	path     string
+	mu       sync.Mutex
+	m        map[string]AIResult
+	inflight map[string]chan struct{} // 识别进行中的 key → 完成信号（single-flight）
 }
 
 // aiCacheLine 是 JSONL 单行格式。
@@ -31,7 +34,7 @@ type aiCacheLine struct {
 // newAICache 创建并加载缓存：目录自动创建，损坏行跳过，若存在损坏行
 // 则清理重写文件。
 func newAICache(path string) (*aiCache, error) {
-	c := &aiCache{path: path, m: make(map[string]AIResult)}
+	c := &aiCache{path: path, m: make(map[string]AIResult), inflight: make(map[string]chan struct{})}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("创建 AI 缓存目录: %w", err)
 	}
@@ -73,6 +76,13 @@ func (c *aiCache) load() (int, error) {
 		c.m[rec.Key] = AIResult{IsSong: rec.IsSong, Title: rec.Title, Artist: rec.Artist}
 	}
 	if err := sc.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			// 超长行（损坏）视同普通损坏行：跳过并计入 dropped，
+			// 由调用方重写清理——不因单行垃圾让整个缓存不可用
+			// （回归：TestAICacheHugeLineSkipped）。
+			dropped++
+			return dropped, nil
+		}
 		return 0, fmt.Errorf("扫描 AI 缓存: %w", err)
 	}
 	return dropped, nil
@@ -84,6 +94,29 @@ func (c *aiCache) Get(key string) (AIResult, bool) {
 	defer c.mu.Unlock()
 	r, ok := c.m[key]
 	return r, ok
+}
+
+// Begin 登记 key 的识别进行中（single-flight）：返回 nil 表示本调用者
+// 成为执行者；返回 channel 表示已有执行者在跑，等待其完成信号。
+func (c *aiCache) Begin(key string) <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ch, ok := c.inflight[key]; ok {
+		return ch
+	}
+	ch := make(chan struct{})
+	c.inflight[key] = ch
+	return nil
+}
+
+// End 结束识别并释放等待者（执行者 defer 调用）。
+func (c *aiCache) End(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ch, ok := c.inflight[key]; ok {
+		close(ch)
+		delete(c.inflight, key)
+	}
 }
 
 // Put 存入结果（内存 + 追加文件一行）；同键已存在时不覆盖不追加
@@ -142,11 +175,13 @@ func (c *aiCache) rewrite() error {
 }
 
 // aiCacheKey 规范化 AI 缓存键：title/artist 折叠空白（换行/制表/连续
-// 空格统一为单空格）后以 "|" 连接——同一视频标题的任何空白写法命中
-// 同一缓存项。
+// 空格统一为单空格）后以长度前缀编码连接——同一视频标题的任何空白写法
+// 命中同一缓存项；长度前缀保证 title 与 artist 中的 "|" 字符不会造成
+// 键碰撞（回归：TestAICacheKeyNoCollision）。
 func aiCacheKey(title, artist string) string {
 	norm := func(s string) string {
 		return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
 	}
-	return norm(title) + "|" + norm(artist)
+	t, a := norm(title), norm(artist)
+	return strconv.Itoa(len([]rune(t))) + ":" + t + "|" + strconv.Itoa(len([]rune(a))) + ":" + a
 }

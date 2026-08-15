@@ -275,3 +275,35 @@ func TestSaveRoundtripOpenAI(t *testing.T) {
 		t.Errorf("openai roundtrip 不一致: got %+v, want %+v", got.OpenAI, cfg.OpenAI)
 	}
 }
+
+// TestSavePerms0600 配置文件含 OpenAI API key：写盘权限必须 0600
+// （其他本地用户不可读）。
+func TestSavePerms0600(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := &Config{OpenAI: OpenAI{APIKey: "sk-secret", Model: "gpt-4o-mini"}}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("权限 = %o, want 600", perm)
+	}
+	// 加载后再存（Load→Save 路径）同样 0600
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := got.Save(path); err != nil {
+		t.Fatalf("Save2: %v", err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("重存后权限 = %o, want 600", perm)
+	}
+}

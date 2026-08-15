@@ -73,8 +73,11 @@ func writeFileIfChanged(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
-// unsafeNameRe 文件名不安全字符（跨平台路径分隔符/通配符等）。
-var unsafeNameRe = regexp.MustCompile(`[\\/:*?"<>|]`)
+// unsafeNameRe 文件名不安全字符（跨平台路径分隔符/通配符/控制字符）。
+var unsafeNameRe = regexp.MustCompile(`[\\/:*?"<>|\x00-\x1f]`)
+
+// unsafeEdgeRe 文件名首尾不安全字符（点 = 隐藏文件、空格 = 不可见后缀）。
+var unsafeEdgeRe = regexp.MustCompile(`^[.\s]+|[.\s]+$`)
 
 // maxNameBytes 文件名主干最大字节数：留出后缀（.lrc/.txt）空间，
 // 保证含后缀全长 < 255 字节（主流文件系统上限）。
@@ -84,6 +87,7 @@ const maxNameBytes = 200
 // 字符）；结果为空时回落 "unknown"。
 func (c *lrcCache) baseName(title, artist string) string {
 	name := unsafeNameRe.ReplaceAllString(strings.TrimSpace(title)+"-"+strings.TrimSpace(artist), "-")
+	name = unsafeEdgeRe.ReplaceAllString(name, "")
 	budget := maxNameBytes
 	var sb strings.Builder
 	for _, r := range name {

@@ -179,3 +179,45 @@ func TestLRCCacheFileFormat(t *testing.T) {
 		t.Errorf("缓存文件无法被 ParseLRC 解析: %v %+v", err, ly)
 	}
 }
+
+// TestLRCCacheSanitizeControlChars 控制字符（换行等）不得落入文件名。
+func TestLRCCacheSanitizeControlChars(t *testing.T) {
+	dir := t.TempDir()
+	c, err := newLRCCache(dir)
+	if err != nil {
+		t.Fatalf("newLRCCache: %v", err)
+	}
+	ly := &Lyrics{Lines: []LyricLine{{Time: 1, Text: "x"}}}
+	c.Put("晴天\n恶意", "艺人\r\t", ly)
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("文件数 = %d, want 1", len(entries))
+	}
+	if strings.ContainsAny(entries[0].Name(), "\n\r\t\x00") {
+		t.Errorf("文件名含控制字符: %q", entries[0].Name())
+	}
+	// 前导/尾随点与空格（Windows 隐藏文件/不可见后缀风险）
+	c.Put(".hidden", "artist ", ly)
+	for _, e := range mustReadDir(t, c.dir) {
+		name := e.Name()
+		base := strings.TrimSuffix(name, ".lrc")
+		if base == ".hidden-artist" {
+			t.Errorf("文件名以点开头: %q", name)
+		}
+		if strings.HasSuffix(base, " ") {
+			t.Errorf("文件名以空格结尾: %q", name)
+		}
+	}
+}
+
+func mustReadDir(t *testing.T, dir string) []os.DirEntry {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}

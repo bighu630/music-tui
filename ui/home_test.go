@@ -942,3 +942,32 @@ func TestHomeLyricsAISourceTag(t *testing.T) {
 		t.Error("AI 纯文本歌词应显示「AI 匹配」标识")
 	}
 }
+
+// TestHomeLyricsHeightReservesAITag AI 来源标识占 1 行：视口最高收缩，
+// 防止歌词列溢出推挤底部控制栏（窄窗口 + 长歌词场景）。
+func TestHomeLyricsHeightReservesAITag(t *testing.T) {
+	build := func(source string, lineCount int) homeModel {
+		ly, _ := lyrics.ParseLRC([]byte(strings.Repeat("[00:01.00]行\n", lineCount)))
+		ly.Source = source
+		return homeModel{lyrics: ly, lyricsState: lyricsSynced, height: 23}
+	}
+	// 非 AI：视口可占满 midH=21
+	if h := build("", 100).lyricsHeight(); h != 21 {
+		t.Errorf("非 AI lyricsHeight = %d, want 21", h)
+	}
+	// AI：视口最多 midH-1=20，标识行不溢出
+	if h := build(lyrics.LyricsSourceAI, 100).lyricsHeight(); h != 20 {
+		t.Errorf("AI lyricsHeight = %d, want 20（预留标识行）", h)
+	}
+	// AI + 行数少：视口仍收缩到行数（标识行 + 内容 ≤ midH）
+	if h := build(lyrics.LyricsSourceAI, 5).lyricsHeight(); h != 5 {
+		t.Errorf("AI 少行 lyricsHeight = %d, want 5", h)
+	}
+	// 极窄窗口：视口至少 1 行，不归零
+	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
+	ly.Source = lyrics.LyricsSourceAI
+	m := homeModel{lyrics: ly, lyricsState: lyricsSynced, height: 3}
+	if h := m.lyricsHeight(); h < 1 {
+		t.Errorf("极窄窗口 lyricsHeight = %d, want ≥1", h)
+	}
+}

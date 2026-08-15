@@ -431,8 +431,16 @@ func (m homeModel) lyricsHeight() int {
 	if maxH > lyricMaxLines {
 		maxH = lyricMaxLines
 	}
+	// AI 来源标识占歌词列 1 行：视口最高收缩 1 行，避免标识 + 内容
+	// 溢出中间区推挤底部控制栏（回归：TestHomeLyricsHeightReservesAITag）。
+	if m.lyrics != nil && m.lyrics.Source == lyrics.LyricsSourceAI {
+		maxH--
+	}
 	if n := m.lyricLineCount(); n > 0 && n < maxH {
 		return n
+	}
+	if maxH < 1 {
+		return 1
 	}
 	return maxH
 }

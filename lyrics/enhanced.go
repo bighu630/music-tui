@@ -78,13 +78,26 @@ func (e *EnhancedClient) Fetch(ctx context.Context, track model.Track) (*Lyrics,
 	return ly, nil
 }
 
-// identify 识别标题（AI 结果缓存优先）；识别成功即缓存（含负缓存），
-// 调用失败不缓存（瞬时错误下次重试）。
+// identify 识别标题（AI 结果缓存优先，single-flight 合并并发重复识别）；
+// 识别成功即缓存（含负缓存），调用失败不缓存（瞬时错误下次重试）。
 func (e *EnhancedClient) identify(ctx context.Context, track model.Track) (AIResult, bool) {
 	key := aiCacheKey(track.Title, track.Artist)
 	if r, ok := e.aiCache.Get(key); ok {
 		return r, true
 	}
+	wait := e.aiCache.Begin(key)
+	if wait != nil {
+		// 已有执行者（并发播放同一标题）：等其完成并复用结果；
+		// 执行者失败时不重复尝试（避免惊群，下次播放自然重试）。
+		select {
+		case <-wait:
+			r, ok := e.aiCache.Get(key)
+			return r, ok
+		case <-ctx.Done():
+			return AIResult{}, false
+		}
+	}
+	defer e.aiCache.End(key)
 	r, err := e.ai.Identify(ctx, track.Title, track.Artist)
 	if err != nil {
 		return AIResult{}, false

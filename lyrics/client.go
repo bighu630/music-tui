@@ -107,10 +107,12 @@ func (c *Client) fetchOne(ctx context.Context, track model.Track, cand string, w
 		u := base + "/api/get?" + q.Encode()
 		err := c.do(ctx, u, &song)
 		if err == nil {
-			if ly := songToLyrics(song); ly != nil {
+			// get 命中同样受 maxDelta 约束（确定性路径 30s 与 lrclib ±2s
+			// 契约兼容；AI 路径 3s 防御非标准服务端不遵守契约的情况）。
+			if ly := songToLyrics(song); ly != nil && math.Abs(song.Duration-track.Duration) <= maxDelta {
 				return ly, nil
 			}
-			err = ErrNotFound // 200 但歌词为空：视同未命中，降级 search
+			err = ErrNotFound // 200 但歌词为空或时长超限：视同未命中，降级 search
 		}
 		if !errors.Is(err, ErrNotFound) {
 			return nil, err
