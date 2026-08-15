@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -15,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"music-tui/lyrics"
+	"music-tui/lyricshm"
 	"music-tui/model"
 	"music-tui/player"
 	"music-tui/queue"
@@ -1284,4 +1286,120 @@ func TestHomeLyricsResizeRepads(t *testing.T) {
 	if !strings.Contains(stripAnsiForTest(lines[centerRow]), "第一行") {
 		t.Errorf("resize 后首行应显示在新中央行 %d: %q", centerRow, lines[centerRow])
 	}
+}
+
+// ---- lyricshm 挂载:歌词行实时写入 ----
+
+// lyricFileTestHome 构造注入临时路径的 writer 的 home 模型。
+func lyricFileTestHome(t *testing.T) (homeModel, string) {
+	t.Helper()
+	m := newHomeModel(nil)
+	path := filepath.Join(t.TempDir(), "lyrics")
+	m.lyricFile = lyricshm.New(path)
+	return m, path
+}
+
+func lyricFileRead(t *testing.T, path string) string {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		return "" // 文件未创建视为空内容
+	}
+	return string(got)
+}
+
+func TestHomeLyricFileWritesOnLineChange(t *testing.T) {
+	m, path := lyricFileTestHome(t)
+	m.lyrics = &lyrics.Lyrics{Lines: []lyrics.LyricLine{
+		{Time: 0, Text: "第一句"},
+		{Time: 5, Text: "第二句"},
+	}}
+	m.lyricsState = lyricsSynced
+	m.currentLine = -1
+	track := &model.Track{Title: "T", Artist: "A", Duration: 100}
+	m = m.syncState(model.PlaybackState{Track: track, Position: 1, Duration: 100})
+	if got := lyricFileRead(t, path); got != "第一句\n" {
+		t.Fatalf("行切换后内容 = %q,期望 %q", got, "第一句\n")
+	}
+	m = m.syncState(model.PlaybackState{Track: track, Position: 6, Duration: 100})
+	if got := lyricFileRead(t, path); got != "第二句\n" {
+		t.Fatalf("第二次行切换后内容 = %q,期望 %q", got, "第二句\n")
+	}
+}
+
+func TestHomeLyricFileNoWriteWhenSameLine(t *testing.T) {
+	m, path := lyricFileTestHome(t)
+	m.lyrics = &lyrics.Lyrics{Lines: []lyrics.LyricLine{
+		{Time: 0, Text: "第一句"},
+	}}
+	m.lyricsState = lyricsSynced
+	m.currentLine = -1
+	track := &model.Track{Title: "T", Artist: "A", Duration: 100}
+	m = m.syncState(model.PlaybackState{Track: track, Position: 1, Duration: 100})
+	m = m.syncState(model.PlaybackState{Track: track, Position: 3, Duration: 100}) // 同行,只推进时间
+	if got := lyricFileRead(t, path); got != "第一句\n" {
+		t.Fatalf("行未变化不应重写,内容 = %q", got)
+	}
+}
+
+func TestHomeLyricFileBlankLineKeepsPrevious(t *testing.T) {
+	m, path := lyricFileTestHome(t)
+	// 第一行非空写入后,第二行(空白)不应覆盖
+	m.lyrics = &lyrics.Lyrics{Lines: []lyrics.LyricLine{
+		{Time: 0, Text: "第一句"},
+		{Time: 5, Text: "   "}, // 空白行
+	}}
+	m.lyricsState = lyricsSynced
+	m.currentLine = -1
+	track := &model.Track{Title: "T", Artist: "A", Duration: 100}
+	m = m.syncState(model.PlaybackState{Track: track, Position: 1, Duration: 100})
+	m = m.syncState(model.PlaybackState{Track: track, Position: 6, Duration: 100})
+	if got := lyricFileRead(t, path); got != "第一句\n" {
+		t.Fatalf("空白行不应覆盖,内容 = %q,期望保留 %q", got, "第一句\n")
+	}
+}
+
+func TestHomeLyricFileTrackLabelOnReset(t *testing.T) {
+	m, path := lyricFileTestHome(t)
+	track := &model.Track{Title: "歌名", Artist: "歌手", Duration: 100}
+	m = m.resetForTrack(track)
+	if got := lyricFileRead(t, path); got != "歌名 - 歌手\n" {
+		t.Fatalf("切歌后内容 = %q,期望歌名 %q", got, "歌名 - 歌手\n")
+	}
+}
+
+func TestHomeLyricFileKeepsLabelWhenNoLyrics(t *testing.T) {
+	m, path := lyricFileTestHome(t)
+	track := &model.Track{Title: "歌名", Artist: "歌手", Duration: 100}
+	m = m.resetForTrack(track)
+	m = m.setLyrics(errors.New("no lyrics"), nil) // 歌词加载失败
+	if got := lyricFileRead(t, path); got != "歌名 - 歌手\n" {
+		t.Fatalf("无歌词应保持歌名,内容 = %q", got)
+	}
+	m = m.setLyrics(nil, &lyrics.Lyrics{Lines: []lyrics.LyricLine{}}) // 空歌词
+	if got := lyricFileRead(t, path); got != "歌名 - 歌手\n" {
+		t.Fatalf("空歌词应保持歌名,内容 = %q", got)
+	}
+}
+
+func TestHomeLyricFileKeepsOnStop(t *testing.T) {
+	m, path := lyricFileTestHome(t)
+	track := &model.Track{Title: "歌名", Artist: "歌手", Duration: 100}
+	m = m.resetForTrack(track)
+	// 停止播放:Track == nil 的 syncState 不应清空文件(3b)
+	m = m.syncState(model.PlaybackState{})
+	if got := lyricFileRead(t, path); got != "歌名 - 歌手\n" {
+		t.Fatalf("停止播放应保留内容,内容 = %q", got)
+	}
+}
+
+func TestHomeLyricFileNilSafe(t *testing.T) {
+	m := newHomeModel(nil) // lyricFile 为 nil
+	m.lyrics = &lyrics.Lyrics{Lines: []lyrics.LyricLine{{Time: 0, Text: "x"}}}
+	m.lyricsState = lyricsSynced
+	m.currentLine = -1
+	track := &model.Track{Title: "T", Artist: "A", Duration: 100}
+	m = m.syncState(model.PlaybackState{Track: track, Position: 1, Duration: 100})
+	m = m.resetForTrack(track)
+	// 不应 panic
 }
