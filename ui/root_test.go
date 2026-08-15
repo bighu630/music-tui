@@ -279,7 +279,7 @@ func newTestModelBaseWithCache(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapt
 	}
 	return NewModel(fp, fa,
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, pls, cm, yt, onTrack, false)
+		cf, hist, sess, pls, cm, yt, onTrack, false, nil)
 }
 
 // refreshYTStatus 把 store 的登录状态同步进模型与页面（直接 seed store 后调用）。

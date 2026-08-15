@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"music-tui/lyrics"
+	"music-tui/lyricshm"
 	"music-tui/model"
 	"music-tui/player"
 	"music-tui/queue"
@@ -164,7 +165,10 @@ type homeModel struct {
 
 	lyricsState lyricsState
 	lyrics      *lyrics.Lyrics
-	currentLine int // 当前高亮行下标；-1 = 无高亮
+	currentLine int // 当前高亮行下标;-1 = 无高亮
+
+	// lyricFile 歌词行实时写入器(nil = 不启用;root 经 NewModel 注入)。
+	lyricFile *lyricshm.Writer
 
 	// aiTitle/aiArtist AI 识别出的清洗后歌名/歌手（展示覆盖）：非空时
 	// 控制栏等展示位用它替代原始 YouTube 标题；切歌时清空。
@@ -301,13 +305,23 @@ func (m homeModel) resetForTrack(track *model.Track) homeModel {
 	m.coverRenderCache = ""
 	m.coverFallback = false
 	m.aiTitle, m.aiArtist = "", ""
+	// 切歌:文件写入新曲目歌名(歌词加载中/无歌词期间 OBS 等展示歌名)。
+	// 注意 trackLabel 在 aiTitle 清空后取原始标题+歌手。
+	if m.lyricFile != nil {
+		m.lyricFile.WriteLine(m.trackLabel())
+	}
 	return m
 }
 
-// setAITrack 应用 AI 识别的清洗后歌名/歌手（展示覆盖，root 在歌词结果
-// 到达时调用）。
+// setAITrack 应用 AI 识别的清洗后歌名/歌手(展示覆盖,root 在歌词结果
+// 到达时调用)。
 func (m homeModel) setAITrack(title, artist string) homeModel {
 	m.aiTitle, m.aiArtist = title, artist
+	// 歌词未显示时,更新歌词文件中的歌名(AI 识别结果更准确);
+	// 歌词已同步时文件里是歌词行,不覆盖。
+	if m.lyricFile != nil && m.lyricsState != lyricsSynced {
+		m.lyricFile.WriteLine(m.trackLabel())
+	}
 	return m
 }
 
@@ -344,11 +358,14 @@ func (m homeModel) syncState(state model.PlaybackState) homeModel {
 	if m.state.Duration > 0 && m.state.Position > m.state.Duration {
 		m.state.Position = m.state.Duration
 	}
-	// 歌词高亮：二分查找当前行，行变化时才重渲染（而非每帧）
+	// 歌词高亮:二分查找当前行,行变化时才重渲染(而非每帧)
 	if m.lyricsState == lyricsSynced && m.lyrics != nil {
 		idx, _ := m.lyrics.LineAt(m.state.Position)
 		if idx != m.currentLine {
 			m.currentLine = idx
+			if idx >= 0 && m.lyricFile != nil {
+				m.lyricFile.WriteLine(m.lyrics.Lines[idx].Text)
+			}
 			m.rebuildLyrics()
 			if idx >= 0 {
 				m.scrollLyricsTo(idx)

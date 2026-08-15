@@ -63,7 +63,7 @@ func newResumeTestModel(t *testing.T, st *session.State, onTrack func(*model.Tra
 	}
 	m := NewModel(fp, &fakeSearchAdapter{},
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, pls, cm, ytm.NewClient(ytStore, &fakeYTFetcher{}), onTrack, false)
+		cf, hist, sess, pls, cm, ytm.NewClient(ytStore, &fakeYTFetcher{}), onTrack, false, nil)
 	return m, fp
 }
 

@@ -69,7 +69,7 @@ func newCacheTestModelWithYtdlp(t *testing.T, st *session.State, ytdlpPath strin
 	}
 	m := NewModel(fp, &fakeSearchAdapter{},
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, pls, cm, nil, nil, false)
+		cf, hist, sess, pls, cm, nil, nil, false, nil)
 	return m, fp, cm, cacheDir
 }
 
