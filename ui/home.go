@@ -526,8 +526,8 @@ func (m homeModel) middleView() string {
 }
 
 // lyricsColumnView 按三种歌词态渲染歌词列内容（居中由外层 Place 处理；
-// synced 走 viewport：行数溢出时保持滚动 + scrollLyricsTo 当前行居中，
-// 内容少时 viewport.View() 输出固定高、顶部对齐）。
+// synced 走 viewport：padding 模型下内容恒 ≥ H，View() 恒输出 H 行，
+// scrollLyricsTo 使当前行恒在视口中央）。
 func (m homeModel) lyricsColumnView() string {
 	switch m.lyricsState {
 	case lyricsLoading:
