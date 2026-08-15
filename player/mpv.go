@@ -3,7 +3,6 @@ package player
 import (
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -13,6 +12,8 @@ import (
 	"time"
 
 	"github.com/dexterlb/mpvipc"
+
+	"music-tui/logger"
 )
 
 // 观察属性 ID：mpv observe_property 的第一个参数。
@@ -133,7 +134,7 @@ func (p *MpvPlayer) startProcess() error {
 	if len(p.headers) > 0 {
 		confPath, err := buildYtdlpConf(p.headers)
 		if err != nil {
-			log.Printf("生成 yt-dlp 临时配置失败，跳过 config-locations（取流降级继续）: %v", err)
+			logger.Warn("生成 yt-dlp 临时配置失败，跳过 config-locations（取流降级继续）: %v", err)
 		} else {
 			p.stateMu.Lock()
 			p.ytdlpConfPath = confPath // 幂等：每次重新生成（覆盖写同一路径，重连场景）
@@ -335,6 +336,11 @@ func (p *MpvPlayer) pump(conn *mpvipc.Connection) {
 						fileErr = s
 					}
 				}
+				if fileErr == "" {
+					logger.Warn("mpv end-file 错误（无诊断文本）")
+				} else {
+					logger.Warn("mpv end-file 错误: %s", fileErr)
+				}
 				p.emit(ErrorEvent{Err: &LoadFailedError{FileError: fileErr}})
 			}
 		}
@@ -361,9 +367,9 @@ func (p *MpvPlayer) onDisconnect(conn *mpvipc.Connection) {
 	p.stateMu.Unlock()
 	select {
 	case werr := <-waitCh:
-		log.Printf("mpv 进程已退出: %v（触发自动重连）", werr)
+		logger.Warn("mpv 进程已退出: %v（触发自动重连）", werr)
 	default:
-		log.Printf("mpv IPC 连接断开（进程可能仍存活，触发自动重连）")
+		logger.Warn("mpv IPC 连接断开（进程可能仍存活，触发自动重连）")
 	}
 	if current != conn {
 		// 连接已被更新的重连替换（命令路径已接管恢复）：本泵不清理，
@@ -455,6 +461,7 @@ func (p *MpvPlayer) doReconnect() error {
 		p.clearProcess()
 		return errors.New("播放器已关闭")
 	}
+	logger.Info("mpv 重连成功")
 	return nil
 }
 
@@ -549,6 +556,7 @@ func (p *MpvPlayer) watchdogLoop(seq int) {
 			}
 			p.stateMu.Unlock()
 			if expired {
+				logger.Error("mpv 加载看门狗超时（取流悬挂 %s）", loadWatchdogTimeout)
 				p.emit(ErrorEvent{Err: &LoadTimeoutError{Timeout: loadWatchdogTimeout}})
 			}
 		case <-time.After(100 * time.Millisecond):
@@ -600,6 +608,7 @@ func callWithTimeout(fn func() error) error {
 
 // Play 开始播放指定 URL（loadfile 替换当前歌曲）。
 func (p *MpvPlayer) Play(url string) error {
+	logger.Info("Play: %s", url)
 	if err := p.ensureConnected(); err != nil {
 		return err
 	}
@@ -614,6 +623,7 @@ func (p *MpvPlayer) Play(url string) error {
 		data, err = conn.Call("loadfile", url)
 		return err
 	}); err != nil {
+		logger.Error("loadfile 失败: %s: %v", url, err)
 		return fmt.Errorf("loadfile: %w", err)
 	}
 	p.recordLoadID(data)
@@ -629,6 +639,7 @@ func (p *MpvPlayer) Play(url string) error {
 // seek 会被 mpv 拒绝（error running command），故定位必须由 loadfile
 // 一并完成，消除"加载后立即 seek"的竞态。
 func (p *MpvPlayer) PlayPaused(url string, start float64) error {
+	logger.Info("PlayPaused: %s start=%.1f", url, start)
 	if err := p.ensureConnected(); err != nil {
 		return err
 	}
@@ -640,6 +651,7 @@ func (p *MpvPlayer) PlayPaused(url string, start float64) error {
 	if err := callWithTimeout(func() error {
 		return conn.Set("pause", true)
 	}); err != nil {
+		logger.Error("PlayPaused set pause 失败: %s: %v", url, err)
 		return fmt.Errorf("set pause: %w", err)
 	}
 	var data interface{}
@@ -658,6 +670,7 @@ func (p *MpvPlayer) PlayPaused(url string, start float64) error {
 		data, loadErr = conn.Call("loadfile", url) // 2 参：兼容 mpv <0.38，从头加载
 		return loadErr
 	}); err != nil {
+		logger.Error("PlayPaused loadfile 失败: %s: %v", url, err)
 		return fmt.Errorf("loadfile: %w", err)
 	}
 	p.recordLoadID(data)
@@ -703,6 +716,7 @@ func (p *MpvPlayer) isStaleEndFileError(ev *mpvipc.Event) bool {
 
 // Pause 暂停播放。
 func (p *MpvPlayer) Pause() error {
+	logger.Debug("Pause")
 	if err := p.ensureConnected(); err != nil {
 		return err
 	}
@@ -720,6 +734,7 @@ func (p *MpvPlayer) Pause() error {
 
 // Resume 继续播放。
 func (p *MpvPlayer) Resume() error {
+	logger.Debug("Resume")
 	if err := p.ensureConnected(); err != nil {
 		return err
 	}
@@ -737,6 +752,7 @@ func (p *MpvPlayer) Resume() error {
 
 // Seek 跳转到指定秒数（绝对位置）。
 func (p *MpvPlayer) Seek(seconds float64) error {
+	logger.Debug("Seek: %.1fs", seconds)
 	if err := p.ensureConnected(); err != nil {
 		return err
 	}
@@ -758,6 +774,7 @@ func (p *MpvPlayer) Seek(seconds float64) error {
 // 仍显式 SetLoop(false) 保证一致性。循环播放不产生 end-file 事件，
 // TrackEnded 自然不触发，进度回绕由 time-pos 属性推送驱动。
 func (p *MpvPlayer) SetLoop(loop bool) error {
+	logger.Debug("SetLoop: %v", loop)
 	if err := p.ensureConnected(); err != nil {
 		return err
 	}
@@ -776,6 +793,7 @@ func (p *MpvPlayer) SetLoop(loop bool) error {
 // SetVolume 设置 mpv 音量（0-100，越界钳制）。
 // 与 Play/Pause/Resume/Seek 一致：断开时自动重连（见 ensureConnected）。
 func (p *MpvPlayer) SetVolume(percent float64) error {
+	logger.Debug("SetVolume: %.1f", percent)
 	if err := p.ensureConnected(); err != nil {
 		return err
 	}
