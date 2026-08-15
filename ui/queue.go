@@ -49,6 +49,9 @@ func (i queueItem) Title() string {
 }
 
 func (i queueItem) Description() string {
+	if i.track.Artist == "" {
+		return formatDuration(i.track.Duration)
+	}
 	return i.track.Artist + " · " + formatDuration(i.track.Duration)
 }
 
@@ -62,6 +65,12 @@ type queueModel struct {
 	items   []model.Track
 	current int // 当前曲目下标；-1 = 无
 	mode    queue.Mode
+
+	// aiTitle/aiArtist AI 识别出的清洗后歌名/歌手：非空时队列页当前项
+	// 显示它（root 在歌词结果到达时 setAITrack，切歌时经 sync 不清除、
+	// 由 root 在 beginPlay 时清空）。
+	aiTitle  string
+	aiArtist string
 
 	width, height int
 }
@@ -104,6 +113,12 @@ func (q queueModel) Update(msg tea.Msg) (queueModel, tea.Cmd) {
 	return q, cmd
 }
 
+// setAITrack 应用 AI 识别结果（展示覆盖，root 在歌词结果到达时调用）。
+func (q queueModel) setAITrack(title, artist string) queueModel {
+	q.aiTitle, q.aiArtist = title, artist
+	return q
+}
+
 // sync 用队列最新状态刷新页面（root 在队列变化后调用）。
 // 选中项按曲目 ID 尽量保持（列表收缩导致选中项消失时回到顶部）。
 func (q queueModel) sync(qu *queue.Queue) queueModel {
@@ -113,6 +128,10 @@ func (q queueModel) sync(qu *queue.Queue) queueModel {
 	q.list.Title = fmt.Sprintf("播放队列 (%d)", qu.Len())
 	items := make([]list.Item, 0, len(q.items))
 	for i, tr := range q.items {
+		// 当前曲目展示 AI 清洗标题（若有）；其他曲目无 AI 信息保持原始
+		if i == q.current && q.aiTitle != "" {
+			tr.Title, tr.Artist = q.aiTitle, q.aiArtist
+		}
 		items = append(items, queueItem{track: tr, idx: i, current: i == q.current})
 	}
 	keep := ""

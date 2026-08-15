@@ -15,10 +15,13 @@ type LyricLine struct {
 	Text string
 }
 
-// Lyrics 歌词集合：Lines 按时间升序；Plain 为无时间戳的纯文本兜底。
+// Lyrics 歌词集合：Lines 按时间升序；Source 为来源标记（LyricsSourceAI
+// = AI 增强路径，空 = 确定性匹配），仅作展示提示，不影响内容。
+// 注意：本项目只接受带时间轴的同步歌词（用户要求：无时间轴的纯文本
+// 歌词没有使用价值），不存在 Plain 形态。
 type Lyrics struct {
-	Lines []LyricLine
-	Plain string
+	Lines  []LyricLine
+	Source string
 }
 
 // LineAt 返回"时间戳 ≤ pos 的最后一行"（upper_bound 语义）的下标与文本；

@@ -9,6 +9,7 @@ import (
 
 	"music-tui/cache"
 	"music-tui/config"
+	"music-tui/lyrics"
 )
 
 func TestVersion(t *testing.T) {
@@ -282,5 +283,14 @@ func TestLoadCacheFailsGracefullyDisabled(t *testing.T) {
 	}
 	if err := cm.Remove("t1"); err != nil {
 		t.Errorf("禁用态 Remove 应 no-op: %v", err)
+	}
+}
+
+// TestDefaultModelConsistency config 与 lyrics 的默认模型常量必须一致
+// （config 回落默认值与 OpenAI 客户端兜底值漂移即配置被静默改写）。
+func TestDefaultModelConsistency(t *testing.T) {
+	if config.DefaultOpenAIModel != lyrics.DefaultAIModel {
+		t.Errorf("config.DefaultOpenAIModel=%q != lyrics.DefaultAIModel=%q",
+			config.DefaultOpenAIModel, lyrics.DefaultAIModel)
 	}
 }

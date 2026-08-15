@@ -71,12 +71,6 @@ func TestHomeLyricsStates(t *testing.T) {
 	if m.home.currentLine != -1 {
 		t.Fatalf("currentLine = %d, want -1", m.home.currentLine)
 	}
-
-	// 纯文本歌词
-	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: &lyrics.Lyrics{Plain: "纯文本歌词"}})
-	if m.home.lyricsState != lyricsPlain {
-		t.Fatalf("state = %v, want lyricsPlain", m.home.lyricsState)
-	}
 }
 
 func TestHomeCoverStates(t *testing.T) {
@@ -1000,5 +994,96 @@ func TestHomeResizeRelayout(t *testing.T) {
 		if !found {
 			t.Errorf("%dx%d: 歌词行未找到（布局未重定位）", sz[0], sz[1])
 		}
+	}
+}
+
+// TestHomeLyricsAISourceTag AI 来源歌词渲染「AI 匹配」标识，
+// 确定性来源不显示。
+func TestHomeLyricsAISourceTag(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	ly, err := lyrics.ParseLRC([]byte("[00:10.00]第一行\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ly.Source = lyrics.LyricsSourceAI
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	if !strings.Contains(m.home.view(), "AI 匹配") {
+		t.Error("AI 来源歌词应显示「AI 匹配」标识")
+	}
+
+	// 确定性来源（Source 空）：不显示标识
+	ly2, _ := lyrics.ParseLRC([]byte("[00:10.00]第二行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly2})
+	if strings.Contains(m.home.view(), "AI 匹配") {
+		t.Error("确定性来源歌词不应显示「AI 匹配」标识")
+	}
+}
+
+// TestHomeLyricsHeightReservesAITag AI 来源标识占 1 行：视口最高收缩，
+// 防止歌词列溢出推挤底部控制栏（窄窗口 + 长歌词场景）。
+func TestHomeLyricsHeightReservesAITag(t *testing.T) {
+	build := func(source string, lineCount int) homeModel {
+		ly, _ := lyrics.ParseLRC([]byte(strings.Repeat("[00:01.00]行\n", lineCount)))
+		ly.Source = source
+		return homeModel{lyrics: ly, lyricsState: lyricsSynced, height: 23}
+	}
+	// 非 AI：视口可占满 midH=21
+	if h := build("", 100).lyricsHeight(); h != 21 {
+		t.Errorf("非 AI lyricsHeight = %d, want 21", h)
+	}
+	// AI：视口最多 midH-1=20，标识行不溢出
+	if h := build(lyrics.LyricsSourceAI, 100).lyricsHeight(); h != 20 {
+		t.Errorf("AI lyricsHeight = %d, want 20（预留标识行）", h)
+	}
+	// AI + 行数少：视口仍收缩到行数（标识行 + 内容 ≤ midH）
+	if h := build(lyrics.LyricsSourceAI, 5).lyricsHeight(); h != 5 {
+		t.Errorf("AI 少行 lyricsHeight = %d, want 5", h)
+	}
+	// 极窄窗口：视口至少 1 行，不归零
+	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
+	ly.Source = lyrics.LyricsSourceAI
+	m := homeModel{lyrics: ly, lyricsState: lyricsSynced, height: 3}
+	if h := m.lyricsHeight(); h < 1 {
+		t.Errorf("极窄窗口 lyricsHeight = %d, want ≥1", h)
+	}
+}
+
+// TestHomeControlBarShowsAITitle AI 识别结果到达后，底部控制栏显示
+// 清洗后「晴天 - 周杰伦」而非原始 YouTube 标题。
+func TestHomeControlBarShowsAITitle(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	raw := model.Track{ID: "t1", Title: "T1", Artist: "A", Duration: 200, URL: "http://x/1", Source: "youtube"}
+	m, cmd := m.startPlay(raw)
+	_ = execCmds(cmd)
+
+	// AI 结果到达前：原始标题
+	if got := m.home.view(); !strings.Contains(got, "T1 - A") {
+		t.Errorf("AI 到达前应显示原始标题, got %q", got)
+	}
+	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly, title: "晴天", artist: "周杰伦"})
+	got := m.home.view()
+	// 控制栏左栏宽度有限，标题会截断（如 "晴天 - 周…"），按前缀断言
+	if !strings.Contains(got, "晴天 - 周") {
+		t.Errorf("控制栏应显示 AI 清洗标题, got %q", got)
+	}
+	if strings.Contains(got, "T1 - A") {
+		t.Errorf("控制栏不应再显示原始标题: %q", got)
+	}
+	// 切歌后清空覆盖，回到新曲原始标题
+	raw2 := model.Track{ID: "t2", Title: "T2", Artist: "B", Duration: 200, URL: "http://x/2", Source: "youtube"}
+	m, cmd = m.startPlay(raw2)
+	_ = execCmds(cmd)
+	got2 := m.home.view()
+	if !strings.Contains(got2, "T2 - B") {
+		t.Errorf("切歌后应显示新曲原始标题, got %q", got2)
+	}
+	if strings.Contains(got2, "晴天") {
+		t.Errorf("切歌后 AI 覆盖应清空: %q", got2)
 	}
 }

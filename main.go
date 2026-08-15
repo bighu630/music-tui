@@ -105,10 +105,23 @@ func run() error {
 
 	// 4. 组装服务并启动 TUI（退出后 run 返回，defer 清理 mpv）
 	searchAdapter := search.NewYouTubeAdapter(ytdlpPath)
+	lc := lyrics.NewClient(userAgent)
+	var lyClient lyrics.Fetcher = lc
+	if cfg.OpenAI.APIKey != "" {
+		// OpenAI 增强歌词：AI 清洗标题后重查 lrclib（含 AI 结果/歌词双缓存）。
+		// 缓存初始化失败仅警告并降级为确定性匹配——增强功能不影响主功能。
+		ai := lyrics.NewOpenAIClient(cfg.OpenAI.APIKey, cfg.OpenAI.Model)
+		enhanced, err := lyrics.NewEnhancedClient(lc, ai, filepath.Join(cfg.Cache.Dir, "lyrics"))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "music-tui: 警告：AI 歌词缓存初始化失败，已降级确定性匹配: %v\n", err)
+		} else {
+			lyClient = enhanced
+		}
+	}
 	model := ui.NewModel(
 		mpv,
 		searchAdapter,
-		lyrics.NewClient(userAgent),
+		lyClient,
 		covers,
 		hist,
 		sess,

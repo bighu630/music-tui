@@ -35,7 +35,8 @@ func TestFetchGetHit(t *testing.T) {
 
 	c := NewClient(testUA)
 	c.baseURL = server.URL
-	ly, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
+	res, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
+	ly := res.Lyrics
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -70,7 +71,8 @@ func TestFetchGet404FallsBackToSearch(t *testing.T) {
 
 	c := NewClient(testUA)
 	c.baseURL = server.URL
-	ly, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
+	res, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
+	ly := res.Lyrics
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -106,21 +108,22 @@ func TestFetchRetryOn429(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(lrclibSong{TrackName: "t", PlainLyrics: "plain text"})
+		_ = json.NewEncoder(w).Encode(lrclibSong{TrackName: "t", SyncedLyrics: "[00:01.00]plain text"})
 	}))
 	defer server.Close()
 
 	c := NewClient(testUA)
 	c.baseURL = server.URL
-	ly, err := c.Fetch(context.Background(), model.Track{Title: "t", Artist: "a", Duration: 10})
+	res, err := c.Fetch(context.Background(), model.Track{Title: "t", Artist: "a", Duration: 10})
+	ly := res.Lyrics
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
 	if calls != 2 {
 		t.Errorf("calls = %d, want 2（429 后重试一次）", calls)
 	}
-	if ly.Plain != "plain text" {
-		t.Errorf("Plain = %q, want %q", ly.Plain, "plain text")
+	if len(ly.Lines) != 1 || ly.Lines[0].Text != "plain text" {
+		t.Errorf("Lines = %+v, want [plain text]", ly.Lines)
 	}
 }
 
@@ -131,19 +134,20 @@ func TestFetchEmptyGetFallsBackToSearch(t *testing.T) {
 		case "/api/get":
 			_ = json.NewEncoder(w).Encode(lrclibSong{TrackName: "t", Duration: 10})
 		case "/api/search":
-			_ = json.NewEncoder(w).Encode([]lrclibSong{{TrackName: "t", Duration: 10, PlainLyrics: "fallback"}})
+			_ = json.NewEncoder(w).Encode([]lrclibSong{{TrackName: "t", Duration: 10, SyncedLyrics: "[00:01.00]fallback"}})
 		}
 	}))
 	defer server.Close()
 
 	c := NewClient(testUA)
 	c.baseURL = server.URL
-	ly, err := c.Fetch(context.Background(), model.Track{Title: "t", Artist: "a", Duration: 10})
+	res, err := c.Fetch(context.Background(), model.Track{Title: "t", Artist: "a", Duration: 10})
+	ly := res.Lyrics
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if ly.Plain != "fallback" {
-		t.Errorf("Plain = %q, want %q", ly.Plain, "fallback")
+	if len(ly.Lines) != 1 || ly.Lines[0].Text != "fallback" {
+		t.Errorf("Lines = %+v, want [fallback]", ly.Lines)
 	}
 }
 
@@ -205,7 +209,8 @@ func TestFetchNoisyTitleFallsBackToCleanedCandidates(t *testing.T) {
 
 	c := NewClient(testUA)
 	c.baseURL = server.URL
-	ly, err := c.Fetch(context.Background(), model.Track{Title: "周杰倫 七里香 歌詞", Artist: "周杰倫", Duration: 300.0})
+	res, err := c.Fetch(context.Background(), model.Track{Title: "周杰倫 七里香 歌詞", Artist: "周杰倫", Duration: 300.0})
+	ly := res.Lyrics
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -328,5 +333,194 @@ func TestFetchRetryCanceledDuringWait(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("取消后 Fetch 未返回")
+	}
+}
+
+// ── FetchForQuery（AI 清洗后重查：get 优先 + ≤3s 严格评分）──────────
+
+func TestFetchForQueryGetHit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/get" {
+			t.Errorf("path = %q, want /api/get（清洗后应优先精确匹配）", r.URL.Path)
+		}
+		q := r.URL.Query()
+		if q.Get("track_name") != "晴天" || q.Get("artist_name") != "周杰伦" {
+			t.Errorf("query = %q, want track_name=晴天&artist_name=周杰伦", q)
+		}
+		_ = json.NewEncoder(w).Encode(lrclibSong{
+			TrackName: "晴天", ArtistName: "周杰伦", Duration: 269.0,
+			SyncedLyrics: "[00:01.00]故事的小黄花",
+		})
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	ly, err := c.FetchForQuery(context.Background(), "晴天", "周杰伦", 269.5)
+	if err != nil {
+		t.Fatalf("FetchForQuery: %v", err)
+	}
+	if len(ly.Lines) != 1 || ly.Lines[0].Text != "故事的小黄花" {
+		t.Errorf("got %+v", ly.Lines)
+	}
+}
+
+func TestFetchForQuerySearchPicksClosestWithin3s(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			w.WriteHeader(http.StatusNotFound) // get 未命中 → 降级 search
+			return
+		}
+		if r.URL.Path != "/api/search" {
+			t.Errorf("path = %q, want /api/search", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode([]lrclibSong{
+			{TrackName: "晴天", ArtistName: "周杰伦", Duration: 274.0, SyncedLyrics: "[00:01.00]远"},
+			{TrackName: "晴天", ArtistName: "周杰伦", Duration: 268.0, SyncedLyrics: "[00:01.00]近"},
+		})
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	ly, err := c.FetchForQuery(context.Background(), "晴天", "周杰伦", 269.0)
+	if err != nil {
+		t.Fatalf("FetchForQuery: %v", err)
+	}
+	if len(ly.Lines) != 1 || ly.Lines[0].Text != "近" {
+		t.Errorf("应选差距最小（269.5 vs 268→Δ1 < 274→Δ5）的歌词，got %+v", ly.Lines)
+	}
+}
+
+func TestFetchForQueryRejectsAllAbove3s(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]lrclibSong{
+			{TrackName: "晴天", ArtistName: "周杰伦", Duration: 275.0, SyncedLyrics: "[00:01.00]现场版"},
+			{TrackName: "晴天", ArtistName: "周杰伦", Duration: 260.0, SyncedLyrics: "[00:01.00]错歌"},
+		})
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	if _, err := c.FetchForQuery(context.Background(), "晴天", "周杰伦", 269.0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound（所有候选差距 >3s 必须弃用）", err)
+	}
+}
+
+func TestFetchForQueryBoundary3s(t *testing.T) {
+	// 差距恰 3.0s：采用；3.01s：弃用
+	for _, tc := range []struct {
+		songDur  float64
+		target   float64
+		wantText string
+	}{
+		{272.0, 269.0, "边界内"},
+		{272.01, 269.0, ""},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode([]lrclibSong{
+				{TrackName: "晴天", Duration: tc.songDur, SyncedLyrics: "[00:01.00]边界内"},
+			})
+		}))
+		c := NewClientWithBaseURL(server.URL, testUA)
+		ly, err := c.FetchForQuery(context.Background(), "晴天", "", tc.target)
+		if tc.wantText == "" {
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("songDur=%.2f: err = %v, want ErrNotFound", tc.songDur, err)
+			}
+		} else if err != nil || len(ly.Lines) == 0 || ly.Lines[0].Text != tc.wantText {
+			t.Errorf("songDur=%.2f: got %v %+v, want 命中", tc.songDur, err, ly)
+		}
+		server.Close()
+	}
+}
+
+func TestFetchForQueryEmptyArtistSkipsGet(t *testing.T) {
+	gotSearch := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			t.Error("artist 为空不应请求 /api/get（lrclib 会 400）")
+		}
+		gotSearch = true
+		_ = json.NewEncoder(w).Encode([]lrclibSong{})
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	if _, err := c.FetchForQuery(context.Background(), "晴天", "", 269.0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if !gotSearch {
+		t.Error("未走 /api/search")
+	}
+}
+
+// TestFetchForQueryRejectsGetHitBeyond3s /api/get 命中但时长差距 >3s
+// （非标准服务端不遵守 ±2s 契约）：不采用，降级 search。
+func TestFetchForQueryRejectsGetHitBeyond3s(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			_ = json.NewEncoder(w).Encode(lrclibSong{
+				TrackName: "晴天", ArtistName: "周杰伦", Duration: 300.0, // Δ=31s
+				SyncedLyrics: "[00:01.00]现场版",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]lrclibSong{})
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	if _, err := c.FetchForQuery(context.Background(), "晴天", "周杰伦", 269.0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound（get 命中但 Δ=31s > 3s 必须弃用）", err)
+	}
+}
+
+// TestFetchPlainOnlyRejected 只有纯文本（无时间轴）歌词：视为无歌词
+// （用户要求：歌词必须 sync，否则没有时间轴）。
+func TestFetchPlainOnlyRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/get":
+			_ = json.NewEncoder(w).Encode(lrclibSong{
+				TrackName: "晴天", ArtistName: "周杰伦", Duration: 269.0,
+				PlainLyrics: "故事的小黄花\n从出生那年就飘着",
+			})
+		case "/api/search":
+			_ = json.NewEncoder(w).Encode([]lrclibSong{})
+		}
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	_, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound（纯文本歌词必须拒绝）", err)
+	}
+}
+
+// TestFetchResultShape 确定性命中：FetchResult.Lyrics 非空，
+// Title/Artist 为空（无 AI 信息，展示回落原始标题）。
+func TestFetchResultShape(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(lrclibSong{
+			TrackName: "晴天", ArtistName: "周杰伦", Duration: 269.0,
+			SyncedLyrics: "[00:01.00]故事的小黄花",
+		})
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if res.Lyrics == nil || len(res.Lyrics.Lines) != 1 {
+		t.Fatalf("Lyrics = %+v, want 1 行", res.Lyrics)
+	}
+	if res.Title != "" || res.Artist != "" {
+		t.Errorf("确定性路径 Title/Artist = %q/%q, want 空", res.Title, res.Artist)
 	}
 }

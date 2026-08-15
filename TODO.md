@@ -94,14 +94,13 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 审查：reviewer 两轮批准（文档措辞如实修正：bubbles v1.0.0 列表无鼠标处理，仅歌词 viewport 滚轮；补幂等/hover 清除断言）✅
 - [ ] 验收：全量 build/vet/test -race 全绿；真机确认——标签栏视觉（高亮样式/图标/队列数量）+ 鼠标点击切换 + 悬停效果
 
-<<<<<<< HEAD
 ## 播放列表追加需求（用户已确认设计）
 
 - [x] 设计确认：Tab 重排 5 页（首页/队列/播放列表/搜索/历史，数字键 1-5 直达、Tab/Ctrl+→ 正向循环、Shift+Tab/Ctrl+← 反向循环）+ 播放列表页两级视图（概览↔详情）+ 全局 p 键选择器（搜索/历史/播放列表详情页添加到列表）+ JSON 持久化（~/.config/music-tui/playlists.json，损坏 .corrupt-N 备份重建）
 - [x] 实现：playlists 包（多列表 CRUD/原子持久化/损坏返回错误）+ queue.ReplaceAll 整列表替换（指针 clamp）+ ui/playlists.go 两级视图页与 plPicker 选择器 + root/main 集成（5 Tab 重排、全局 p、notice 绿色横幅）✅（commit dc2c152 + fb9bd57，已合并 master）
 - [x] 测试：playlists 15 单测 + ui 19 集成测试 + queue ReplaceAll 3 测试，全量 build/vet/test -race 全绿 ✅（commit 58b428c）
 - [ ] 验收：真机验收——创建/重命名/删除列表、搜索页 p 添加、播放列表加载播放连播/随机
-=======
+
 ---
 
 ## 审查修复批次（feat/home-layout-redesign 分支，c3cf828 之后）
@@ -114,8 +113,6 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] Nit 6：lineProgressBar 色阶预渲染（sync.Once 惰性，字节一致；TestProgressPreRenderedBytes）
 - [x] Nit 8：queuePos 注释更正（0 渲染 "0/N · 模式" 非隐藏）
 - [ ] 已知限制（reviewer 接受跳过）：按钮命中区假设图标单宽，双宽字体终端下模式按钮命中可能偏 1 格（N7 有意未修，可用 m/s 键兜底）
->>>>>>> feat/home-layout-redesign
->>>>>>> feat/home-layout-redesign
 
 ## YouTube Music 播放列表同步（追加需求，用户已确认方案）
 
@@ -137,3 +134,20 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 状态栏布局优化（用户反馈）：首页状态栏留空（信息与首页控制栏重复，行恒在布局稳定）；其他页左侧歌曲名 + 右侧播放顺序（⏵/⏸/⏹ 模式 · 位置/总数）✅（commit 0ec0c92/3e376cb，已合并 master 9235f19）
 - [x] toast 位置优化（用户反馈）：报错只显示在最后一行（状态栏行）左对齐、超宽尾部省略号截断、报错期间临时覆盖状态栏内容、消失后恢复、行数恒不变 ✅（commit ca2604d/008b4dc，已合并 master e39cbe4）
 - [x] 状态栏贴底修复（用户反馈）：body 填充页面高度（padBody + lipgloss.Place），内容不满屏页面（搜索空态等）状态栏恒贴屏幕底 ✅（commit c49632b，已合并 master）
+
+## OpenAI 增强歌词匹配（用户已确认方案，feat/lyrics-ai 分支）
+
+- [x] 方案确认：OpenAI 可配置（缺省禁用）+ AI 清洗→重查 lrclib + ≤3s 严格时长规则 + 双缓存 + UI「AI 匹配」标识；默认 model gpt-4o-mini
+- [x] 设计文档追加第 19 章（配置/流程/时长规则/缓存/测试策略/已知限制）
+- [x] 实现：lyrics/ai.go（REST 客户端 + prompt + 解析）、client.go（FetchForQuery + 3s 严格阈值）、aicache.go（JSONL 负缓存 + single-flight）、lrccache.go（LRC 文件缓存）、enhanced.go（混合流程编排）、config OpenAI 节（0600 权限）、ui Fetcher 接口 + 「AI 匹配」标识、main 接线 ✅（commit 287f514 + 12a3ddc + 23bf396）
+- [x] 审查：reviewer 两轮批准（5 项 🟡 修复：视口高度预留/0600/超长行续扫/single-flight/重试分类 + 4 项加固）✅
+- [x] 测试：新增 65 个（ai 19 + 严格阈值 6 + aicache 10 + lrccache 9 + enhanced 12 + config 7 + ui 2 + main 1，含 -count=5 -race 稳定性），全量 build/vet/test -race 全绿
+- [ ] 真机验收（待用户）：配置 api_key 后播放噪声标题曲目 → 歌词经 AI 兜底命中且显示「AI 匹配」；二次播放零请求（缓存命中）；无配置行为不变
+
+## 追加需求（用户 8-15 反馈）：sync-only 歌词 + AI 标题全局展示覆盖
+
+- [x] 用户确认：1A 全局只接受 sync 歌词（纯文本一律无歌词）；2A AI 识别标题/歌手全局替换展示
+- [x] 实现：songToLyrics 删纯文本兜底（确定性 + AI 路径统一）；Lyrics 删 Plain 字段、UI 删 lyricsPlain 态；lrccache 删 .txt 只存 .lrc
+- [x] 实现：Fetcher.Fetch 返回 FetchResult{Lyrics, Title, Artist}；AI 路径（live/缓存命中）携带清洗后歌名/歌手 → 控制栏/状态栏/队列当前项展示覆盖 + MPRIS onTrack 同步 + 切歌清空
+- [x] 测试：lyrics 4 个新测试（纯文本拒绝×2、FetchResult 形状、AI 标题携带×2）+ ui 4 个（控制栏/状态栏/队列当前项/MPRIS 回调），全量 build/vet/test -race 全绿
+- [x] 真机验收前置条件就绪（测试全绿；真机确认待用户）；AI 命中后全界面显示清洗标题

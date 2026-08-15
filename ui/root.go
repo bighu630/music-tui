@@ -76,10 +76,13 @@ type trackAppendMsg struct {
 	track model.Track
 }
 
-// lyricsResultMsg 歌词异步加载结果。
+// lyricsResultMsg 歌词异步加载结果；title/artist 为 AI 识别出的清洗后
+// 歌名/歌手（空 = 无 AI 信息，展示回落原始标题）。
 type lyricsResultMsg struct {
 	trackID string
 	lyrics  *lyrics.Lyrics
+	title   string
+	artist  string
 	err     error
 }
 
@@ -228,7 +231,7 @@ var retryBackoff = 2 * time.Second // 重试间隔（包级变量：测试可调
 // 页面切换、服务调用与结果路由。
 type Model struct {
 	player  player.Player
-	lyrics  *lyrics.Client
+	lyrics  lyrics.Fetcher
 	cover   *cover.Fetcher
 	history *history.Store
 	queue   *queue.Queue
@@ -296,7 +299,7 @@ type Model struct {
 // onTrack 在播放状态变化时同步回调当前曲目（nil 表示无曲目；可为 nil）。
 // 若 sess 存在已保存会话（队列 + 进度），同步恢复队列与播放状态（暂停态），
 // mpv 的静默加载由 Init 返回的 resumeCmd 完成。
-func NewModel(p player.Player, s search.SearchAdapter, l *lyrics.Client, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, cm *cache.Manager, yt *ytm.Client, onTrack func(*model.Track)) Model {
+func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, cm *cache.Manager, yt *ytm.Client, onTrack func(*model.Track)) Model {
 
 	m := Model{
 		player:       p,
@@ -793,6 +796,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 过期结果（已切歌）丢弃
 		if m.state.Track != nil && msg.trackID == m.state.Track.ID {
 			m.home = m.home.setLyrics(msg.err, msg.lyrics)
+			if msg.err == nil && msg.title != "" {
+				// AI 识别结果：全局展示覆盖（控制栏/状态栏/队列当前项）
+				// + MPRIS 回调（onTrack 以清洗后曲目副本重发；mpris 服务端
+				// 仅 TrackStartedEvent 发布元数据，实际保持原始标题，见 19.8）。
+				m.home = m.home.setAITrack(msg.title, msg.artist)
+				m.queuePage = m.queuePage.setAITrack(msg.title, msg.artist)
+				m = m.syncQueueViews() // 队列页立即重建当前项展示（不依赖下次队列事件）
+				if m.onTrack != nil && m.state.Track != nil {
+					t := *m.state.Track
+					t.Title, t.Artist = msg.title, msg.artist
+					m.onTrack(&t)
+				}
+			}
 		}
 		return m, nil
 
@@ -992,7 +1008,7 @@ func (m Model) statusBarView() string {
 	}
 	left := "未在播放"
 	if m.state.Track != nil {
-		left = m.state.Track.Title + " - " + m.state.Track.Artist
+		left = m.home.trackLabel() // AI 识别结果展示覆盖（见 19 章）
 	}
 	right := ""
 	if m.state.Track != nil {
@@ -1336,6 +1352,7 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 	m.state = model.PlaybackState{Track: &track, Playing: true, Duration: track.Duration}
 	m.toast = nil // 新曲目开始 = 新状态：清除活跃 toast
 	m.home = m.home.resetForTrack(&track)
+	m.queuePage = m.queuePage.setAITrack("", "") // 切歌：AI 展示覆盖作废
 	target := track.URL
 	if path, ok := m.cache.Lookup(track.ID); ok {
 		target = path
@@ -1436,12 +1453,12 @@ func resumeCmd(m Model) tea.Cmd {
 	}
 }
 
-func fetchLyricsCmd(c *lyrics.Client, track model.Track) tea.Cmd {
+func fetchLyricsCmd(c lyrics.Fetcher, track model.Track) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		ly, err := c.Fetch(ctx, track)
-		return lyricsResultMsg{trackID: track.ID, lyrics: ly, err: err}
+		res, err := c.Fetch(ctx, track)
+		return lyricsResultMsg{trackID: track.ID, lyrics: res.Lyrics, title: res.Title, artist: res.Artist, err: err}
 	}
 }
 

@@ -262,6 +262,7 @@ mpv 进度事件（50ms）→ root 更新 PlaybackState.Position
   - 失败不阻塞播放，显示占位框
 
 ## 9. 歌词同步机制
+> 注：歌词只接受带时间轴的同步歌词（用户追加要求，见 19.1）——原纯文本整页展示态已删除，本节按现状描述。
 
 - 歌词加载异步（网络请求），期间歌词区显示"歌词加载中…"
 - 拉取流程：`GET /api/get?track_name&artist_name&album_name&duration`（±2s 容差精确匹配）→ 404 时降级 `GET /api/search` 按 duration/artist 筛选最佳匹配
@@ -726,7 +727,7 @@ cache/
 | ytm/ytm（5 个） | Client 组装、SupportedBrowsers 矩阵、登录门面方法 |
 | search（10 个） | FetchPlaylist：-J 顶层 playlist JSON 解析（含 URL 兜底/空条目/坏 JSON）、cookie 参数透传（假 yt-dlp 子进程）、超时/取消/stderr 诊断 |
 | ui（19 个，playlists_ui_test.go 的 TestYT*） | 状态区三态渲染、登录设置全流程（浏览器选择→保存→验证消息、cookies.txt 可读校验、粘贴登录、失败映射）、退出登录、URL 导入（成功/空忽略/失败保留输入）、同步全部（成功/未登录）、详情 r 刷新（同步列表/非同步提示）、键位作用域与输入框吞键 |
-| main（2 个） | ytm store 缺失、损坏备份重建（.corrupt 时间戳） |
+| main（3 个） | ytm store 缺失、损坏备份重建（.corrupt 时间戳）、默认模型常量一致性 |
 
 ### 18.9 已知限制
 - **v11 keyring 路径未实测**（本机无 v11 cookie）：实现经 godbus/dbus v5 读 Secret Service（schema chrome_libsecret_os_crypt_password_v1），任何失败降级 empty key；遇真实 v11 环境需验证
@@ -738,3 +739,93 @@ cache/
 - 同步为**单向快照**：本地列表是远端快照，本地手工增删会被下次刷新整列表覆盖（Create/重命名仍可用，重命名后同步映射失效会重建新列表）
 - 退出登录仅清除配置，已落盘 cookie 文件（ytm-cookies.txt）保留在磁盘（0600），需要时可手动删除
 - 播放列表拉取经 yt-dlp（flat 模式），条目含时长/频道/封面元数据，但不含歌词等附加信息；YTM 歌单按 youtube.com 处理属 yt-dlp 正常行为
+
+## 19. OpenAI 增强歌词匹配（追加需求，用户确认方案）
+
+### 19.1 概述
+现有歌词链路是确定性匹配（标题清洗 + lrclib /api/get ±2s / /api/search 30s 评分），对 YouTube 噪声标题（繁中、feat.、版本描述、频道名混入）命中率有限。本增强引入 **OpenAI 清洗标题 → 重查 lrclib** 的兜底路径：
+
+> **歌词必须带时间轴（用户追加要求）**：全链路（确定性 + AI 路径）只接受 lrclib 的 syncedLyrics；只有纯文本 plainLyrics 的条目一律视为无歌词（ErrNotFound）——无时间轴的歌词没有使用价值。UI 的纯文本歌词态（lyricsPlain）已随此规则删除，`Lyrics` 结构不再有 Plain 字段。
+
+> **AI 标题全局展示覆盖（用户追加要求）**：AI 识别出的清洗后歌名/歌手不只用于查询，还作为当前曲目的**展示标题**——首页控制栏、底部状态栏、队列页当前项（▶ 项）均显示「晴天 - 周杰伦」而非原始「【周杰倫】晴天 Official Music Video」；onTrack 以清洗后曲目副本重发（MPRIS 回调机制就绪，但服务端仅 TrackStartedEvent 发布元数据，实际保持原始标题，见 19.8）。歌词未到达时先显示原始标题，切歌时覆盖清空。
+
+- **不配置 OpenAI = 完全禁用**：行为与现状逐字节一致（main 只组装确定性 `*lyrics.Client`）
+- 纯 REST 调用（net/http，无 SDK），temperature 0.2（参考项目 /data/code/lyrics 同值），JSON 输出 `{is_song, title, artist}`
+- 参考项目已实现同款功能（src/ai/openai.cpp + src/lyrics/provider.cpp + src/cache/cache.cpp），实现时**未复制其三个已知缺陷**：Lrcmux 接线复制粘贴错误、lrclib 降级重试结果被变量遮蔽丢弃、负缓存加载时被过滤丢弃
+
+### 19.2 配置（config 包）
+```json
+{
+  "cache": { ... },
+  "openai": {
+    "api_key": "sk-...",   // 空/缺省 = AI 路径完全禁用（默认）
+    "model": "gpt-4o-mini" // 缺省/空回落 gpt-4o-mini
+  }
+}
+```
+- `config.OpenAI` 结构 + Load 指针字段回落语义（与 cache 同款）：api_key 缺失/显式空 → 禁用；model 缺失/空 → 默认
+- main.go：`cfg.OpenAI.APIKey != ""` 时组装 `lyrics.NewEnhancedClient(lc, ai, <缓存目录>/lyrics)` 并替换传给 ui 的歌词服务（`lyrics.Fetcher` 接口：`*Client` 与 `*EnhancedClient` 都实现）；缓存初始化失败仅警告并降级确定性匹配（增强功能不影响主功能，与 loadCache 同哲学）
+- **配置文件写盘权限 0600**：文件含 OpenAI API key，禁止其他本地用户读取（ytm-cookies.txt 同款惯例）；默认模型常量 `config.DefaultOpenAIModel` 与 `lyrics.DefaultAIModel` 有 main 层一致性测试锁住
+
+### 19.3 匹配流程（混合架构）
+```
+播放 → 确定性匹配（标题清洗 + /api/get ±2s → /api/search 30s）
+  ├─ 命中 → 用（Source 空，UI 不标注）
+  └─ 未命中 且 配置了 OpenAI →
+      AI 结果缓存查 key（规范化 title|artist）
+        ├─ 命中 → 直接取识别结果
+        └─ 未命中 → 调 OpenAI（瞬时错误重试 1 次；成功即缓存，含负缓存）
+      is_song=false 或空 title → ErrNotFound（负缓存生效，不再调 AI）
+      歌词缓存（清洗后 title-artist）命中 → 返回（Source=ai）
+      未命中 → FetchForQuery：/api/get 优先（lrclib ±2s）→
+               失败 /api/search 严格评分（≤3s）→ 命中入歌词缓存
+无 OpenAI 配置 / 调用失败 → 降级确定性结果（ErrNotFound 原样返回）
+```
+- **AI 标题全局展示覆盖**：AI 路径成功时 `FetchResult.Title/Artist` 携带清洗后歌名/歌手（`Fetcher.Fetch` 返回值从 `*Lyrics` 扩展为 `FetchResult{Lyrics, Title, Artist}`）；ui 在歌词结果到达时对 home/queuePage 应用展示覆盖并立即重建队列视图、以清洗后曲目副本重发 onTrack（MPRIS 回调；服务端元数据仍为原始标题，见 19.8）、beginPlay 切歌清空覆盖
+- prompt：英文指令 + JSON 形状约束 + 繁→简转换 + feat./版本描述剥离 + 5 组示例（含参考项目的「山吹菌/少年霜」刁钻例）；响应解析先取括号平衡的 JSON 对象（代码围栏/前后杂文/数组包裹均容错），截断或垃圾内容报错不静默
+- 识别输入 = 标题 + 频道名（hint）：频道名可帮 AI 定位歌手（如「周杰倫官方頻道」），prompt 明示其仅为 hint 可能无关
+
+### 19.4 时长匹配规则（用户明确要求）
+- **AI 路径**用严格阈值 `maxAIDurationDelta = 3.0s`：候选歌词 duration 与目标歌曲差距 **≤3s 才采用，差距最小者优先**；所有候选都 >3s → 视为无歌词（ErrNotFound）——AI 结果可能张冠李戴（同名翻唱/现场版），时长是最可靠的判别信号
+- /api/get 服务端本身按 ±2s 匹配，天然满足严格阈值；客户端对 get 命中同样校验 `|Δ|≤maxDelta`（防御不遵守契约的自托管服务）
+- **确定性路径保持 30s 阈值不变**（`maxDurationDelta`）：现有行为零回归（无配置时行为不变的前提）
+- 实现：`chooseBestWithin(songs, track, maxDelta)` 参数化，`chooseBest` 为 30s 包装，`Client.FetchForQuery(title, artist, duration)` 走 AI 查询（单候选不套 cleanCandidates——AI 已清洗）
+
+### 19.5 双缓存
+| 缓存 | 位置 | 格式 | 键 |
+|---|---|---|---|
+| AI 结果 | `<缓存>/lyrics/ai.jsonl` | JSONL 每行 `{key, is_song, title, artist}` | 长度前缀编码 `N:title|M:artist`（空白折叠；长度前缀消除 title/artist 中 `|` 的键碰撞） |
+| 歌词 | `<缓存>/lyrics/lrc/` | 同步歌词 → `<title>-<artist>.lrc`（纯 LRC 文本，毫秒精度序列化；sync-only，无纯文本形态） | 清洗后的 title-artist（不安全字符替换、按字节截断 ≤200B） |
+
+- **负缓存**：`is_song=false` 同样入库——同一标题不再重复调用 AI 烧钱（参考项目只缓存正结果，此处按需求改进）
+- 歌词缓存命中直接读文件、不发 lrclib 请求（同标题不同 track ID 的重复播放零网络开销）
+- AI 调用**失败不缓存**（瞬时错误下次重试）；重复 Put 同键不覆盖不追加
+- **并发 single-flight**：同一 key 的并发识别合并为一次 AI 调用（等待者复用执行者结果，执行者失败不惊群重试）；缓存读写有互斥锁（-race 验证）
+- 加载时损坏行（含超长行）跳过并原子重写清理；追加写失败仅丢该行（缓存是增强，绝不阻塞主流程）
+- 缓存路径在 `cache` 配置的目录下，不占用音频缓存 LRU 名额，独立增长（歌词文件小，可接受）
+
+### 19.6 UI 交互（AI 歌词来源标识）
+- `lyrics.Lyrics` 新增 `Source` 字段：`LyricsSourceAI = "ai"` 标记 AI 增强路径产物（实时命中与歌词缓存命中都标注；确定性路径为空）
+- 首页歌词列在 AI 来源歌词上方渲染一行 `〔AI 匹配〕`（faint 小字，在 viewport 外拼接，不参与滚动居中数学）；确定性来源不显示
+- 默认模型 `gpt-4o-mini`（成本/质量平衡，可配置覆盖）
+
+### 19.7 测试策略
+| 模块 | 策略 |
+|---|---|
+| ai（19 个） | parseAIResponse：裸 JSON/代码围栏/前后杂文/数组包裹/非歌曲/缺 is_song 默认 true/截断/垃圾报错；Identify：httptest 校验请求形状（POST /chat/completions、Bearer、model、temperature 0.2、prompt 含标题与 feat. 示例）、内容提取、500 重试一次、401 不重试、429 重试耗尽、空 content/缺 choices 报错、默认 model/baseURL |
+| client 严格阈值（6 个）+ sync-only（2 个） | FetchForQuery 六项 + 纯文本歌词拒绝（get 命中）、FetchResult 形状（确定性路径 Title/Artist 空） | FetchForQuery：get 命中优先、search 选差距最小、全部 >3s 弃用、3.0s 边界采用 / 3.01s 弃用、空 artist 跳过 get、get 命中超 3s 弃用降级 search |
+| aicache（10 个） | 落盘 roundtrip、负缓存持久化、损坏行跳过 + 文件重写、键空白规范化、并发 Put（-race）、同键不重复、行格式 |
+| lrccache（9 个） | 同步歌词 roundtrip（毫秒误差内）、sync-only（只产出 .lrc、.txt 不识别、旧 .txt 启动清理）、未知名 miss、清洗/截断/控制字符、空歌词不写、文件可 ParseLRC | synced/plain 存取 roundtrip（毫秒误差内）、未知名 miss、不安全字符清洗、超长截断（字节计）、sync/plain 分文件不覆盖、空歌词不写、文件为可 ParseLRC 纯文本 |
+| enhanced（15 个） | 原 12 个 + AI 结果携带清洗标题（live/缓存命中两路径）、AI 路径纯文本拒绝  确定性命中不调 AI；无 AI 配置降级；AI 清洗→重查命中（Source 标注）；is_song=false 负缓存（二次不调 AI）；AI 失败降级 + 失败不缓存；全部候选 >3s 弃用；AI 结果缓存 + 歌词缓存命中免 AI/免 lrclib；AI 结果缓存命中仍重查 lrclib；空 title 拒绝；缓存跨重启落盘命中 |
+| config（7 个新增） | openai 缺失禁用、key 存在 model 默认、显式空 key 禁用、显式值、显式空 model 默认、Save roundtrip |
+| ui（6 个新增） | AI 来源歌词显示 `〔AI 匹配〕`、确定性来源不显示、AI 标识行视口高度预留（窄窗口不溢出）、控制栏/状态栏 AI 标题覆盖 + 切歌清空、队列当前项 AI 标题（非当前项保持原始）、MPRIS onTrack 收到清洗后曲目（无 AI 信息不触发） |
+
+### 19.8 已知限制
+- **MPRIS 元数据保持原始标题**：onTrack 二次回调已就绪（AI 结果到达时以清洗后曲目重发），但 mpris 服务端仅在 TrackStartedEvent 时发布 Metadata，AI 结果必然晚于该事件到达且下一曲的原始标题会先覆盖——playerctl 感知不到清洗后信息（回调机制保留，未来接入 SetMust 即可发布）
+- **展示覆盖仅作用于当前播放曲目**：队列/历史/搜索/播放列表页中的未播放曲目没有 AI 信息（未识别过），保持原始标题；切歌瞬间（歌词未到达）短暂显示原始标题
+- **AI 调用 429 无退避**：重试 1 次为立即重试（lrclib 客户端会尊重 Retry-After，AI 客户端未实现；429 后大概率仍 429，代价仅 1 次无效调用）
+- **ai.jsonl 无条目上限**：唯一标题永久累积（~百字节/条，可接受）；如需可加 LRU 截断
+- **歌词缓存键不含时长**：同 title-artist 的不同版本（如现场版与录音室版）共用缓存条目；AI 路径查询时 3s 严格规则已排除明显错配，但缓存命中路径不再校验时长——同名同歌手但时长差异极大的极端情形可能拿到另一版本歌词（与参考项目行为一致，可接受）
+- **AI 调用共享 10s 歌词拉取预算**（fetchLyricsCmd 超时）：确定性路径已消耗时间时 AI 可用预算减少；超时降级为无歌词，不阻塞 UI
+- **is_song=true 但空 title** 的识别结果按负缓存处理（不再调 AI），避免拿空标题空转 lrclib
+- 仅支持 OpenAI 协议兼容服务（官方或自托管均可，baseURL 可注入）；未接 Gemini 等其它厂商（参考项目支持，本期不做）

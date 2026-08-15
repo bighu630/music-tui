@@ -20,6 +20,21 @@ const lrclibBaseURL = "https://lrclib.net"
 // ErrNotFound 表示 lrclib 中找不到对应歌词。
 var ErrNotFound = errors.New("lyrics not found")
 
+// Fetcher 是歌词获取服务抽象：*Client（确定性匹配）与 *EnhancedClient
+// （AI 增强）均实现；ui/main 层按配置选择具体实现。
+type Fetcher interface {
+	Fetch(ctx context.Context, track model.Track) (FetchResult, error)
+}
+
+// FetchResult 是歌词获取结果。Lyrics 为命中的歌词（nil + ErrNotFound =
+// 无歌词）；Title/Artist 为 AI 识别出的清洗后歌名/歌手——展示层用它
+// 覆盖原始 YouTube 标题（空 = 无 AI 信息，保持原始显示）。
+type FetchResult struct {
+	Lyrics *Lyrics
+	Title  string
+	Artist string
+}
+
 // Client 是 lrclib 的 HTTP 客户端。
 type Client struct {
 	baseURL   string
@@ -58,28 +73,37 @@ type lrclibSong struct {
 // → 404 或空歌词降级 /api/search；派生候选（去噪/切分/CJK 词元）不带
 // artist 直接走 /api/search（lrclib 对 track_name 精确匹配，噪声词会致
 // 0 结果）。未找到歌词返回 ErrNotFound；网络或服务端错误原样返回。
-func (c *Client) Fetch(ctx context.Context, track model.Track) (*Lyrics, error) {
+func (c *Client) Fetch(ctx context.Context, track model.Track) (FetchResult, error) {
 	for i, cand := range cleanCandidates(track.Title) {
 		// 派生候选恰为歌手名（如 CJK 词元"周杰倫"）是最常见的浪费请求，跳过。
 		if i > 0 && strings.EqualFold(cand, track.Artist) {
 			continue
 		}
-		ly, err := c.fetchOne(ctx, track, cand, i == 0)
+		ly, err := c.fetchOne(ctx, track, cand, i == 0, maxDurationDelta)
 		if err == nil {
-			return ly, nil
+			return FetchResult{Lyrics: ly}, nil
 		}
 		if !errors.Is(err, ErrNotFound) {
-			return nil, err
+			return FetchResult{}, err
 		}
 	}
-	return nil, ErrNotFound
+	return FetchResult{}, ErrNotFound
 }
 
-// fetchOne 对单个候选标题查询：withArtist=true（仅候选 0）时先 /api/get
-// 精确命中，404 或歌词为空时降级 /api/search 并选择时长最接近的匹配；
-// withArtist=false 时跳过 get 直接 search（不带 artist 参数）。
-// 未命中返回 ErrNotFound，由 Fetch 决定是否尝试下一候选。
-func (c *Client) fetchOne(ctx context.Context, track model.Track, cand string, withArtist bool) (*Lyrics, error) {
+// FetchForQuery 用外部清洗后的 title/artist 重查 lrclib（AI 增强路径）：
+// /api/get 优先（lrclib 服务端 ±2s 匹配，天然满足严格阈值），降级
+// /api/search 并以 maxAIDurationDelta 严格筛选（差距最小者优先，
+// 全部超限视为无歌词）。artist 为空时跳过 get 直接 search。
+func (c *Client) FetchForQuery(ctx context.Context, title, artist string, duration float64) (*Lyrics, error) {
+	track := model.Track{Title: title, Artist: artist, Duration: duration}
+	return c.fetchOne(ctx, track, title, artist != "", maxAIDurationDelta)
+}
+
+// fetchOne 对单个候选标题查询：withArtist=true 时先 /api/get
+// 精确命中，404 或歌词为空时降级 /api/search 并选择时长最接近的匹配
+// （阈值 maxDelta）；withArtist=false 时跳过 get 直接 search（不带
+// artist 参数）。未命中返回 ErrNotFound，由 Fetch 决定是否尝试下一候选。
+func (c *Client) fetchOne(ctx context.Context, track model.Track, cand string, withArtist bool, maxDelta float64) (*Lyrics, error) {
 	base := strings.TrimSuffix(c.baseURL, "/")
 	if withArtist && track.Artist != "" {
 		// /api/get 必须带 artist_name，否则 lrclib 返回 400 中断整条链；
@@ -92,10 +116,12 @@ func (c *Client) fetchOne(ctx context.Context, track model.Track, cand string, w
 		u := base + "/api/get?" + q.Encode()
 		err := c.do(ctx, u, &song)
 		if err == nil {
-			if ly := songToLyrics(song); ly != nil {
+			// get 命中同样受 maxDelta 约束（确定性路径 30s 与 lrclib ±2s
+			// 契约兼容；AI 路径 3s 防御非标准服务端不遵守契约的情况）。
+			if ly := songToLyrics(song); ly != nil && math.Abs(song.Duration-track.Duration) <= maxDelta {
 				return ly, nil
 			}
-			err = ErrNotFound // 200 但歌词为空：视同未命中，降级 search
+			err = ErrNotFound // 200 但歌词为空或时长超限：视同未命中，降级 search
 		}
 		if !errors.Is(err, ErrNotFound) {
 			return nil, err
@@ -112,7 +138,7 @@ func (c *Client) fetchOne(ctx context.Context, track model.Track, cand string, w
 	if err := c.do(ctx, u2, &songs); err != nil {
 		return nil, err
 	}
-	if ly := chooseBest(songs, track); ly != nil {
+	if ly := chooseBestWithin(songs, track, maxDelta); ly != nil {
 		return ly, nil
 	}
 	return nil, ErrNotFound
@@ -193,28 +219,38 @@ func clampWait(d time.Duration) time.Duration {
 	return d
 }
 
-// songToLyrics 将 lrclib 歌曲对象转为 Lyrics：同步歌词优先，退回纯文本；
-// 两者皆空返回 nil。
+// songToLyrics 将 lrclib 歌曲对象转为 Lyrics：仅接受带时间轴的同步歌词；
+// 只有纯文本（plainLyrics）时返回 nil（用户要求：无时间轴歌词没有
+// 使用价值，视为无歌词）。
 func songToLyrics(s lrclibSong) *Lyrics {
 	if s.SyncedLyrics != "" {
 		if ly, err := ParseLRC([]byte(s.SyncedLyrics)); err == nil && len(ly.Lines) > 0 {
 			return ly
 		}
 	}
-	if s.PlainLyrics != "" {
-		return &Lyrics{Plain: s.PlainLyrics}
-	}
 	return nil
 }
 
-// maxDurationDelta 时长匹配阈值（秒）：偏差超过即视为不同曲目，排除。
-// 音频/MV 片头偏移通常 ≤30s（实测晴天 MV 319s vs lrclib 300s，Δ=19s
-// 属同曲应命中）；现场版/错歌偏差通常 >60s，应排除。
+// maxDurationDelta 确定性路径时长匹配阈值（秒）：偏差超过即视为不同
+// 曲目，排除。音频/MV 片头偏移通常 ≤30s（实测晴天 MV 319s vs lrclib
+// 300s，Δ=19s 属同曲应命中）；现场版/错歌偏差通常 >60s，应排除。
 const maxDurationDelta = 30.0
 
+// maxAIDurationDelta AI 增强路径时长匹配阈值（秒，用户明确要求）：
+// AI 清洗后的查询结果必须与目标时长差距 ≤3s 才采用——AI 结果本身
+// 可能张冠李戴（同名翻唱/现场版），时长是最可靠的判别信号，
+// 差距过大宁可不显示歌词。
+const maxAIDurationDelta = 3.0
+
 // chooseBest 在搜索结果中选最佳：跳过纯器乐与时长偏差超过阈值的条目，
-// 选时长与目标最接近的。
+// 选时长与目标最接近的（确定性路径阈值 30s）。
 func chooseBest(songs []lrclibSong, track model.Track) *Lyrics {
+	return chooseBestWithin(songs, track, maxDurationDelta)
+}
+
+// chooseBestWithin 以给定阈值选最佳匹配：跳过纯器乐与时长偏差超过
+// maxDelta 的条目，选时长与目标最接近的。
+func chooseBestWithin(songs []lrclibSong, track model.Track, maxDelta float64) *Lyrics {
 	var best *lrclibSong
 	bestDelta := math.MaxFloat64
 	for i := range songs {
@@ -223,7 +259,7 @@ func chooseBest(songs []lrclibSong, track model.Track) *Lyrics {
 			continue
 		}
 		delta := math.Abs(s.Duration - track.Duration)
-		if delta > maxDurationDelta {
+		if delta > maxDelta {
 			continue
 		}
 		if delta < bestDelta {

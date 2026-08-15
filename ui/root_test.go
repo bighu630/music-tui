@@ -2027,3 +2027,62 @@ func TestLoadingIndicatorShownUntilTrackStarted(t *testing.T) {
 		t.Errorf("TrackStarted 后进度行不应再显示加载中, got %q", got)
 	}
 }
+
+// TestStatusBarShowsAITitle AI 识别结果到达后，底部状态栏右侧显示清洗后
+// 标题；切歌后回落新曲原始标题。
+func TestStatusBarShowsAITitle(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	raw := model.Track{ID: "t1", Title: "T1", Artist: "A", Duration: 200, URL: "http://x/1", Source: "youtube"}
+	m, cmd := m.startPlay(raw)
+	_ = execCmds(cmd)
+	// 首页状态栏留空（master 布局），切到队列页：状态栏左侧显示曲目标题
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	if m.current != pageQueue {
+		t.Fatalf("Tab 后 current = %v, want pageQueue", m.current)
+	}
+
+	if got := m.View(); !strings.Contains(got, "T1 - A") {
+		t.Errorf("AI 到达前状态栏应显示原始标题, got %q", got)
+	}
+	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly, title: "晴天", artist: "周杰伦"})
+	if got := m.View(); !strings.Contains(got, "晴天 - 周") {
+		t.Errorf("状态栏应显示 AI 清洗标题, got %q", got)
+	}
+	if strings.Contains(m.View(), "T1 - A") {
+		t.Errorf("状态栏不应再显示原始标题: %q", m.View())
+	}
+}
+
+// TestAITrackNotifiesMPRIS AI 识别结果到达时，onTrack 回调收到清洗后
+// 曲目（MPRIS 元数据同步）。
+func TestAITrackNotifiesMPRIS(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	var got []*model.Track
+	m := newTestModel(t, fp, fa, func(track *model.Track) {
+		cp := *track
+		got = append(got, &cp)
+	})
+	raw := model.Track{ID: "t1", Title: "T1", Artist: "A", Duration: 200, URL: "http://x/1", Source: "youtube"}
+	m, cmd := m.startPlay(raw)
+	_ = execCmds(cmd)
+	if len(got) != 1 {
+		t.Fatalf("startPlay 应通知 1 次, got %d", len(got))
+	}
+	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly, title: "晴天", artist: "周杰伦"})
+	if len(got) != 2 {
+		t.Fatalf("AI 结果应再通知 1 次, got %d", len(got))
+	}
+	last := got[1]
+	if last.Title != "晴天" || last.Artist != "周杰伦" || last.ID != "t1" {
+		t.Errorf("AI 通知 = %+v, want 晴天/周杰伦/t1", last)
+	}
+	// 确定性结果（无 AI 信息）不触发额外通知
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	if len(got) != 2 {
+		t.Errorf("无 AI 信息不应触发通知, got %d", len(got))
+	}
+}

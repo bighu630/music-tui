@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"music-tui/lyrics"
 	"music-tui/model"
 	"music-tui/player"
 	"music-tui/queue"
@@ -721,4 +722,35 @@ func TestQueueEmptyHintOnLastLine(t *testing.T) {
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
 	assertHintOnLastLine(t, m, "Enter/p 跳转播放")
+}
+
+// TestQueueCurrentItemShowsAITitle AI 识别结果到达后，队列页当前项
+// （▶ 标记）显示清洗后标题；其他项保持原始；切歌后回落。
+func TestQueueCurrentItemShowsAITitle(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	// 直接构造两曲队列并播放第一首（startPlay 等价：Replace + beginPlay）
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m.queue.Add(testTrack("t2"))
+	m.queuePage = m.queuePage.sync(m.queue)
+
+	got := m.queuePage.view()
+	if !strings.Contains(got, "1. 测试歌曲 t1") {
+		t.Fatalf("AI 到达前应显示原始标题, got %q", got)
+	}
+	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly, title: "晴天", artist: "周杰伦"})
+	// 不手动 sync：AI 结果 handler 已即时重建队列视图（生产路径）
+
+	got = m.queuePage.view()
+	if !strings.Contains(got, "1. 晴天") {
+		t.Errorf("队列当前项应显示 AI 清洗标题（handler 即时刷新）, got %q", got)
+	}
+	if !strings.Contains(got, "2. 测试歌曲 t2") {
+		t.Errorf("非当前项应保持原始标题, got %q", got)
+	}
+	if strings.Contains(got, "1. 测试歌曲 t1") {
+		t.Errorf("当前项不应再显示原始标题: %q", got)
+	}
 }

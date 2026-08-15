@@ -138,7 +138,6 @@ type lyricsState int
 const (
 	lyricsLoading lyricsState = iota // 歌词加载中
 	lyricsSynced                     // 同步歌词（高亮滚动）
-	lyricsPlain                      // 纯文本歌词（整页展示）
 	lyricsNone                       // 无歌词
 )
 
@@ -166,6 +165,11 @@ type homeModel struct {
 	lyricsState lyricsState
 	lyrics      *lyrics.Lyrics
 	currentLine int // 当前高亮行下标；-1 = 无高亮
+
+	// aiTitle/aiArtist AI 识别出的清洗后歌名/歌手（展示覆盖）：非空时
+	// 控制栏等展示位用它替代原始 YouTube 标题；切歌时清空。
+	aiTitle  string
+	aiArtist string
 
 	coverRenderCache string // 封面渲染缓存：setCover 时渲染一次（固定 30×17 字符画，不依赖终端尺寸）
 	coverFallback    bool   // 封面加载失败 → 占位框
@@ -236,7 +240,7 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 		// 滚轮：歌词视口手动滚动（仅歌词列区域：X ≥ 封面列+gap，Y 在中间区）。
 		// 播放推进时 scrollLyricsTo 会重新把当前行居中（自动跟随优先）。
 		if tea.MouseEvent(msg).IsWheel() {
-			if m.lyricsState == lyricsSynced || m.lyricsState == lyricsPlain {
+			if m.lyricsState == lyricsSynced {
 				if pageY >= 0 && pageY < m.height-2 && msg.X >= coverW+2 {
 					if msg.Button == tea.MouseButtonWheelUp {
 						m.lyricView.SetYOffset(m.lyricView.YOffset - 3)
@@ -296,7 +300,32 @@ func (m homeModel) resetForTrack(track *model.Track) homeModel {
 	m.lyricView.SetContent("")
 	m.coverRenderCache = ""
 	m.coverFallback = false
+	m.aiTitle, m.aiArtist = "", ""
 	return m
+}
+
+// setAITrack 应用 AI 识别的清洗后歌名/歌手（展示覆盖，root 在歌词结果
+// 到达时调用）。
+func (m homeModel) setAITrack(title, artist string) homeModel {
+	m.aiTitle, m.aiArtist = title, artist
+	return m
+}
+
+// trackLabel 当前曲目标题标签：AI 识别结果优先，回落原始标题；
+// artist 为空时省略分隔符。
+func (m homeModel) trackLabel() string {
+	t := m.state.Track
+	if t == nil {
+		return ""
+	}
+	title, artist := t.Title, t.Artist
+	if m.aiTitle != "" {
+		title, artist = m.aiTitle, m.aiArtist
+	}
+	if artist == "" {
+		return title
+	}
+	return title + " - " + artist
 }
 
 // syncState 同步播放状态并推进歌词高亮（每次 player 事件后调用）。
@@ -346,20 +375,14 @@ func (m homeModel) setLyrics(err error, ly *lyrics.Lyrics) homeModel {
 		m.lyricsState = lyricsNone
 		return m
 	}
-	switch {
-	case len(ly.Lines) > 0:
+	if len(ly.Lines) > 0 {
 		m.lyrics = ly
 		m.lyricsState = lyricsSynced
 		m.currentLine = -1
 		// 歌词到达后按行数收缩视口高度（行少时内容垂直居中）。
 		m.lyricView.Height = m.lyricsHeight()
 		m.rebuildLyrics()
-	case ly.Plain != "":
-		m.lyrics = ly
-		m.lyricsState = lyricsPlain
-		m.lyricView.Height = m.lyricsHeight()
-		m.lyricView.SetContent(ly.Plain)
-	default:
+	} else {
 		m.lyricsState = lyricsNone
 	}
 	return m
@@ -419,15 +442,8 @@ func (m homeModel) setSize(width, height int) homeModel {
 // lyricLineCount 歌词总行数（synced = 同步歌词行数；plain = 纯文本行数；
 // 其他态 = 0）。用于歌词行数少于视口时收缩视口高度实现内容垂直居中。
 func (m homeModel) lyricLineCount() int {
-	switch m.lyricsState {
-	case lyricsSynced:
-		if m.lyrics != nil {
-			return len(m.lyrics.Lines)
-		}
-	case lyricsPlain:
-		if m.lyrics != nil && m.lyrics.Plain != "" {
-			return len(strings.Split(m.lyrics.Plain, "\n"))
-		}
+	if m.lyricsState == lyricsSynced && m.lyrics != nil {
+		return len(m.lyrics.Lines)
 	}
 	return 0
 }
@@ -445,8 +461,16 @@ func (m homeModel) lyricsHeight() int {
 	if maxH > lyricMaxLines {
 		maxH = lyricMaxLines
 	}
+	// AI 来源标识占歌词列 1 行：视口最高收缩 1 行，避免标识 + 内容
+	// 溢出中间区推挤底部控制栏（回归：TestHomeLyricsHeightReservesAITag）。
+	if m.lyrics != nil && m.lyrics.Source == lyrics.LyricsSourceAI {
+		maxH--
+	}
 	if n := m.lyricLineCount(); n > 0 && n < maxH {
 		return n
+	}
+	if maxH < 1 {
+		return 1
 	}
 	return maxH
 }
@@ -536,14 +560,21 @@ func (m homeModel) lyricsColumnView() string {
 		return m.centerLyrics(lipgloss.NewStyle().Faint(true).Render(m.spinner.View() + " 歌词加载中…"))
 	case lyricsNone:
 		return m.centerLyrics(lipgloss.NewStyle().Faint(true).Render("暂无歌词"))
-	case lyricsSynced, lyricsPlain:
+	case lyricsSynced:
 		// 歌词文本以屏幕中心为基准水平居中：viewport 输出每行已 pad 到
 		// 列宽（左对齐），重新计算前导空格使文本中心 ≈ 屏幕中心。
 		// （歌词列内居中会让文本整体偏右 ~15 列：歌词列起点 = 封面右缘
 		//  + gap = 32，列内居中 → 文本中心 = 32 + 列宽/2 = 76 ≠ 屏幕中心 60。
 		//  注：viewport 的 Style.Align 不生效——bubbles viewport.View 会把
 		//  Style 的 Width/Height Unset 后再 Render。）
-		return m.centerLyrics(m.lyricView.View())
+		content := m.lyricView.View()
+		// AI 增强路径来源标识：歌词块上方一行小字（不参与视口滚动数学，
+		// 不影响 scrollLyricsTo 当前行居中）。
+		if m.lyrics != nil && m.lyrics.Source == lyrics.LyricsSourceAI {
+			tag := lipgloss.NewStyle().Faint(true).Render("〔AI 匹配〕")
+			return m.centerLyrics(tag + "\n" + content)
+		}
+		return m.centerLyrics(content)
 	}
 	return ""
 }
@@ -619,7 +650,7 @@ func (m homeModel) controlBarView() string {
 	if leftW < leftMinW {
 		leftW = leftMinW
 	}
-	left := ansi.Truncate(t.Title+" - "+t.Artist, leftW, "…")
+	left := ansi.Truncate(m.trackLabel(), leftW, "…")
 	// 补位按 left 实际显示宽计算（而非 leftW 上限）：标题短于左栏宽/截断符
 	// 使 left 不足 leftW 时，差额不补齐会导致中栏/右栏整体贴左偏移——
 	// 渲染与命中区间（controlBarLayout）错位，且右侧大片空白。

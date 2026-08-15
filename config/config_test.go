@@ -175,3 +175,135 @@ func TestSaveRoundtrip(t *testing.T) {
 		t.Errorf("tmp 文件残留: %v", err)
 	}
 }
+
+// ── OpenAI 配置节 ─────────────────────────────────────────────────
+
+func TestLoadOpenAIMissingDisabled(t *testing.T) {
+	// 配置无 openai 节：APIKey 为空 = AI 路径完全禁用
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"cache":{"enabled":false}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OpenAI.APIKey != "" {
+		t.Errorf("APIKey = %q, want 空（未配置 = 禁用）", cfg.OpenAI.APIKey)
+	}
+	if cfg.OpenAI.Model != DefaultOpenAIModel {
+		t.Errorf("Model = %q, want 默认 %q", cfg.OpenAI.Model, DefaultOpenAIModel)
+	}
+}
+
+func TestLoadOpenAIKeyEnablesModelDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"openai":{"api_key":"sk-123"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OpenAI.APIKey != "sk-123" {
+		t.Errorf("APIKey = %q, want sk-123", cfg.OpenAI.APIKey)
+	}
+	if cfg.OpenAI.Model != DefaultOpenAIModel {
+		t.Errorf("Model = %q, want 默认 %q", cfg.OpenAI.Model, DefaultOpenAIModel)
+	}
+}
+
+func TestLoadOpenAIExplicitEmptyKeyDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"openai":{"api_key":"","model":"gpt-4o"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OpenAI.APIKey != "" {
+		t.Errorf("APIKey = %q, want 空（显式空 key = 禁用）", cfg.OpenAI.APIKey)
+	}
+}
+
+func TestLoadOpenAIExplicitValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"openai":{"api_key":"sk-456","model":"gpt-4o-mini"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OpenAI.APIKey != "sk-456" || cfg.OpenAI.Model != "gpt-4o-mini" {
+		t.Errorf("got %+v, want sk-456/gpt-4o-mini", cfg.OpenAI)
+	}
+}
+
+func TestLoadOpenAIExplicitEmptyModelDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"openai":{"api_key":"sk-456","model":""}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OpenAI.Model != DefaultOpenAIModel {
+		t.Errorf("Model = %q, want 默认 %q", cfg.OpenAI.Model, DefaultOpenAIModel)
+	}
+	if cfg.OpenAI.APIKey != "sk-456" {
+		t.Errorf("APIKey = %q, want sk-456", cfg.OpenAI.APIKey)
+	}
+}
+
+func TestSaveRoundtripOpenAI(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "config.json")
+	cfg := &Config{
+		Cache:  cache.Options{Enabled: false, MaxEntries: 42, Dir: "/tmp/some-cache"},
+		OpenAI: OpenAI{APIKey: "sk-789", Model: "gpt-4o-mini"},
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.OpenAI != cfg.OpenAI {
+		t.Errorf("openai roundtrip 不一致: got %+v, want %+v", got.OpenAI, cfg.OpenAI)
+	}
+}
+
+// TestSavePerms0600 配置文件含 OpenAI API key：写盘权限必须 0600
+// （其他本地用户不可读）。
+func TestSavePerms0600(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := &Config{OpenAI: OpenAI{APIKey: "sk-secret", Model: "gpt-4o-mini"}}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("权限 = %o, want 600", perm)
+	}
+	// 加载后再存（Load→Save 路径）同样 0600
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := got.Save(path); err != nil {
+		t.Fatalf("Save2: %v", err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("重存后权限 = %o, want 600", perm)
+	}
+}
