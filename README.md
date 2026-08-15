@@ -1,8 +1,8 @@
 # 🎵 music-tui
 
-一个基于 YouTube 的终端音乐播放器：搜索即播、同步歌词、播放队列、播放列表与历史，全部在一个 TUI 里完成。
+一个基于 YouTube 的终端音乐播放器：搜索即播、同步歌词、播放队列、播放列表与历史，全部在一个 TUI 里完成。播放列表也支持添加本地音频（文件/目录扫描，mpv 直接播放）。
 
-> A terminal music player for YouTube, built with Go & Bubble Tea — search, queue, synced lyrics, playlists and history, all in one TUI.
+> A terminal music player for YouTube, built with Go & Bubble Tea — search, queue, synced lyrics, playlists and history, all in one TUI. Local audio files can be added to playlists (file/directory scan) and played directly via mpv.
 
 
 
@@ -120,6 +120,7 @@ go build -o music-tui .
 |---|---|
 | `Enter` | 概览：进入列表详情；详情：从选中曲播放整个列表 |
 | `p` | 概览：播放整个列表；详情：同 `Enter` |
+| `l` | 添加本地路径（音频文件或目录）到选中列表（概览页） |
 | `n` / `r` / `d` | 新建 / 重命名 / 删除列表（详情页 `d` 为移除歌曲） |
 | `Esc` / `←` | 详情页返回概览 |
 | `s` / `y` / `u` | YT Music：登录设置 / 同步全部歌单 / 导入歌单链接（概览页） |
