@@ -679,28 +679,29 @@ func (p playlistModel) view() string {
 	case plSyncSetup:
 		return p.setupView()
 	case plDetail:
-		if len(p.detail.Items()) == 0 {
-			return lipgloss.NewStyle().
-				Padding(1, 0).
-				Faint(true).
-				Render("列表为空\n\n在搜索/历史页选中歌曲后按 p 添加到播放列表")
-		}
 		hint := "Enter 从选中曲播放整个列表 · a 加入队列 · d 移除 · Esc 返回"
 		if p.ytSyncNames[p.curName] {
 			hint += " · r 刷新"
 		}
-		return p.detail.View() + "\n" +
-			lipgloss.NewStyle().Faint(true).Render(hint)
+		if len(p.detail.Items()) == 0 {
+			content := lipgloss.NewStyle().
+				Padding(1, 0).
+				Faint(true).
+				Render("列表为空\n\n在搜索/历史页选中歌曲后按 p 添加到播放列表")
+			return bottomHint(p.height, content, hint)
+		}
+		return bottomHint(p.height, p.detail.View(), hint)
 	default:
-		status := p.ytStatusBlock()
+		hint := "Enter 查看 · n 新建 · r 重命名 · d 删除 · s 登录设置 · y 同步全部 · u 导入"
+		content := p.ytStatusBlock()
 		if len(p.lists) == 0 {
-			return status + "\n" + lipgloss.NewStyle().
+			content += "\n" + lipgloss.NewStyle().
 				Padding(1, 0).
 				Faint(true).
 				Render("暂无播放列表\n\n按 n 新建播放列表")
+			return bottomHint(p.height, content, hint)
 		}
-		return status + "\n" + p.overview.View() + "\n" +
-			lipgloss.NewStyle().Faint(true).Render("Enter 查看 · n 新建 · r 重命名 · d 删除 · s 登录设置 · y 同步全部 · u 导入")
+		return bottomHint(p.height, content+"\n"+p.overview.View(), hint)
 	}
 }
 
@@ -730,7 +731,8 @@ func (p playlistModel) ytStatusBlock() string {
 }
 
 // setupView 渲染登录设置视图：标题 + 当前状态行 + 菜单/浏览器列表
-// （输入子层附加输入框）。
+// （输入子层附加输入框）。setup 列表高度按子状态动态调整，
+// 保证提示行恒在页面内容区最后一行（主菜单 h-4、输入子层 h-6）。
 func (p playlistModel) setupView() string {
 	title := "YT Music 登录设置"
 	if p.setupSub == setupBrowser {
@@ -745,12 +747,18 @@ func (p playlistModel) setupView() string {
 	}
 	head := lipgloss.NewStyle().Bold(true).Render(title) + "\n" +
 		lipgloss.NewStyle().Faint(true).Render("当前状态："+status)
-	body := p.setup.View()
+	extra := 0
 	if p.setupSub == setupCookiesInput || p.setupSub == setupPasteInput {
+		extra = 2
+	}
+	if p.height > 0 { // 尚未收到 WindowSizeMsg 时保持初始高度（旧测试直接断言菜单项可见）
+		p.setup.SetSize(p.width, p.height-4-extra)
+	}
+	body := p.setup.View()
+	if extra > 0 {
 		body += "\n\n" + p.input.View()
 	}
-	body += "\n" + lipgloss.NewStyle().Faint(true).Render("↑↓ 选择 · Enter 确认 · Esc 返回")
-	return head + "\n\n" + body
+	return bottomHint(p.height, head+"\n\n"+body, "↑↓ 选择 · Enter 确认 · Esc 返回")
 }
 
 // ytLoginMethodLabel 返回当前登录方式的展示名（浏览器方式显示浏览器名）。
