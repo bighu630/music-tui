@@ -125,3 +125,12 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 实现：UI 集成（登录设置/同步全部/URL 导入/刷新）commit 77a1d27
 - [x] 全量验证 build/vet/test -race 全绿
 - [ ] 验收：用户实际登录（选浏览器或 cookies.txt）→ 同步全部歌单 → 播放歌单内歌曲 → 刷新去重 → 无 cookie 时 URL 导入公开歌单（需用户配合）
+
+## Toast 通知追加需求（用户已确认方案 A：底部常驻状态栏 + 右下角浮层）
+
+- [x] 方案确认（toast 通知式：临时浮现、定时自动消失、不参与布局；底部常驻状态栏；错误/警告 5s、成功/信息 3s；新 toast 覆盖旧 toast；全通道统一）
+- [x] 设计文档 docs/superpowers/specs/2026-08-15-toast-notification-design.md（commit 582aea5）
+- [x] 实现：ui/toast.go 状态机（单条覆盖 + id 匹配过期）+ root.go 52 处消息路由统一走 showToast + 底部常驻状态栏（模式/队列位置/标题）+ toast 浮层覆盖状态栏上方一行右端（行数不变零跳动）+ setSize Height-3 ✅（commit 939735b/3da1e66/fdd4811，已合并 master ca1ab24）
+- [x] 测试：toast 状态机 4 单测 + 生命周期/定时器 cmd 集成 + 布局稳定回归（含/不含 toast 逐行对比）+ 超宽 toast 防折行 + 窄窗口状态栏截断，全量 build/vet/test -race 全绿 ✅
+- [x] review 循环：2 轮（超宽 toast 折行修复 TruncateLeft 保句尾、ANSI reset、窄窗口 rightMax 动态截断、停止态 ⏹、极窄窗口 1-2 列截断、测试严格化 21 列触发回归）✅
+- [ ] 验收：真实终端触发播放失败 → toast 右下浮现 3-5s 自动消失 → 排版零跳动 → 状态栏恒在（待用户确认）
