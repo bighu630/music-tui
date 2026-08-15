@@ -546,10 +546,10 @@ func (m homeModel) lyricsColumnView() string {
 		content := m.lyricView.View()
 		// AI 增强路径来源标识：歌词块上方一行小字（不参与视口滚动数学，
 		// 不影响 scrollLyricsTo 当前行居中）。
-		if m.lyrics != nil && m.lyrics.Source == lyrics.LyricsSourceAI {
-			tag := lipgloss.NewStyle().Faint(true).Render("〔AI 匹配〕")
-			return m.centerLyrics(tag + "\n" + content)
-		}
+		// if m.lyrics != nil && m.lyrics.Source == lyrics.LyricsSourceAI {
+		// 	tag := lipgloss.NewStyle().Faint(true).Render("〔AI 匹配〕")
+		// 	return m.centerLyrics(tag + "\n" + content)
+		// }
 		return m.centerLyrics(content)
 	}
 	return ""
