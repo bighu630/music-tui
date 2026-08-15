@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"strings"
 	"time"
 
+	"music-tui/logger"
 	"music-tui/model"
 )
 
@@ -78,6 +78,7 @@ var aiIdentifyBudget = 25 * time.Second
 // 覆盖原始标题），Source 标 ai；纯确定性兜底（2 步）不携带。
 func (e *EnhancedClient) Fetch(ctx context.Context, track model.Track) (FetchResult, error) {
 	if e.ai == nil {
+		logger.Debug("歌词: AI 未配置，走确定性匹配: %s - %s", track.Title, track.Artist)
 		return e.lrclib.Fetch(ctx, track)
 	}
 	aiCtx, cancel := context.WithTimeout(ctx, aiIdentifyBudget)
@@ -85,14 +86,17 @@ func (e *EnhancedClient) Fetch(ctx context.Context, track model.Track) (FetchRes
 	res, ok := e.identify(aiCtx, track)
 	if !ok || !res.IsSong || strings.TrimSpace(res.Title) == "" {
 		// AI 失败/非歌曲/空标题：确定性匹配兜底（与无 AI 行为一致）
+		logger.Debug("歌词: AI 未命中(%v/%v)，确定性兜底: %s - %s", ok, res.IsSong, track.Title, track.Artist)
 		return e.lrclib.Fetch(ctx, track)
 	}
 	if cached, ok := e.lrcCache.Get(res.Title, res.Artist); ok {
+		logger.Debug("歌词: AI 结果缓存命中: %s / %s", res.Title, res.Artist)
 		cached.Source = LyricsSourceAI
 		return FetchResult{Lyrics: cached, Title: res.Title, Artist: res.Artist}, nil
 	}
 	ly, err := e.lrclib.FetchForQuery(ctx, res.Title, res.Artist, track.Duration)
 	if err == nil {
+		logger.Debug("歌词: lrclib 严格重查命中: %s / %s", res.Title, res.Artist)
 		e.lrcCache.Put(res.Title, res.Artist, ly)
 		ly.Source = LyricsSourceAI
 		return FetchResult{Lyrics: ly, Title: res.Title, Artist: res.Artist}, nil
@@ -103,6 +107,7 @@ func (e *EnhancedClient) Fetch(ctx context.Context, track model.Track) (FetchRes
 	// 中文歌词源链（网易云 → QQ）：匿名接口，命中入 LRC 缓存；
 	// 源错误只记日志继续（一个源挂了不影响链）。
 	if ly, ok := e.fetchCN(ctx, res.Title, res.Artist, track.Duration); ok {
+		logger.Debug("歌词: 中文源命中: %s / %s", res.Title, res.Artist)
 		e.lrcCache.Put(res.Title, res.Artist, ly)
 		ly.Source = LyricsSourceAI
 		return FetchResult{Lyrics: ly, Title: res.Title, Artist: res.Artist}, nil
@@ -113,6 +118,7 @@ func (e *EnhancedClient) Fetch(ctx context.Context, track model.Track) (FetchRes
 		return FetchResult{}, err
 	}
 	ly = det.Lyrics
+	logger.Debug("歌词: 确定性兜底命中: %s - %s", track.Title, track.Artist)
 	e.lrcCache.Put(res.Title, res.Artist, ly)
 	ly.Source = LyricsSourceAI
 	return FetchResult{Lyrics: ly, Title: res.Title, Artist: res.Artist}, nil
@@ -125,7 +131,7 @@ func (e *EnhancedClient) fetchCN(ctx context.Context, title, artist string, dura
 	for _, src := range e.cnSources {
 		songs, err := src.Search(ctx, title, artist)
 		if err != nil {
-			log.Printf("歌词源搜索失败（继续下一源）: %v", err)
+			logger.Warn("歌词源搜索失败（继续下一源）: %v", err)
 			continue
 		}
 		for _, s := range songs {
@@ -136,7 +142,7 @@ func (e *EnhancedClient) fetchCN(ctx context.Context, title, artist string, dura
 			}
 			ly, err := src.Lyric(ctx, s.ID)
 			if err != nil {
-				log.Printf("歌词源取词失败（继续下一候选）: %v", err)
+				logger.Warn("歌词源取词失败（继续下一候选）: %v", err)
 				continue
 			}
 			if ly != nil {
@@ -171,9 +177,10 @@ func (e *EnhancedClient) identify(ctx context.Context, track model.Track) (AIRes
 	if err != nil {
 		// 失败不缓存（瞬时错误下次重试）；打日志便于诊断——
 		// 曾静默降级导致无法区分「AI 未配置/超时/key 无效/网络」
-		log.Printf("AI 歌词识别失败（降级确定性结果）: %v", err)
+		logger.Warn("AI 歌词识别失败（降级确定性结果）: %v", err)
 		return AIResult{}, false
 	}
+	logger.Debug("AI 识别完成: %q → %q / %q (is_song=%v)", track.Title, r.Title, r.Artist, r.IsSong)
 	e.aiCache.Put(key, r)
 	return r, true
 }
