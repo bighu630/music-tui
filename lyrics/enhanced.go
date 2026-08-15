@@ -49,9 +49,9 @@ func NewEnhancedClient(l *Client, ai *OpenAIClient, cacheDir string) (*EnhancedC
 }
 
 // aiIdentifyBudget AI 识别子预算：大模型首 token 慢（实测 qwen3.7-plus
-// 11s），独立限时防止吃光 30s 总预算饿死严格重查/确定性兜底；
-// 包级变量（测试可调小）。
-var aiIdentifyBudget = 15 * time.Second
+// 11.4s，高峰期可达 20s+；识别失败时终端会打印原因）。独立限时防止
+// 吃光总预算饿死严格重查/确定性兜底；包级变量（测试可调小）。
+var aiIdentifyBudget = 25 * time.Second
 
 // Fetch 执行 AI 优先的增强匹配流程（用户确认：所有歌词请求都走 AI 判断）：
 //  1. AI 未配置 → 纯确定性匹配（行为与无增强一致）；

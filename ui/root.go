@@ -802,6 +802,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case lyricsResultMsg:
 		// 过期结果（已切歌）丢弃
 		if m.state.Track != nil && msg.trackID == m.state.Track.ID {
+			// 非 NotFound 错误（lrclib 超时/服务端错误）打日志便于诊断：
+			// AI 识别失败已在 lyrics 包打印，此处覆盖 lrclib 链。
+			if msg.err != nil && !errors.Is(msg.err, lyrics.ErrNotFound) {
+				log.Printf("歌词拉取失败（lrclib 链）: %v", msg.err)
+			}
 			m.home = m.home.setLyrics(msg.err, msg.lyrics)
 			if msg.err == nil && msg.title != "" {
 				// AI 识别结果：全局展示覆盖（控制栏/状态栏/队列当前项）
@@ -1475,10 +1480,11 @@ func resumeCmd(m Model) tea.Cmd {
 
 func fetchLyricsCmd(c lyrics.Fetcher, track model.Track) tea.Cmd {
 	return func() tea.Msg {
-		// 30s 总预算：AI 识别（子预算 15s，大模型首 token 慢——实测
-		// qwen3.7-plus 11s）+ 严格重查 + 确定性兜底。曾用 10s：AI 请求在
-		// 等待期被掐断，识别永不成功（回归：ai.jsonl 无记录）。
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// 40s 总预算：AI 识别（子预算 25s，大模型首 token 慢——实测
+		// qwen3.7-plus 11.4s，高峰期 20s+）+ 严格重查 + 确定性兜底。
+		// 曾用 10s：AI 请求在等待期被掐断，识别永不成功（回归：
+		// ai.jsonl 无记录）。
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		defer cancel()
 		res, err := c.Fetch(ctx, track)
 		return lyricsResultMsg{trackID: track.ID, lyrics: res.Lyrics, title: res.Title, artist: res.Artist, err: err}
