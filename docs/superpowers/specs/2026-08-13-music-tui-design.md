@@ -330,13 +330,19 @@ mpris/
 D-Bus → 播放器（方法转调 Player 接口）：
 - Play / Pause / PlayPause / Seek(offset) / SetPosition(校验 trackId 匹配后 Seek(abs-current))
 - Stop → Pause + Seek(0)（无队列时最接近停止语义）
-- Next / Previous：CanGoNext=CanGoPrevious=false，方法返回 NotSupported（第一版无播放队列）
+- Next / Previous：转调队列控制器播放上一首/下一首（与首页 ,/. 键同一编排路径）；
+  空队列返回 NotSupported
 - OpenUri：返回 NotSupported
 - 错误统一返回 *dbus.Error
 
+队列控制（13.6 之后版本追加，详见 2026-08-15-mpris-queue-control-design.md）：
+- Next/Previous/LoopStatus/Shuffle 经注入的 controller 接口转调 ui（bubbletea 消息循环，
+  与 ,/. 键、s 键同一编排路径）；ui 模式变更经 SyncMode 回调投影同步 LoopStatus/Shuffle
+  （EmitTrue 广播 PropertiesChanged），双向同步闭环
+
 属性清单：
-- PlaybackStatus / Position / Metadata / Rate（固定 1.0，Min=Max=1.0）/ LoopStatus（固定 None）/ Shuffle（false）/ Volume（读写，映射 mpv volume）
-- CanControl / CanPlay / CanPause / CanSeek = true；CanGoNext / CanGoPrevious / CanQuit / CanRaise / HasTrackList = false
+- PlaybackStatus / Position / Metadata / Rate（固定 1.0，Min=Max=1.0）/ LoopStatus（读写，映射播放模式：Sequential→Playlist、RepeatOne→Track、Shuffle→Playlist；写 None 归入 Sequential）/ Shuffle（读写，映射随机模式开关）/ Volume（读写，映射 mpv volume）
+- CanControl / CanPlay / CanPause / CanSeek = true；CanGoNext / CanGoPrevious 动态（队列长度 >1 为 true，EmitTrue）；CanQuit / CanRaise / HasTrackList = false
 
 ### 13.4 降级策略
 - 先检查 DBUS_SESSION_BUS_ADDRESS 或使用 SessionBusPrivateNoAutoStartup（避免 godbus 自动 dbus-launch 泄漏进程）

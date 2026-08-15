@@ -1,8 +1,10 @@
 package queue
 
 import (
+	"fmt"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 
 	"music-tui/model"
@@ -1107,4 +1109,45 @@ func TestInsertNextAfterRemoveCurrent(t *testing.T) {
 	if next, ok := q.Next(); !ok || next.ID != "tx" {
 		t.Errorf("Next = %s/%v, want tx/true", next.ID, ok)
 	}
+}
+
+// TestConcurrentAccess 并发读+写队列不产生数据竞争（-race 下运行；
+// 服务 MPRIS 从 D-Bus goroutine 同步读 Len/Mode 的前提）。
+func TestConcurrentAccess(t *testing.T) {
+	q := New()
+	for i := 0; i < 50; i++ {
+		q.Add(model.Track{ID: fmt.Sprintf("t%d", i), Title: "t"})
+	}
+	q.SetMode(Shuffle)
+	var wg sync.WaitGroup
+	// 读者：D-Bus goroutine 模拟（Mode/Len/Tracks/Current/Snapshot）
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				_ = q.Mode()
+				_ = q.Len()
+				_ = q.CurrentIndex()
+				_, _ = q.Current()
+				_ = q.Tracks()
+				_ = q.Snapshot()
+			}
+		}()
+	}
+	// 写者：UI goroutine 模拟
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			q.Add(model.Track{ID: "x", Title: "x"})
+			q.Remove(0)
+			q.Next()
+			q.Prev()
+			q.SetMode(Sequential)
+			q.SetMode(Shuffle)
+			q.JumpTo(3)
+		}
+	}()
+	wg.Wait()
 }

@@ -18,6 +18,7 @@ import (
 
 	"music-tui/model"
 	"music-tui/player"
+	"music-tui/queue"
 )
 
 // 服务名与对象路径（MPRIS 规范固定值）。
@@ -63,6 +64,18 @@ type playerLike interface {
 	Volume() (float64, error)
 }
 
+// controller 是 mpris 服务依赖的队列控制能力：播放编排（Next/Previous）与
+// 播放模式读写。由 ui 层实现（与首页 ,/. 键、s 键同一编排路径），
+// main 组装时经 SetController 注入。与 mpris_unsupported.go 中定义保持一致
+// （两文件互斥编译，接口仅用于 SetController 签名匹配）。
+type controller interface {
+	PlayNext() error     // 播放下一首（与 , 键同一编排）；queue.ErrEmpty = 无曲可播
+	PlayPrevious() error // 播放上一首（与 . 键同一编排）；queue.ErrEmpty = 无曲可播
+	SetMode(queue.Mode)  // 绝对模式切换（与 s 键同一路径），恒成功（SetLoop 失败仅 toast）
+	Mode() queue.Mode    // 当前播放模式（并发安全）
+	Len() int            // 队列长度（并发安全）
+}
+
 // bus 是 Server 依赖的最小总线能力（生产为 *dbus.Conn，测试注入 fake）。
 type bus interface {
 	Emit(path dbus.ObjectPath, name string, values ...any) error
@@ -75,9 +88,20 @@ type propsStore interface {
 	GetMust(iface, name string) any
 }
 
+// ctrlRef 是 controller 的原子容器：atomic.Pointer 的 Load/Store 签名是 *T，
+// 接口类型不能直接作为类型参数（会退化为“指向接口的指针”），故用持有
+// 具体接口值的结构体包装；未注入时为 nil 指针（Store 前的零值，天然安全）。
+type ctrlRef struct{ c controller }
+
 // Server 是 MPRIS D-Bus 服务端：播放器事件推送属性，D-Bus 方法转调播放器。
 type Server struct {
 	p playerLike
+	// ctrl 队列控制注入（main 经 SetController 注入；nil = 未注入）。
+	// atomic.Pointer：SetController（main goroutine）与 D-Bus 回调/方法
+	// goroutine（Next/Previous/LoopStatus/Shuffle 回调、refreshNav）并发读写。
+	// 不用 s.mu 保护：回调在 prop 锁内执行，防止将来 handleEvent 在持 s.mu
+	// 时调 SetMust（prop 锁）引入嵌套持锁；atomic 无锁且语义清晰。
+	ctrl atomic.Pointer[ctrlRef]
 
 	conn     bus
 	props    propsStore
@@ -145,6 +169,9 @@ func (s *Server) Start() error {
 	if v, err := s.p.Volume(); err == nil {
 		s.props.SetMust(ifacePlayer, "Volume", clamp01(v/100))
 	}
+	// 补同步：SetController 在 Start 前调用时（main 先注入后 Start），
+	// 初始投影（LoopStatus/Shuffle/CanGoNext）在此补齐，不丢失。
+	s.syncFromController()
 
 	s.closeCh = make(chan struct{})
 	s.pumpDone = make(chan struct{})
@@ -181,6 +208,53 @@ func (s *Server) SetTrack(t *model.Track) {
 	s.mu.Lock()
 	s.track = t
 	s.mu.Unlock()
+}
+
+// SetController 注入队列控制器并初始化队列相关属性（LoopStatus/Shuffle/
+// CanGoNext/CanGoPrevious 按当前模式与队列长度投影）。幂等，可重复调用；
+// Start 前后均可调用（Start 前调用时属性存储未建，Start 导出 props 后由
+// syncFromController 补同步）。未注入（nil）时 Next/Previous 返回
+// NotSupported、写回调 Failed。
+func (s *Server) SetController(ctrl controller) {
+	s.ctrl.Store(&ctrlRef{c: ctrl})
+	s.syncFromController()
+}
+
+// syncFromController 按已注入 controller 的当前状态同步属性（Start 导出
+// props 后补同步：SetController 在 Start 前调用时初始投影不丢失；幂等）。
+func (s *Server) syncFromController() {
+	r := s.ctrl.Load()
+	if r == nil || r.c == nil || s.props == nil {
+		return
+	}
+	s.syncMode(r.c.Mode())
+	s.refreshNav()
+}
+
+// SyncMode 由 ui 在播放模式变更后调用：同步 LoopStatus/Shuffle 属性
+// （EmitTrue → PropertiesChanged 广播）。与 controller.SetMode 配合完成
+// 双向同步：D-Bus 写 → SetMode → ui 切换 → SyncMode 回写投影。
+func (s *Server) SyncMode(m queue.Mode) { s.syncMode(m) }
+
+func (s *Server) syncMode(m queue.Mode) {
+	if s.props == nil {
+		return
+	}
+	s.props.SetMust(ifacePlayer, "LoopStatus", loopStatusFor(m))
+	s.props.SetMust(ifacePlayer, "Shuffle", shuffleFor(m))
+}
+
+// refreshNav 按队列长度刷新 CanGoNext/CanGoPrevious（Len>1 才可跳转；
+// 单曲/空队列均不可）。调用时机：SetController、每次播放事件后、
+// 每次 Next/Previous 转调后。
+func (s *Server) refreshNav() {
+	r := s.ctrl.Load()
+	if s.props == nil || r == nil || r.c == nil {
+		return
+	}
+	can := r.c.Len() > 1
+	s.props.SetMust(ifacePlayer, "CanGoNext", can)
+	s.props.SetMust(ifacePlayer, "CanGoPrevious", can)
 }
 
 // pump 订阅播放器事件并同步到 MPRIS 属性；Close 或事件通道关闭时退出。
@@ -230,6 +304,8 @@ func (s *Server) handleEvent(ev player.Event) {
 	case player.ErrorEvent:
 		s.props.SetMust(ifacePlayer, "PlaybackStatus", "Stopped")
 	}
+	// 队列长度可能随播放推进变化：每次事件后刷新可跳转状态
+	s.refreshNav()
 }
 
 // propertyMap 定义两个 MPRIS 接口的全部属性（godbus/prop 新 API）。
@@ -246,17 +322,18 @@ func (s *Server) propertyMap() prop.Map {
 		},
 		ifacePlayer: {
 			"PlaybackStatus": {Value: "Stopped", Emit: prop.EmitTrue},
-			"LoopStatus":     {Value: "None", Emit: prop.EmitConst},
-			"Rate":           {Value: 1.0, Emit: prop.EmitConst},
-			"Shuffle":        {Value: false, Emit: prop.EmitConst},
-			"Metadata":       {Value: map[string]dbus.Variant{}, Emit: prop.EmitTrue},
+			"LoopStatus": {Value: "Playlist", Writable: true, Emit: prop.EmitTrue,
+				Callback: s.loopStatusCallback},
+			"Rate":     {Value: 1.0, Emit: prop.EmitConst},
+			"Shuffle":  {Value: false, Writable: true, Emit: prop.EmitTrue, Callback: s.shuffleCallback},
+			"Metadata": {Value: map[string]dbus.Variant{}, Emit: prop.EmitTrue},
 			"Volume": {Value: 1.0, Writable: true, Emit: prop.EmitTrue,
 				Callback: s.volumeCallback},
 			"Position":      {Value: int64(0), Emit: prop.EmitFalse},
 			"MinimumRate":   {Value: 1.0, Emit: prop.EmitConst},
 			"MaximumRate":   {Value: 1.0, Emit: prop.EmitConst},
-			"CanGoNext":     {Value: false, Emit: prop.EmitConst},
-			"CanGoPrevious": {Value: false, Emit: prop.EmitConst},
+			"CanGoNext":     {Value: false, Emit: prop.EmitTrue},
+			"CanGoPrevious": {Value: false, Emit: prop.EmitTrue},
 			"CanPlay":       {Value: true, Emit: prop.EmitConst},
 			"CanPause":      {Value: true, Emit: prop.EmitConst},
 			"CanSeek":       {Value: true, Emit: prop.EmitConst},
@@ -275,6 +352,37 @@ func (s *Server) volumeCallback(c *prop.Change) *dbus.Error {
 	if err := s.p.SetVolume(v * 100); err != nil {
 		return dbus.MakeFailedError(err)
 	}
+	return nil
+}
+
+// loopStatusCallback 处理客户端对 LoopStatus 的写入：校验枚举值并转调
+// 控制器切换播放模式。注意：回调在 Properties.Set 持锁期间执行，不得
+// 再读取本服务的 props（投影回写由 ui 经 SyncMode 完成）。
+func (s *Server) loopStatusCallback(c *prop.Change) *dbus.Error {
+	v, ok := c.Value.(string)
+	if !ok || (v != "None" && v != "Track" && v != "Playlist") {
+		return dbus.NewError("org.freedesktop.DBus.Error.InvalidArgs", nil)
+	}
+	r := s.ctrl.Load()
+	if r == nil || r.c == nil {
+		return dbus.MakeFailedError(errors.New("MPRIS 控制器未注入"))
+	}
+	r.c.SetMode(modeForLoopStatus(v, r.c.Mode()))
+	return nil
+}
+
+// shuffleCallback 处理客户端对 Shuffle 的写入：校验布尔并转调控制器。
+// 锁内约束同 loopStatusCallback。
+func (s *Server) shuffleCallback(c *prop.Change) *dbus.Error {
+	v, ok := c.Value.(bool)
+	if !ok {
+		return dbus.NewError("org.freedesktop.DBus.Error.InvalidArgs", nil)
+	}
+	r := s.ctrl.Load()
+	if r == nil || r.c == nil {
+		return dbus.MakeFailedError(errors.New("MPRIS 控制器未注入"))
+	}
+	r.c.SetMode(modeForShuffle(v, r.c.Mode()))
 	return nil
 }
 
@@ -355,11 +463,39 @@ func (h *playerHandler) SetPosition(trackId dbus.ObjectPath, position int64) *db
 	return nil
 }
 
-// Next 无播放队列，返回 NotSupported。
-func (h *playerHandler) Next() *dbus.Error { return notSupported() }
+// Next 转调队列控制器播放下一首（与首页 , 键同一编排路径）；
+// 空队列返回 NotSupported。
+func (h *playerHandler) Next() *dbus.Error {
+	r := h.s.ctrl.Load()
+	if r == nil || r.c == nil {
+		return notSupported()
+	}
+	if err := r.c.PlayNext(); err != nil {
+		if errors.Is(err, queue.ErrEmpty) {
+			return notSupported()
+		}
+		return dbus.MakeFailedError(err)
+	}
+	h.s.refreshNav()
+	return nil
+}
 
-// Previous 无播放队列，返回 NotSupported。
-func (h *playerHandler) Previous() *dbus.Error { return notSupported() }
+// Previous 转调队列控制器播放上一首（与首页 . 键同一编排路径）；
+// 空队列返回 NotSupported。
+func (h *playerHandler) Previous() *dbus.Error {
+	r := h.s.ctrl.Load()
+	if r == nil || r.c == nil {
+		return notSupported()
+	}
+	if err := r.c.PlayPrevious(); err != nil {
+		if errors.Is(err, queue.ErrEmpty) {
+			return notSupported()
+		}
+		return dbus.MakeFailedError(err)
+	}
+	h.s.refreshNav()
+	return nil
+}
 
 // OpenUri 不支持外部 URI 播放，返回 NotSupported。
 func (h *playerHandler) OpenUri(uri string) *dbus.Error { return notSupported() }
@@ -473,4 +609,45 @@ func clamp01(v float64) float64 {
 		return 1
 	}
 	return v
+}
+
+// loopStatusFor 映射播放模式到 MPRIS LoopStatus：单曲循环=Track；
+// 列表循环与随机（播完均回绕到队首，语义即列表循环）=Playlist。
+func loopStatusFor(m queue.Mode) string {
+	if m == queue.RepeatOne {
+		return "Track"
+	}
+	return "Playlist"
+}
+
+// shuffleFor 映射播放模式到 MPRIS Shuffle：仅随机模式为 true。
+func shuffleFor(m queue.Mode) bool { return m == queue.Shuffle }
+
+// modeForLoopStatus 映射 MPRIS LoopStatus 写入到播放模式。
+// Playlist 对 Shuffle 模式保持（随机模式下播完回绕，投影已是 Playlist，
+// 写 Playlist 不应关闭随机）；None 归入 Sequential（设计决策：无第四态）。
+func modeForLoopStatus(s string, cur queue.Mode) queue.Mode {
+	switch s {
+	case "Track":
+		return queue.RepeatOne
+	case "None":
+		return queue.Sequential
+	default: // "Playlist"
+		if cur == queue.Shuffle {
+			return cur
+		}
+		return queue.Sequential
+	}
+}
+
+// modeForShuffle 映射 MPRIS Shuffle 写入到播放模式：true → 随机模式；
+// false 仅当当前是随机模式时切回列表循环（关闭随机不动其他循环设置）。
+func modeForShuffle(b bool, cur queue.Mode) queue.Mode {
+	if b {
+		return queue.Shuffle
+	}
+	if cur == queue.Shuffle {
+		return queue.Sequential
+	}
+	return cur
 }
