@@ -2250,3 +2250,54 @@ func TestAITrackNotifiesMPRIS(t *testing.T) {
 		t.Errorf("无 AI 信息不应触发通知, got %d", len(got))
 	}
 }
+
+// TestGlobalKeysYieldToFilter 队列页过滤聚焦时：空格/a/q 让位给过滤输入框，
+// 数字键仍切页，过滤态跨页切换保持。
+func TestGlobalKeysYieldToFilter(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m.queue.Add(testTrack("t1"))
+	m = m.syncQueueViews()
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+
+	// 空格 → 过滤词而非播放/暂停
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if m.queuePage.filterInput.Value() != " " {
+		t.Errorf("空格应输入过滤词, got %q", m.queuePage.filterInput.Value())
+	}
+	// a → 过滤词而非选择器
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if m.plPicker != nil {
+		t.Fatal("过滤聚焦时 a 不应打开选择器")
+	}
+	// q → 过滤词而非退出
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	for _, msg := range execCmds(cmd) {
+		if _, ok := msg.(tea.QuitMsg); ok {
+			t.Fatal("过滤聚焦时 q 不应退出")
+		}
+	}
+	// 数字键仍切页（历史页），过滤态跨页保持
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
+	if m.current != pageHistory {
+		t.Fatalf("数字 5 应切到历史页, got %v", m.current)
+	}
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	if !m.queuePage.filtering || !m.queuePage.filterInput.Focused() {
+		t.Fatal("返回队列页后过滤态应保持")
+	}
+}
+
+// TestQueueFilterHintOnLastLine 过滤态提示行应在内容区最后一行（聚焦/确认两态）。
+func TestQueueFilterHintOnLastLine(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.queue.Add(testTrack("t1"))
+	m = m.syncQueueViews()
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	assertHintOnLastLine(t, m, "Enter 确认")
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 确认
+	assertHintOnLastLine(t, m, "Esc 退出过滤")
+}
