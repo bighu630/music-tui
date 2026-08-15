@@ -1570,6 +1570,30 @@ func TestPlaylistsHintOnLastLine(t *testing.T) {
 	assertHintOnLastLine(t, m, "↑↓ 选择 · Enter 确认")
 }
 
+// 登录设置浏览器二级选择时提示行同样贴底（hint 文案去掉 Esc 返回）。
+func TestPlaylistsHintOnLastLineBrowserSub(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m.plPage = m.plPage.enterSetupBrowser()
+	assertHintOnLastLine(t, m, "↑↓ 选择 · Enter 确认")
+}
+
+// TestPlaylistsHintOnLastLineManyLists 概览列表多到出现分页行时提示行仍贴底。
+func TestPlaylistsHintOnLastLineManyLists(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	for i := 0; i < 9; i++ {
+		if _, err := m.pl.Create(fmt.Sprintf("列表%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.plPage = m.plPage.setLists(m.pl.Lists())
+	assertHintOnLastLine(t, m, "Enter 查看")
+}
+
 // 概览/详情空态时提示行同样贴底。
 func TestPlaylistsEmptyHintOnLastLine(t *testing.T) {
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)

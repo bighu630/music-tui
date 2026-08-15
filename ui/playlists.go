@@ -751,7 +751,11 @@ func (p playlistModel) setupView() string {
 	if p.setupSub == setupCookiesInput || p.setupSub == setupPasteInput {
 		extra = 2
 	}
-	if p.height > 0 { // 尚未收到 WindowSizeMsg 时保持初始高度（旧测试直接断言菜单项可见）
+	// 列表高度按子状态动态计算（主菜单 h-4、输入子层 h-6）。setupView 是值
+	// 接收者，SetSize 只改副本——但每次渲染都重算，实际生效高度恒等于渲染
+	// 用高度，故安全。未收到 WindowSizeMsg（p.height=0）或窗口极小
+	// （p.height < 4+extra）时保持初始高度，避免负高度压坏列表。
+	if p.height >= 4+extra {
 		p.setup.SetSize(p.width, p.height-4-extra)
 	}
 	body := p.setup.View()

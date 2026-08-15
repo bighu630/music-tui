@@ -16,8 +16,11 @@ func TestBottomHintFillsHeight(t *testing.T) {
 	if lines[0] != "a" || lines[1] != "b" {
 		t.Errorf("content 应顶部对齐, got %q %q", lines[0], lines[1])
 	}
-	if lines[21] != "hint" {
-		t.Errorf("hint 应在最后一行, got %q", lines[21])
+	if stripANSI(lines[21]) != "hint" {
+		t.Errorf("hint 应在最后一行, got %q", stripANSI(lines[21]))
+	}
+	if !strings.Contains(lines[21], "\x1b[2m") {
+		t.Errorf("末行 hint 应为 faint 样式, got %q", lines[21])
 	}
 }
 
@@ -26,8 +29,8 @@ func TestBottomHintContentFillsExactly(t *testing.T) {
 	content := strings.Repeat("x\n", 20) + "x" // 21 行
 	got := bottomHint(22, content, "hint")
 	lines := strings.Split(got, "\n")
-	if len(lines) != 22 || lines[21] != "hint" {
-		t.Errorf("content=h-1 时应零 padding: %d 行, last=%q", len(lines), lines[21])
+	if len(lines) != 22 || stripANSI(lines[21]) != "hint" {
+		t.Errorf("content=h-1 时应零 padding: %d 行, last=%q", len(lines), stripANSI(lines[21]))
 	}
 }
 
@@ -35,8 +38,8 @@ func TestBottomHintContentFillsExactly(t *testing.T) {
 func TestBottomHintEmptyContent(t *testing.T) {
 	got := bottomHint(5, "", "hint")
 	lines := strings.Split(got, "\n")
-	if len(lines) != 5 || lines[4] != "hint" {
-		t.Errorf("空 content 行数 = %d, last=%q, want 5/hint", len(lines), lines[4])
+	if len(lines) != 5 || stripANSI(lines[4]) != "hint" {
+		t.Errorf("空 content 行数 = %d, last=%q, want 5/hint", len(lines), stripANSI(lines[4]))
 	}
 }
 
@@ -45,7 +48,7 @@ func TestBottomHintEmptyContent(t *testing.T) {
 func TestBottomHintContentTooTall(t *testing.T) {
 	got := bottomHint(5, strings.Repeat("x\n", 9)+"x", "hint")
 	lines := strings.Split(got, "\n")
-	if len(lines) != 11 || lines[10] != "hint" {
+	if len(lines) != 11 || stripANSI(lines[10]) != "hint" {
 		t.Errorf("超高超时 hint 仍应跟在 content 后: %d 行", len(lines))
 	}
 }
@@ -61,5 +64,8 @@ func assertHintOnLastLine(t *testing.T, m Model, hint string) {
 	}
 	if got := stripANSI(lines[23]); !strings.Contains(got, hint) {
 		t.Errorf("最后一行应为提示行, got %q, want 含 %q", got, hint)
+	}
+	if !strings.Contains(lines[23], "\x1b[2m") {
+		t.Errorf("最后一行应为 faint 样式, got %q", lines[23])
 	}
 }

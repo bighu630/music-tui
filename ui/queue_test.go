@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -688,6 +689,18 @@ func TestQueueHintOnLastLine(t *testing.T) {
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
 	m.queue.Add(testTrack("t1"))
 	m.queue.Add(testTrack("t2"))
+	m.queuePage = m.queuePage.sync(m.queue)
+	assertHintOnLastLine(t, m, "Enter 跳转播放")
+}
+
+// TestQueueHintOnLastLineManyItems 队列项多到触发列表分页行时提示行仍贴底。
+func TestQueueHintOnLastLineManyItems(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	for i := 0; i < 10; i++ {
+		m.queue.Add(testTrack(fmt.Sprintf("t%d", i)))
+	}
 	m.queuePage = m.queuePage.sync(m.queue)
 	assertHintOnLastLine(t, m, "Enter 跳转播放")
 }
