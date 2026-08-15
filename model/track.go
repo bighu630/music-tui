@@ -12,6 +12,9 @@ type Track struct {
 	CoverURL string  // 封面图 URL（maxresdefault 优先）
 }
 
+// SourceLocal 是本地文件来源标识：歌曲来自本地路径扫描（mpv 直接播放本地文件）。
+const SourceLocal = "local"
+
 // Playlist 一个远端歌单的内容（标题 + 歌曲列表）。
 type Playlist struct {
 	ID     string
