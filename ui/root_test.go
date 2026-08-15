@@ -2414,3 +2414,113 @@ func TestGlobalKeysYieldToFilterHistory(t *testing.T) {
 		}
 	}
 }
+
+// TestQueueMoveRoundTripCurrentIdx 全链路（按键 → queueMoveMsg → 回灌）：
+// 移动非当前曲时 currentIdx 不变；移动当前曲本身时 currentIdx 跟随同一首歌；
+// 回灌后选中项跟随被移动曲目，且移动不触发播放。
+func TestQueueMoveRoundTripCurrentIdx(t *testing.T) {
+	// 阶段 1：队列 [t1▶,t2,t3] current=0，选中 t2 下移一格
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	for _, msg := range execCmds(cmd) {
+		m, _ = update(m, msg)
+	}
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 队列页
+
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t2
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyDown}) // t2(1) → 2
+	mv := moveMsgOf(t, cmd)
+	if mv.from != 1 || mv.to != 2 {
+		t.Fatalf("queueMoveMsg from/to = %d/%d, want 1/2", mv.from, mv.to)
+	}
+	m, _ = update(m, mv) // 回灌 → queue=[t1,t3,t2]
+	if got := idsOf(m.queue.Tracks()); !sameIDs(got, []string{"t1", "t3", "t2"}) {
+		t.Fatalf("移动后队列 = %v, want [t1 t3 t2]", got)
+	}
+	if m.queue.CurrentIndex() != 0 {
+		t.Errorf("移动非当前曲后 CurrentIndex = %d, want 0（t1 仍是当前曲）", m.queue.CurrentIndex())
+	}
+	if it, ok := m.queuePage.list.SelectedItem().(queueItem); !ok || it.track.ID != "t2" {
+		t.Errorf("回灌后选中应跟随 t2, got %+v", it)
+	}
+	if fp.playCount() != 1 {
+		t.Errorf("移动不应触发播放, playCount = %d", fp.playCount())
+	}
+
+	// 阶段 2（新模型）：移动当前曲本身 t1(0) → 1 → currentIdx 跟随到 1
+	fp2 := newFakePlayer()
+	m2 := newTestModel(t, fp2, &fakeSearchAdapter{}, nil)
+	m2, cmd = m2.startPlay(testTrack("t1"))
+	for _, msg := range execCmds(cmd) {
+		m2, _ = update(m2, msg)
+	}
+	m2, _ = update(m2, trackAppendMsg{track: testTrack("t2")})
+	m2, _ = update(m2, trackAppendMsg{track: testTrack("t3")})
+	m2, _ = update(m2, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m2, _ = update(m2, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m2, cmd = update(m2, tea.KeyMsg{Type: tea.KeyDown}) // t1(0) → 1
+	mv2 := moveMsgOf(t, cmd)
+	if mv2.from != 0 || mv2.to != 1 {
+		t.Fatalf("queueMoveMsg from/to = %d/%d, want 0/1", mv2.from, mv2.to)
+	}
+	m2, _ = update(m2, mv2) // 回灌 → queue=[t2,t1,t3]
+	if got := idsOf(m2.queue.Tracks()); !sameIDs(got, []string{"t2", "t1", "t3"}) {
+		t.Fatalf("移动当前曲后队列 = %v, want [t2 t1 t3]", got)
+	}
+	if m2.queue.CurrentIndex() != 1 {
+		t.Errorf("移动当前曲后 CurrentIndex = %d, want 1（跟随同一首歌）", m2.queue.CurrentIndex())
+	}
+	if cur, _ := m2.queue.Current(); cur.ID != "t1" {
+		t.Errorf("当前曲应仍为 t1, got %s", cur.ID)
+	}
+	if fp2.playCount() != 1 || fp2.lastPlayed() != testTrack("t1").URL {
+		t.Errorf("移动当前曲不应触发播放: playCount=%d lastPlayed=%q", fp2.playCount(), fp2.lastPlayed())
+	}
+}
+
+// TestQueueMoveThenTrackEndedPlaysNewNext 回归：移动跨越当前曲后 TrackEnded
+// 自动连播新顺序的下一首（仿 TestTrackEndedAutoAdvances 的 fp.events 事件链模式）。
+func TestQueueMoveThenTrackEndedPlaysNewNext(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	for _, msg := range execCmds(cmd) {
+		m, _ = update(m, msg)
+	}
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
+
+	// 队列页把 t2 移到队尾：队列 [t1▶,t3,t2]（当前曲 t1 不变）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t2
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyDown}) // t2(1) → 2
+	mv := moveMsgOf(t, cmd)
+	if mv.from != 1 || mv.to != 2 {
+		t.Fatalf("queueMoveMsg from/to = %d/%d, want 1/2", mv.from, mv.to)
+	}
+	m, _ = update(m, mv)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc}) // 退出移动模式
+
+	// t1 播完 → 自动连播新顺序的下一首 t3（移动前应为 t2）
+	// 预推一个事件：TrackEnded 返回的 batch 含 waitForPlayerEvents（事件链），
+	// 测试执行该 batch 时需有事件可消费（与 execRetryBatch 同款模式）。
+	fp.events <- player.ProgressEvent{Position: 0, Duration: 200}
+	m, cmd = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	for _, msg := range execCmds(cmd) {
+		m, _ = update(m, msg)
+	}
+	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t3").URL {
+		t.Fatalf("连播应播放新顺序下一首 t3: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	if m.queue.CurrentIndex() != 1 {
+		t.Errorf("连播后 CurrentIndex = %d, want 1（t3）", m.queue.CurrentIndex())
+	}
+	if m.state.Track == nil || m.state.Track.ID != "t3" || !m.state.Playing {
+		t.Errorf("连播后 state = %+v, want t3 播放中", m.state)
+	}
+}

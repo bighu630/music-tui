@@ -23,6 +23,12 @@ type queueDeleteMsg struct {
 	index int
 }
 
+// queueMoveMsg 队列页移动模式请求：把 from 下标的曲目移到最终下标 to。
+type queueMoveMsg struct {
+	from int
+	to   int
+}
+
 // queueClearMsg 队列页请求清空队列。
 type queueClearMsg struct{}
 
@@ -55,8 +61,9 @@ func (i queueItem) Description() string { return "" }
 func (i queueItem) FilterValue() string { return i.track.Title + " " + i.track.Artist }
 
 // queueModel 队列页：展示播放队列（当前曲目高亮 + 序号），支持
-// 跳转播放/删除/清空/切换顺序随机，/ 开启过滤（标题/歌手实时子串匹配）。
-// 数据由 root 经 sync 推入，页面自身不持有服务。
+// 跳转播放/删除/清空/切换顺序随机，/ 开启过滤（标题/歌手实时子串匹配），
+// m 进入移动模式（↑↓←→/hjkl 移动选中曲目）。数据由 root 经 sync 推入，
+// 页面自身不持有服务。
 type queueModel struct {
 	list    list.Model
 	items   []model.Track
@@ -73,6 +80,11 @@ type queueModel struct {
 	// 确认失焦后仍保持），filterInput 为过滤词输入框（聚焦时实时过滤）。
 	filtering   bool
 	filterInput textinput.Model
+
+	// moving 移动模式：m 进入，Enter/Esc 结束；↑↓←→/hjkl 移动选中曲目
+	//（经 emitQueueMove 由 root 执行并回灌）。不拦截 root 全局键
+	//（数字切页/空格/q 照常）。
+	moving bool
 
 	width, height int
 }
@@ -93,12 +105,30 @@ func newQueueModel() queueModel {
 // typing 返回过滤输入框是否聚焦（root 让字符类全局键空格/a/q 让位；与搜索页同名方法一致）。
 func (q queueModel) typing() bool { return q.filtering && q.filterInput.Focused() }
 
-// Update 处理队列页按键：/ 开关过滤、Enter/p 跳转播放、d 删除、c 清空、
-// s 切换模式；过滤输入框聚焦时字符键进过滤词（实时过滤），Enter 确认
-// 失焦、Esc 退出恢复全量；其余按键交给列表（↑↓ 选择等）。
+// Update 处理队列页按键：/ 开关过滤、m 移动模式、Enter/p 跳转播放、d 删除、
+// c 清空、s 切换模式；过滤输入框聚焦时字符键进过滤词（实时过滤），Enter
+// 确认失焦、Esc 退出恢复全量；其余按键交给列表（↑↓ 选择等）。
 func (q queueModel) Update(msg tea.Msg) (queueModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// 移动模式：只认移动/结束键，其余一律忽略（d/c/s/p// 等都不消费）
+		if q.moving {
+			switch msg.String() {
+			case "enter", "esc":
+				q.moving = false
+				return q, nil
+			case "up", "k":
+				return q.moveBy(-1)
+			case "down", "j":
+				return q.moveBy(+1)
+			case "left", "h":
+				return q.moveTo(0)
+			case "right", "l":
+				return q.moveTo(-1) // -1 = 队尾
+			default:
+				return q, nil // 移动模式只认移动/结束键（d/c/s/p// 等一律忽略）
+			}
+		}
 		switch msg.String() {
 		case "/":
 			// 打开或重聚焦过滤输入框；已聚焦时 "/" 作为普通字符输入
@@ -119,6 +149,24 @@ func (q queueModel) Update(msg tea.Msg) (queueModel, tea.Cmd) {
 				q.filterInput.SetValue("")
 				return q.applyFilter(), nil
 			}
+		case "m":
+			// 进入移动模式：过滤输入框聚焦时 m 是普通过滤字符（break 落到
+			// 下方输入框分支，输入优先）；过滤确认态先退出过滤再进入；
+			// 队列不足 2 首无可移动。
+			if q.filtering && q.filterInput.Focused() {
+				break
+			}
+			if len(q.items) < 2 {
+				return q, nil
+			}
+			if q.filtering {
+				q.filtering = false
+				q.filterInput.Blur()
+				q.filterInput.SetValue("")
+				q = q.applyFilter()
+			}
+			q.moving = true
+			return q, nil
 		}
 		if q.filtering && q.filterInput.Focused() {
 			switch msg.String() {
@@ -158,6 +206,35 @@ func (q queueModel) Update(msg tea.Msg) (queueModel, tea.Cmd) {
 	var cmd tea.Cmd
 	q.list, cmd = q.list.Update(msg)
 	return q, cmd
+}
+
+// moveBy 移动模式：选中曲目向 delta 方向移动一格（-1 上移/+1 下移），
+// 已在边界时不发消息。返回 emitQueueMove 由 root 执行并回灌。
+func (q queueModel) moveBy(delta int) (queueModel, tea.Cmd) {
+	item, ok := q.list.SelectedItem().(queueItem)
+	if !ok {
+		return q, nil
+	}
+	to := item.idx + delta
+	if to < 0 || to >= len(q.items) {
+		return q, nil
+	}
+	return q, emitQueueMove(item.idx, to)
+}
+
+// moveTo 移动模式：选中曲目移到队首（to==0）或队尾（to==-1）；已在目标位不发消息。
+func (q queueModel) moveTo(to int) (queueModel, tea.Cmd) {
+	item, ok := q.list.SelectedItem().(queueItem)
+	if !ok {
+		return q, nil
+	}
+	if to == -1 {
+		to = len(q.items) - 1
+	}
+	if to == item.idx {
+		return q, nil
+	}
+	return q, emitQueueMove(item.idx, to)
 }
 
 // itemAt 构造第 i 项：当前曲目应用 AI 清洗标题（若有）。
@@ -234,16 +311,21 @@ func (q queueModel) setSize(width, height int) queueModel {
 // 提示行随过滤状态切换；空队列且未过滤时显示空态提示。提示行恒在页面
 // 内容区最后一行。
 func (q queueModel) view() string {
+	// 移动模式：hint 切换为移动键位说明（内容同非空列表分支，仍为列表视图）
+	if q.moving {
+		hint := q.modeLabel() + " · ↑↓←→/hjkl 移动 · Enter/Esc 结束"
+		return bottomHint(q.height, q.list.View(), hint)
+	}
 	if q.filtering {
 		hint := q.modeLabel() + " · 输入过滤 · Enter 确认 · Esc 取消"
 		if !q.filterInput.Focused() {
-			hint = q.modeLabel() + " · Enter/p 跳转播放 · d 删除 · c 清空 · s 切换模式 · Esc 退出过滤"
+			hint = q.modeLabel() + " · Enter/p 跳转播放 · d 删除 · c 清空 · s 切换模式 · m 移动 · Esc 退出过滤"
 		}
 		count := fmt.Sprintf("(%d/%d)", len(q.list.VisibleItems()), len(q.items))
 		filterLine := "过滤: " + q.filterInput.View() + " " + lipgloss.NewStyle().Faint(true).Render(count)
 		return bottomHint(q.height, filterLine+"\n"+q.list.View(), hint)
 	}
-	hint := q.modeLabel() + " · Enter/p 跳转播放 · d 删除 · c 清空 · s 切换模式"
+	hint := q.modeLabel() + " · Enter/p 跳转播放 · d 删除 · c 清空 · s 切换模式 · m 移动"
 	if len(q.items) == 0 {
 		content := lipgloss.NewStyle().
 			Padding(1, 0).
