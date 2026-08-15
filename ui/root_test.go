@@ -16,7 +16,9 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 
 	"music-tui/cache"
 	"music-tui/cover"
@@ -2064,6 +2066,16 @@ func TestStatusBarLyricCenter(t *testing.T) {
 	last = strings.Split(m.View(), "\n")[len(strings.Split(m.View(), "\n"))-1]
 	if !strings.Contains(last, "第一行歌词文本") {
 		t.Errorf("状态栏应显示当前歌词行, got %q", last)
+	}
+	// 高亮样式与首页歌词区一致：加粗 + 粉色 212。lipgloss 将 bold+颜色合并
+	// 渲染为单序列 \x1b[1;38;5;212m（实测输出），故按实际形式断言：
+	// SGR 参数 1（加粗）+ 256 色索引 212（粉色）。
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	if !strings.Contains(last, "\x1b[1;") {
+		t.Errorf("状态栏歌词行应加粗高亮, got %q", last)
+	}
+	if !strings.Contains(last, "38;5;212") {
+		t.Errorf("状态栏歌词行应含粉色 212, got %q", last)
 	}
 	// 歌词行在左右之间（起始列 > 左名称列、歌词中心 ≈ 中间区域中心）
 	vis := stripAnsiForTest(last)

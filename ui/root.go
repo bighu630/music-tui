@@ -1134,7 +1134,9 @@ func (m Model) statusBarView() string {
 	midRendered := ""
 	if midW > 0 && lyric != "" {
 		lyric = ansi.Truncate(lyric, midW, "…")
-		midRendered = style.Render(lyric)
+		// 高亮与首页歌词区一致：加粗 + 粉色 212（共享 lyricActiveStyle；
+		// 无 Faint，转义序列零宽度，宽度计算不受影响）。
+		midRendered = lyricActiveStyle.Render(lyric)
 		midPad := (midW - ansi.StringWidth(midRendered)) / 2
 		if midPad > 0 {
 			midRendered = strings.Repeat(" ", midPad) + midRendered
