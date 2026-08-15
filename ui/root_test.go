@@ -3,15 +3,18 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"music-tui/cache"
@@ -236,7 +239,18 @@ func newYTTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, onTrack
 }
 
 // newTestModelBase 组装除 yt 外的全部服务与模型（newTestModel/newYTTestModel 共用）。
+// 缓存指向临时目录 + 不存在的 yt-dlp（CacheAsync 后台下载立即失败退出，无网络无泄漏）。
 func newTestModelBase(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, yt *ytm.Client, onTrack func(*model.Track)) Model {
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, "/nonexistent/yt-dlp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newTestModelBaseWithCache(t, fp, fa, yt, onTrack, cm)
+}
+
+// newTestModelBaseWithCache 同 newTestModelBase，但缓存管理器由调用方注入
+// （缓存预热时序测试用：注入假 yt-dlp 脚本观测下载调用）。
+func newTestModelBaseWithCache(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, yt *ytm.Client, onTrack func(*model.Track), cm *cache.Manager) Model {
 	t.Helper()
 	lyricServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -256,10 +270,6 @@ func newTestModelBase(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, yt *y
 		t.Fatal(err)
 	}
 	pls, err := playlists.NewStore(filepath.Join(t.TempDir(), "playlists.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, "/nonexistent/yt-dlp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1116,6 +1126,56 @@ func execRetryBatch(m Model, cmd tea.Cmd, fp *fakePlayer) Model {
 	return m2
 }
 
+// 加载超时（LoadTimeoutError，看门狗主动报错）应走现有自动重试链路：
+// 预算内重试 = 重新 loadfile = 重新取流（拿新签名 URL），把取流悬挂转成
+// 可恢复的重试而非无限期静默卡住（回归：连播未缓存下一首卡住）。
+func TestLoadTimeoutErrorAutoRetriesThenSucceeds(t *testing.T) {
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	defer func() { retryBackoff = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	if fp.playCount() != 1 {
+		t.Fatalf("初始 playCount = %d, want 1", fp.playCount())
+	}
+
+	// 看门狗超时错误：进入自动重试（暂停态 + 横幅），不落入“停止等手动”分支
+	m, cmd = update(m, playerEventMsg{ev: player.ErrorEvent{Err: &player.LoadTimeoutError{Timeout: 30 * time.Second}}})
+	if !strings.Contains(m.lastError, "自动重试") {
+		t.Errorf("lastError = %q, want 含自动重试", m.lastError)
+	}
+	if m.retryCount != 1 {
+		t.Fatalf("retryCount = %d, want 1", m.retryCount)
+	}
+	if m.state.Playing {
+		t.Error("重试等待期间 Playing 应为 false")
+	}
+	if m.ended {
+		t.Error("超时重试期间不应 ended（不是停止态）")
+	}
+
+	// 重试到期：重新 loadfile（新取流），加载中重新计时
+	m = execRetryBatch(m, cmd, fp)
+	if fp.playCount() != 2 {
+		t.Fatalf("重试后 playCount = %d, want 2", fp.playCount())
+	}
+	if m.loadingSince.IsZero() {
+		t.Error("重试 beginPlay 后应重新设置 loadingSince（新一轮加载计时）")
+	}
+
+	// 重试成功：TrackStarted 到达 → 加载中结束、预算重置
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	if !m.loadingSince.IsZero() {
+		t.Error("TrackStarted 后 loadingSince 应清零")
+	}
+	if m.retryCount != 0 {
+		t.Errorf("加载成功后 retryCount = %d, want 0（预算重置）", m.retryCount)
+	}
+}
+
 // 取流失败在重试预算内：自动重试重新 loadfile，成功（TrackStartedEvent）
 // 后恢复播放状态并重置预算。
 func TestLoadFailRetriesThenSucceeds(t *testing.T) {
@@ -1516,6 +1576,54 @@ func TestResumeLoadFailNoAutoRetry(t *testing.T) {
 	}
 }
 
+// 回归（审查 P2-1）：恢复路径（resumeCmd → resumeResultMsg 成功）加载中提示。
+// loadingSince 此前只在 beginPlay 设置：恢复未缓存曲目取流悬挂时首页无
+// "⏳ 加载中…"提示（30s 后看门狗兜底报错，但 UX 目标"可感知"在恢复路径未覆盖）。
+// resumeResultMsg 成功即置 loadingSince（恢复加载进行中）；TrackStartedEvent
+// 到达时统一清除（现有分支已清，无需额外处理）。
+func TestResumeLoadingIndicatorShownUntilTrackStarted(t *testing.T) {
+	m, _ := newResumeTestModel(t, sessionState(66.6, false), nil)
+
+	msgs := execCmds(resumeCmd(m))
+	var resumed bool
+	for _, msg := range msgs {
+		if _, ok := msg.(resumeResultMsg); ok {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Fatal("未收到 resumeResultMsg")
+	}
+	m, _ = update(m, msgs[0])
+	if m.loadingSince.IsZero() {
+		t.Fatal("resumeResultMsg 成功后应设置 loadingSince（恢复加载进行中）")
+	}
+
+	// 2s 阈值未过：不显示加载中
+	if m.home.loading {
+		t.Error("阈值未过时不应显示加载中")
+	}
+
+	// tick 时间注入 3s 后：派生 loading=true，进度行显示加载中提示
+	m, _ = update(m, spinner.TickMsg{Time: time.Now().Add(3 * time.Second)})
+	if !m.home.loading {
+		t.Error("恢复加载 2s 未收到 TrackStarted → 应显示加载中")
+	}
+	if got := m.home.progressRowView(); !strings.Contains(got, "加载中") {
+		t.Errorf("进度行应显示加载中提示, got %q", got)
+	}
+
+	// TrackStarted 到达（恢复加载成功）：loadingSince 清零、提示结束
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	if !m.loadingSince.IsZero() {
+		t.Error("TrackStarted 后 loadingSince 应清零")
+	}
+	m, _ = update(m, spinner.TickMsg{Time: time.Now().Add(4 * time.Second)})
+	if m.home.loading {
+		t.Error("TrackStarted 后不应再显示加载中")
+	}
+}
+
 // loadFailureHint 把 mpv file_error 诊断文本映射为可操作的中文提示。
 func TestLoadFailHint(t *testing.T) {
 	cases := []struct {
@@ -1597,5 +1705,125 @@ func TestRootViewBannerStaysWithinHeight(t *testing.T) {
 	}
 	if !strings.Contains(l2[23], "|<") {
 		t.Errorf("播放态按钮行不应被横幅覆盖, got %q", l2[23])
+	}
+}
+
+// ---- 缓存预热时序 + 加载中提示（回归：连播未缓存下一首卡住） ----
+
+// writeFakeYtDlpScript 生成假 yt-dlp 脚本：解析 -o 模板落盘合法产物
+// （下载注册成功、不产生重试噪音），并把每次调用追加到 logPath
+// （缓存预热调用观测用）。与 cache/download_test.go 的 fakeYtDlpBody 同款。
+func writeFakeYtDlpScript(t *testing.T, logPath string) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "yt-dlp")
+	body := fmt.Sprintf(`#!/bin/sh
+echo invoked >> %q
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    out=$(printf '%%s' "$a" | sed 's/%%(ext)s/webm/')
+  fi
+  prev="$a"
+done
+[ -n "$out" ] || exit 9
+printf 'fake-audio-bytes' > "$out"
+`, logPath)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+// ytDlpCallCount 统计假 yt-dlp 脚本被调用次数（日志文件行数）。
+func ytDlpCallCount(logPath string) int {
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(data), "invoked")
+}
+
+// 缓存预热移后（回归：连播未缓存下一首卡住）：beginPlay 不再触发 CacheAsync
+// ——避免与 mpv 内置 yt-dlp 并发访问同一 URL 放大 403 风控；TrackStartedEvent
+// （mpv 取流成功）后才启动后台下载。假 yt-dlp 脚本记录调用时序验证。
+func TestTrackStartedTriggersCacheWarmup(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	logPath := filepath.Join(t.TempDir(), "ytdlp.log")
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, writeFakeYtDlpScript(t, logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newTestModelBaseWithCache(t, fp, fa, nil, nil, cm)
+
+	// 手动播放 t1（缓存 miss）：beginPlay 不得触发下载
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	if fp.playCount() != 1 {
+		t.Fatalf("playCount = %d, want 1", fp.playCount())
+	}
+	// 短暂窗口内假 yt-dlp 不得被调用（下载若已触发会立刻执行）
+	time.Sleep(200 * time.Millisecond)
+	if got := ytDlpCallCount(logPath); got != 0 {
+		t.Fatalf("beginPlay（缓存 miss）不应触发缓存下载, calls = %d", got)
+	}
+
+	// 连播：TrackEnded → 下一首 t2（缓存 miss）→ beginPlay 仍不得触发下载
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t2").URL {
+		t.Fatalf("TrackEnded 后应连播 t2: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := ytDlpCallCount(logPath); got != 0 {
+		t.Fatalf("连播 beginPlay（缓存 miss）不应触发缓存下载, calls = %d", got)
+	}
+
+	// TrackStartedEvent（mpv 取流成功）→ 后台下载才启动
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	if m.state.Track == nil || m.state.Track.ID != "t2" {
+		t.Fatalf("TrackStarted 后 state.Track 应为 t2, got %+v", m.state.Track)
+	}
+	waitFor(t, 3*time.Second, func() bool { return ytDlpCallCount(logPath) >= 1 })
+}
+
+// 加载中提示（回归：取流悬挂卡住可感知）：beginPlay 后 2s 未收到
+// TrackStartedEvent → 首页进度行显示"加载中…"；TrackStarted 到达后恢复进度条。
+// TickMsg.Time 是 tick 发送时刻：测试注入任意时间，无需真实等待 2s。
+func TestLoadingIndicatorShownUntilTrackStarted(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	if m.loadingSince.IsZero() {
+		t.Fatal("beginPlay 成功后应设置 loadingSince")
+	}
+
+	// 2s 阈值未过：不显示加载中
+	if m.home.loading {
+		t.Error("阈值未过时不应显示加载中")
+	}
+
+	// tick 时间注入 3s 后：派生 loading=true，进度行显示加载中提示
+	m, _ = update(m, spinner.TickMsg{Time: time.Now().Add(3 * time.Second)})
+	if !m.home.loading {
+		t.Error("切歌 2s 未收到 TrackStarted → 应显示加载中")
+	}
+	if got := m.home.progressRowView(); !strings.Contains(got, "加载中") {
+		t.Errorf("进度行应显示加载中提示, got %q", got)
+	}
+
+	// TrackStarted 到达：加载中结束（loadingSince 清零，进度条恢复）
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	if !m.loadingSince.IsZero() {
+		t.Error("TrackStarted 后 loadingSince 应清零")
+	}
+	m, _ = update(m, spinner.TickMsg{Time: time.Now().Add(4 * time.Second)})
+	if m.home.loading {
+		t.Error("TrackStarted 后不应再显示加载中")
+	}
+	if got := m.home.progressRowView(); strings.Contains(got, "加载中") {
+		t.Errorf("TrackStarted 后进度行不应再显示加载中, got %q", got)
 	}
 }

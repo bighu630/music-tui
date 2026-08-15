@@ -159,6 +159,10 @@ type homeModel struct {
 	spinner   spinner.Model
 	lyricView viewport.Model
 
+	// loading 当前曲目加载中（root 派生：spinner tick 时切歌 2s 未收到
+	// TrackStarted 置位；进度行显示"加载中…"替代进度条）。
+	loading bool
+
 	lyricsState lyricsState
 	lyrics      *lyrics.Lyrics
 	currentLine int // 当前高亮行下标；-1 = 无高亮
@@ -582,7 +586,11 @@ func (m homeModel) progressBarWidth() int {
 }
 
 // progressRowView 底部行 1（页面内 Y == height-2）：线条渐变进度条 + 时间串。
+// 加载中（切歌 2s 未就绪）时以提示替代进度条——取流悬挂卡住可感知。
 func (m homeModel) progressRowView() string {
+	if m.loading {
+		return "  ⏳ 加载中…"
+	}
 	timeStr := formatDuration(m.state.Position) + " / " + formatDuration(m.state.Duration)
 	return lineProgressBar(m.progressBarWidth(), m.percent()) + " " + timeStr
 }

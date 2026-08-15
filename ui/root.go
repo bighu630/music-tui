@@ -246,6 +246,10 @@ type Model struct {
 	lastError string
 	notice    string // 绿色成功提示（如“已添加到「xxx」”；新按键分发时清除）
 	ended     bool   // 当前歌曲是否已播放结束/出错（空格语义：重播同曲而非 Resume）
+	// loadingSince 当前曲目加载起始时刻（零值 = 非加载中）：beginPlay 设置，
+	// TrackStarted/TrackEnded/Error 清除；spinner tick 据此派生首页"加载中…"
+	// 提示（回归：连播未缓存下一首取流悬挂卡住时用户可感知）。
+	loadingSince time.Time
 
 	// YT Music 同步状态（登录配置 + 同步中 + 验证失败标记；页面经 setYTSyncStatus 推入）
 	ytLogin   ytm.LoginConfig
@@ -749,7 +753,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 失败）只代表命令未被 mpv 接受（连接/参数瞬态问题），与缓存文件损坏
 			// 无关（坏文件 mpv 会接受 loadfile 后异步报 end-file error）；删除健康
 			// 缓存有害，真实损坏由异步 LoadFailedError 路径处理。
-			m.resuming = false // 恢复上下文作废
+			m.resuming = false           // 恢复上下文作废
+			m.loadingSince = time.Time{} // 恢复失败：无加载中提示
 			m.lastError = "恢复播放失败: " + msg.err.Error()
 			m.state = model.PlaybackState{}
 			m.home = m.home.syncState(m.state)
@@ -765,6 +770,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state.Track == nil {
 			return m, nil
 		}
+		// 恢复加载进行中：取流可能悬挂（网络曲目加载窗口达数秒），首页显示
+		// "⏳ 加载中…"（2s 未收到 TrackStarted 即提示）——恢复路径此前无加载
+		// 提示（loadingSince 只在 beginPlay 设置，审查 P2-1）。TrackStartedEvent
+		// 到达时统一清除（现有分支已清），失败分支已置零。
+		m.loadingSince = time.Now()
 		// 恢复成功：按当前模式补 SetLoop（beginPlay 有显式 SetLoop，恢复路径
 		// 此前漏设——单曲循环模式下恢复会丢失 mpv loop-file 语义；回归：
 		// TestResumeSuccessSetsLoopPerMode）。失败仅记 lastError 不阻断恢复。
@@ -835,6 +845,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 若直接返回它会形成忙循环，必须用 tea.Tick 定时节拍。
 		m.home = m.home.tick(msg)
 		m.searchPage = m.searchPage.tick(msg)
+		// 加载中派生状态：切歌 2s 未收到 TrackStarted → 首页显示"加载中…"提示
+		//（msg.Time 是 tick 发送时刻：测试可注入任意时间，无需真实等待 2s）。
+		m.home.loading = !m.loadingSince.IsZero() && msg.Time.Sub(m.loadingSince) >= 2*time.Second
 		return m, spinnerTick
 
 	case tea.WindowSizeMsg:
@@ -1009,6 +1022,13 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.failedTracks = map[string]bool{} // 任何曲目加载成功 = 新一轮：本轮失败集合作废
 		m.resuming = false                 // 恢复加载成功：进入正常播放态，恢复上下文作废
 		m.ended = false
+		m.loadingSince = time.Time{} // 加载成功：加载中提示结束
+		// 缓存预热：mpv 取流成功后才启动后台下载——避免与 mpv 内置 yt-dlp
+		// 并发访问同一 URL 放大 403 风控（回归：连播未缓存下一首卡住）。
+		// CacheAsync 对 Disabled/已存在/在途条目均为 no-op，playingFromCache 时安全。
+		if m.cache != nil && m.state.Track != nil {
+			m.cache.CacheAsync(*m.state.Track)
+		}
 		// 仅在拿到真实时长时覆盖：Duration=0 表示 observe 与 Get 兜底
 		// 均失败（直播/特殊流），此时保留搜索元数据提供的时长，避免被抹零。
 		if ev.Duration > 0 {
@@ -1017,6 +1037,8 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.home = m.home.syncState(m.state)
 	case player.TrackEndedEvent:
 		m.retryCount = 0 // 下一首开始，重试预算重置
+		// 本曲加载/播放已有结论：加载中提示结束（连播下一首时由 beginPlay 重新设置）
+		m.loadingSince = time.Time{}
 		// 自动连播。解耦标记（删除当前曲）存在时：播放顺延曲目（当前位），
 		// 无当前位则从头，队列为空则停止；否则正常推进到下一首。
 		// 两种情况均不切换当前页面。
@@ -1035,25 +1057,37 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.stopAfterEnd()
 	case player.ErrorEvent:
-		// 取流失败（LoadFailedError）多为瞬态错误（如 YouTube 403 风控）：
+		// 加载/播放有结论（失败、断开、超时）：加载中提示结束。重试/跳过路径
+		// 会经 beginPlay 重新设置（下一轮加载重新计时）。
+		m.loadingSince = time.Time{}
+		// 取流失败（LoadFailedError）与加载超时（LoadTimeoutError，看门狗
+		// 主动报错，取流悬挂）多为瞬态错误（如 YouTube 403 风控）：
 		// 预算内自动重试；耗尽后队列有下一首则跳过继续连播，否则停止。
 		// 其他错误（连接断开/重连失败）保持原有行为，不自动重试。
 		var le *player.LoadFailedError
-		if errors.As(ev.Err, &le) {
+		var lte *player.LoadTimeoutError
+		isLoadTimeout := errors.As(ev.Err, &lte)
+		if errors.As(ev.Err, &le) || isLoadTimeout {
 			// 播放自缓存文件时取流失败 → 缓存条目损坏（下载不完整/已过期）：
 			// 移除条目 + 复位标记，后续重试/跳过自然回退网络 URL 重新取流。
 			// fromCache 须在移除动作之前捕获（移除后 playingFromCache 已复位）。
-			fromCache := m.playingFromCache && m.state.Track != nil
+			// 加载超时（LoadTimeoutError）不触发移除：超时可能发生在本地文件
+			//（mpv 卡死/负载高），删健康缓存有害（回归：误删健康缓存）。
+			fromCache := m.playingFromCache && m.state.Track != nil && !isLoadTimeout
 			if fromCache {
 				m.cache.Remove(m.state.Track.ID)
 				m.playingFromCache = false
 			}
-			// 提示区分两类失败：缓存损坏（从缓存播放失败，已删条目下次重下）
-			// 与网络取流失败（file_error 诊断映射）；恢复中/重试中/耗尽跳过共用。
+			// 提示区分三类失败：缓存损坏（从缓存播放失败，已删条目下次重下）、
+			// 网络取流失败（file_error 诊断映射）、加载超时（看门狗主动报错，
+			// 取流悬挂）。恢复中/重试中/耗尽跳过共用。
 			var hint string
-			if fromCache {
+			switch {
+			case isLoadTimeout:
+				hint = "取流超时（网络卡顿/风控/取流悬挂）"
+			case fromCache:
 				hint = "缓存文件损坏，已移除（下次播放将重新下载）"
-			} else {
+			default:
 				hint = loadFailureHint(le.FileError)
 			}
 			// 续播恢复（PlayPaused 静默加载）期间撞取流失败：不自动重试——
@@ -1180,6 +1214,7 @@ func (m Model) skipFailedTrack(tr model.Track, hint string) (Model, tea.Cmd) {
 // stopAfterEnd 播放结束且无下一首：停在当前位置等待用户操作（空格重播同曲）。
 func (m Model) stopAfterEnd() (Model, tea.Cmd) {
 	m.ended = true
+	m.loadingSince = time.Time{} // 已停止：无加载中提示
 	m.state.Playing = false
 	m.home = m.home.syncState(m.state)
 	return m.syncQueueViews(), nil
@@ -1211,7 +1246,9 @@ func (m Model) playQueueTrack() (Model, tea.Cmd) {
 // 刷新队列展示；成功时并行触发 歌词/封面/历史 三个异步 cmd，
 // Play 失败时跳过全部异步 cmd，状态重置为空回到"未在播放"空态 + 错误横幅。
 // 音频缓存：命中 → 播本地文件（playingFromCache 置位，后续 LoadFailed 时
-// 据此移除损坏条目）；未命中 → 播网络 URL + 后台异步下载（不阻塞播放）。
+// 据此移除损坏条目）；未命中 → 播网络 URL（缓存预热统一在 TrackStarted
+// 触发：mpv 取流成功后才启动后台下载，避免与 mpv 内置 yt-dlp 并发访问
+// 同一 URL 放大 403 风控——回归：连播未缓存下一首卡住）。
 // 注意：不重置 retryCount——自动重试也走本路径，重置会让重试预算
 // 永不耗尽（回归：TestLoadFailRetriesExhaustedSkipsInQueue/StopsSingle）；
 // 预算在 TrackStarted/TrackEnded/手动播放入口重置。
@@ -1229,9 +1266,10 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 		m.playingFromCache = true
 	} else {
 		m.playingFromCache = false
-		m.cache.CacheAsync(track) // 后台下载，不阻塞播放
+		// 缓存预热不在 beginPlay 触发（见上方注释）：TrackStarted 统一启动
 	}
 	if err := m.player.Play(target); err != nil {
+		m.loadingSince = time.Time{} // 加载未开始即失败：无加载中提示
 		m.lastError = "播放失败: " + err.Error()
 		m.state = model.PlaybackState{}
 		m.home = m.home.syncState(m.state)
@@ -1239,6 +1277,7 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 		m.notifyTrack(nil)
 		return m, nil
 	}
+	m.loadingSince = time.Now() // 加载起始：TrackStarted/TrackEnded/Error 清除
 	m.notifyTrack(&track)
 	// 按模式设置单曲循环（mpv loop-file 是 per-file 属性，新 loadfile 自动重置，
 	// 但 UI 显式设置保证切歌/切模式后循环状态与模式始终同步）。SetLoop 是
@@ -1286,10 +1325,11 @@ func (m Model) saveSession() {
 // loadfile 的 start= 选项原子完成，避免加载窗口内 seek 被 mpv 拒绝的竞态，
 // 见 mpv.go PlayPaused）。命中缓存 → 播本地文件（fromCache 标记回填至
 // playingFromCache，异步 LoadFailedError 时据此移除损坏条目）；未命中 →
-// 播网络 URL，并触发后台下载（下载完成即缓存，下次恢复/播放走本地）。
+// 播网络 URL（缓存预热在 TrackStartedEvent 后触发，见下）。
 // IPC 层失败（PlayPaused 命令被拒）与缓存文件无关，不删条目。
-// CacheAsync 在 PlayPaused 之前触发，故 IPC 失败时下载仍会进行（缓存预热
-// 供下次恢复命中，与 beginPlay 一致），并非缺陷。
+// 缓存预热统一在 TrackStartedEvent 后触发（与 beginPlay 一致）：PlayPaused
+// 的 IPC 成功只代表命令被接受，mpv 取流成功（file-loaded）后才启动后台
+// 下载——避免与 mpv 内置 yt-dlp 并发访问同一 URL 放大 403 风控。
 func resumeCmd(m Model) tea.Cmd {
 	track := m.resume.track
 	pos := m.resume.pos
@@ -1299,10 +1339,6 @@ func resumeCmd(m Model) tea.Cmd {
 		if path, ok := m.cache.Lookup(track.ID); ok {
 			target = path
 			fromCache = true
-		} else {
-			// 与 beginPlay 对齐：恢复播放的歌曲也后台下载，下载完成即缓存；
-			// 不阻塞恢复加载（CacheAsync 对 Disabled/已存在条目是 no-op 安全）。
-			m.cache.CacheAsync(track)
 		}
 		if err := m.player.PlayPaused(target, pos); err != nil {
 			return resumeResultMsg{err: err, fromCache: fromCache}

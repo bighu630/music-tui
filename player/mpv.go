@@ -29,6 +29,11 @@ const (
 	reconnectCooldown    = 2 * time.Second // 重连失败后的冷却期：期间命令不再发起新重连（防风暴）
 )
 
+// loadWatchdogTimeout 加载看门狗时限：loadfile 后限时未收到 file-loaded/end-file
+// 即判定加载悬挂（yt-dlp 取流卡死/403 重试退避/网络黑洞），emit LoadTimeoutError。
+// 包级变量：测试可调小以缩短等待。
+var loadWatchdogTimeout = 30 * time.Second
+
 // MpvPlayer 通过 JSON IPC 控制 mpv 进程，并把 mpv 事件转换为
 // player.Event 推送到 Events() 通道。进程启动与 socket 连接解耦：
 // Start() = 启动进程 + connect()；测试直接调用 connect()。
@@ -55,6 +60,19 @@ type MpvPlayer struct {
 	// 失败晚到），丢弃防 UI 误删健康缓存（回归：恢复播放误报"YouTube 未返回
 	// 可播放音轨"）。0 = 未知（旧版 mpv 无此字段/断开后），过滤禁用保守放行。
 	lastLoadID int64
+
+	// 加载看门狗状态（stateMu 保护）。loadDeadline 是看门狗截止时刻，零值 =
+	// 无活跃加载（新 loadfile 即新一轮：deadline 整体替换，旧 deadline 作废，
+	// 不会误报——回归：TestLoadWatchdogResetOnNewLoad）；loadResolved 是当前
+	// 加载是否已有结论（file-loaded/end-file eof|error 到达；armWatchdog 置
+	// false，disarmWatchdog 置 true）——超时边界竞态防护：加载恰在 deadline 后
+	// 成功时，file-loaded 先于 watchdog 判定到达（disarm 已执行）则不报超时
+	//（审查 P2-3）；watchdogSeq 是看门狗循环代际（connect 自增，旧循环发现
+	// 代际不符即退出，重连后不残留 goroutine；superseded 检查必须先于 expired
+	// 认领，旧循环不得清新代际的 deadline——回归：TestWatchdogSupersededBeforeClaim）。
+	loadDeadline time.Time // 看门狗截止时刻；零值 = 无活跃加载
+	loadResolved bool      // 当前加载是否已有结论（file-loaded/end-file 到达）
+	watchdogSeq  int       // 看门狗循环代际：每次 connect 自增；旧循环发现代际不符即退出
 
 	events   chan Event
 	mu       sync.Mutex
@@ -97,7 +115,8 @@ func (p *MpvPlayer) startProcess() error {
 		"--no-terminal",           // 禁用 mpv 的终端控制，避免与 TUI 抢键盘
 		"--keep-open=no",          // 播完即退出，可靠触发 end-file reason=eof
 		"--ytdl-format=bestaudio", // 纯音频播放器只需音频流：避免同时开视频+音频两个流（403 风控暴露面减半）
-		"--no-resume-playback",    // 不写恢复播放状态文件
+		"--ytdl-raw-options=socket-timeout=15,retries=2", // yt-dlp 取流收紧：403/网络黑洞快速失败（默认 retries=10 可拖 1-2 分钟）
+		"--no-resume-playback",                           // 不写恢复播放状态文件
 		"--input-ipc-server=" + p.socketPath,
 	}
 	p.stateMu.Lock()
@@ -178,6 +197,14 @@ func (p *MpvPlayer) connect() error {
 	p.conn = conn
 	p.stateMu.Unlock()
 	go p.pump(conn)
+	// 启动加载看门狗：loadDeadline 零值时空转，无副作用。
+	// 代际快照：重连后新 connect 自增 seq，旧循环检测到代际不符即退出
+	//（防多次重连后旧看门狗 goroutine 残留堆积）。
+	p.stateMu.Lock()
+	p.watchdogSeq++
+	seq := p.watchdogSeq
+	p.stateMu.Unlock()
+	go p.watchdogLoop(seq)
 	return nil
 }
 
@@ -226,6 +253,7 @@ func (p *MpvPlayer) pump(conn *mpvipc.Connection) {
 		case "property-change":
 			p.handlePropertyChange(ev)
 		case "file-loaded":
+			p.disarmWatchdog() // 加载成功：看门狗解除（限时等待结束）
 			// 真实 mpv 中 duration property-change 晚于 file-loaded 到达，
 			// 此时同步 Get 兜底。Get 响应走 mpvipc checkResult 路由（不经过
 			// 事件通道），pump 内调用不会死锁；但若 mpv 恰在此刻崩溃/卡死，
@@ -255,6 +283,7 @@ func (p *MpvPlayer) pump(conn *mpvipc.Connection) {
 			// unavailable（data=null，toBool 失败），可靠信号是 end-file。
 			switch ev.Reason {
 			case "eof":
+				p.disarmWatchdog() // 播放结束：加载已有结论，看门狗解除
 				p.emit(TrackEndedEvent{})
 			case "error":
 				// 陈旧事件过滤：end-file error 不携带曲目身份，mpv ≥0.33 的
@@ -265,6 +294,7 @@ func (p *MpvPlayer) pump(conn *mpvipc.Connection) {
 				if p.isStaleEndFileError(ev) {
 					continue
 				}
+				p.disarmWatchdog() // 当前曲加载失败：加载已有结论，看门狗解除（陈旧错误不 disarm——见过滤）
 				// 提取 mpv IPC file_error 字段的诊断文本（如 "no audio or video data played"）；
 				// mpvipc 的 Event.ExtraData 已保留该字段，旧版 mpv 可能缺失（空串兜底）。
 				fileErr := ""
@@ -289,6 +319,11 @@ func (p *MpvPlayer) onDisconnect(conn *mpvipc.Connection) {
 	// 诊断：非阻塞读取 mpv 退出码，区分"进程已退出"与"连接断开"
 	p.stateMu.Lock()
 	p.lastLoadID = 0 // 新连接无身份信息：过滤禁用（保守放行），首个 loadfile 后重新启用
+	// 断线时刻在途加载必然已死：看门狗解除，重连后新连接无活跃加载。若不清，
+	// 重连后新 watchdogLoop 继承旧 deadline（最多还有 30s）到期误报
+	// LoadTimeoutError → UI 无用户操作自动重播断线前曲目（审查 P1）。
+	p.loadDeadline = time.Time{}
+	p.loadResolved = true // 无活跃加载：不存在"加载结论未定"状态
 	waitCh := p.waitCh
 	current := p.conn
 	p.stateMu.Unlock()
@@ -435,6 +470,63 @@ func (p *MpvPlayer) currentConn() *mpvipc.Connection {
 	return p.conn
 }
 
+// armWatchdog 武装加载看门狗：loadfile 成功后限时等待 file-loaded/end-file。
+// 新 loadfile 即新一轮：deadline 整体替换（旧 deadline 作废，不会误报——
+// 回归：TestLoadWatchdogResetOnNewLoad）。
+func (p *MpvPlayer) armWatchdog() {
+	p.stateMu.Lock()
+	p.loadDeadline = time.Now().Add(loadWatchdogTimeout)
+	p.loadResolved = false // 新一轮加载：结论未定
+	p.stateMu.Unlock()
+}
+
+// disarmWatchdog 解除加载看门狗（收到 file-loaded/end-file = 加载有结论）。
+// loadResolved 置 true：看门狗据此不再误报——加载恰在 deadline 后成功时，
+// file-loaded 先于 watchdog tick 到达则超时错误被抑制（审查 P2-3）。
+func (p *MpvPlayer) disarmWatchdog() {
+	p.stateMu.Lock()
+	p.loadDeadline = time.Time{}
+	p.loadResolved = true // 加载已有结论
+	p.stateMu.Unlock()
+}
+
+// watchdogLoop 加载看门狗：周期检查 loadDeadline，到期且仍无 file-loaded/
+// end-file 结论认领 → emit LoadTimeoutError（UI 走重试/跳过链路，不再无限期
+// 静默卡住）。到期清 deadline 认领本次超时防重复触发。锁内先查代际：seq 与
+// 当前 connect 代际不符（已被新连接取代）立即退出、不碰任何状态——若先
+// claim 后查 superseded，旧代际 loop 最后一片 tick 会吞掉新代际的 deadline
+// （重连后误报超时，审查 P1）。p.closed（Close）时退出，不泄漏 goroutine。
+func (p *MpvPlayer) watchdogLoop(seq int) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			p.stateMu.Lock()
+			superseded := p.watchdogSeq != seq
+			if superseded {
+				p.stateMu.Unlock()
+				return // 旧代际：不碰 deadline，新代际接管
+			}
+			// !loadResolved：file-loaded/end-file 已到达（disarm 先执行，加载
+			// 已有结论）则不报——加载恰在 deadline 后成功时避免误报。残余窗口
+			//（锁内判定后、unlock 前结论到达）为微秒级，可接受（审查 P2-3）。
+			expired := !p.loadDeadline.IsZero() && !p.loadResolved && time.Now().After(p.loadDeadline)
+			if expired {
+				p.loadDeadline = time.Time{} // 认领本次超时，防重复触发
+			}
+			p.stateMu.Unlock()
+			if expired {
+				p.emit(ErrorEvent{Err: &LoadTimeoutError{Timeout: loadWatchdogTimeout}})
+			}
+		case <-time.After(100 * time.Millisecond):
+			if p.closed.Load() {
+				return
+			}
+		}
+	}
+}
+
 // handlePropertyChange 把 mpv property-change 事件映射为业务事件。
 func (p *MpvPlayer) handlePropertyChange(ev *mpvipc.Event) {
 	switch ev.ID {
@@ -493,6 +585,7 @@ func (p *MpvPlayer) Play(url string) error {
 		return fmt.Errorf("loadfile: %w", err)
 	}
 	p.recordLoadID(data)
+	p.armWatchdog() // 加载看门狗：限时等待 file-loaded/end-file（取流悬挂时主动报错）
 	return nil
 }
 
@@ -536,6 +629,7 @@ func (p *MpvPlayer) PlayPaused(url string, start float64) error {
 		return fmt.Errorf("loadfile: %w", err)
 	}
 	p.recordLoadID(data)
+	p.armWatchdog() // 恢复加载同样受看门狗保护：取流悬挂时主动报错（恢复路径已能感知）
 	return nil
 }
 

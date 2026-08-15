@@ -251,8 +251,9 @@ func TestResumeCachePreservedOnPlayPausedIpcError(t *testing.T) {
 }
 
 // 恢复播放未命中缓存：resumeCmd 应 PlayPaused 网络 URL（不阻塞恢复加载），
-// 并触发后台下载——与 beginPlay 的 CacheAsync 对齐：下载完成即缓存，下次
-// 恢复/播放直接走本地。
+// 且不再触发后台下载——缓存预热统一在 TrackStartedEvent（mpv 取流成功）后
+// 启动，避免与 mpv 内置 yt-dlp 并发访问同一 URL 放大 403 风控（回归：连播
+// 未缓存下一首卡住）。下载完成即缓存，下次恢复/播放直接走本地。
 func TestResumeCacheMissTriggersBackgroundDownload(t *testing.T) {
 	// 假 yt-dlp 直接下载：解析 -o 模板把 fake-audio-bytes 落盘到缓存目录
 	// （与真实 yt-dlp -o 落盘同语义）；文件内容断言证明提取→下载→注册全链路真实走通。
@@ -270,8 +271,21 @@ func TestResumeCacheMissTriggersBackgroundDownload(t *testing.T) {
 	if got := fp.lastPaused(); got != m.state.Track.URL {
 		t.Errorf("未命中应 PlayPaused 网络 URL: got %q, want %q", got, m.state.Track.URL)
 	}
+	// 结果回灌：未命中 → playingFromCache 保持 false（先于 TrackStarted 处理）
+	m, _ = update(m, msgs[0])
+	if m.playingFromCache {
+		t.Error("未命中恢复后 playingFromCache 应为 false")
+	}
 
-	// 后台下载异步执行（exec 假脚本直接落盘）：轮询等缓存注册（3s 超时）
+	// resumeCmd 不得触发后台下载（旧行为在 PlayPaused 前并发双 yt-dlp；
+	// 预热已移后到 TrackStarted）。短暂窗口内缓存不得出现。
+	time.Sleep(200 * time.Millisecond)
+	if path, ok := cm.Lookup("b"); ok {
+		t.Fatalf("resumeCmd 不应触发后台下载，但缓存已注册: %q", path)
+	}
+
+	// TrackStartedEvent（mpv 取流成功）→ 后台下载启动：轮询等缓存注册（3s 超时）
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		path, ok := cm.Lookup("b")
@@ -296,15 +310,9 @@ func TestResumeCacheMissTriggersBackgroundDownload(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("恢复播放未命中应触发后台下载并完成缓存（3s 内未见缓存条目）")
+			t.Fatal("TrackStarted 后应触发后台下载并完成缓存（3s 内未见缓存条目）")
 		}
 		time.Sleep(20 * time.Millisecond)
-	}
-
-	// 结果回灌：未命中 → playingFromCache 保持 false
-	m, _ = update(m, msgs[0])
-	if m.playingFromCache {
-		t.Error("未命中恢复后 playingFromCache 应为 false")
 	}
 }
 

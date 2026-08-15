@@ -217,6 +217,15 @@ func probeListenerReady(t *testing.T, p *MpvPlayer, fake *fakeMpvServer) {
 	}
 }
 
+// setLoadWatchdogTimeout 调小加载看门狗时限（t.Cleanup 恢复原值）。
+// 包级变量测试隔离：同包测试顺序执行（无 t.Parallel），串行调整安全。
+func setLoadWatchdogTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := loadWatchdogTimeout
+	loadWatchdogTimeout = d
+	t.Cleanup(func() { loadWatchdogTimeout = orig })
+}
+
 // waitEvent 在超时时间内等待下一个事件。
 func waitEvent(t *testing.T, p *MpvPlayer, timeout time.Duration) Event {
 	t.Helper()
@@ -529,6 +538,228 @@ func TestMpvPlayerEndFileErrorWithUnknownLoadIDStillEmits(t *testing.T) {
 	}
 }
 
+// ---- 加载看门狗（回归：连播未缓存下一首卡住） ----
+
+// 核心场景：loadfile 后 mpv 取流悬挂（yt-dlp 卡死/403 重试退避/网络黑洞），
+// 不产生 file-loaded/end-file 任何事件 → 看门狗应在限时后主动 emit
+// LoadTimeoutError（UI 据此走现有重试/跳过链路，不再无限期静默卡住）。
+func TestLoadWatchdogTimesOutEmitsError(t *testing.T) {
+	setLoadWatchdogTimeout(t, 300*time.Millisecond)
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.Play("https://example.com/a.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	// 不推任何事件：加载悬挂，看门狗应主动报错
+	ev := waitErrorEvent(t, p, 2*time.Second)
+	var le *LoadTimeoutError
+	if !errors.As(ev.Err, &le) {
+		t.Fatalf("want *LoadTimeoutError, got %T (%v)", ev.Err, ev.Err)
+	}
+	if le.Timeout != 300*time.Millisecond {
+		t.Errorf("Timeout = %v, want 300ms", le.Timeout)
+	}
+	if !strings.Contains(ev.Err.Error(), "加载超时") {
+		t.Errorf("错误文案 = %q, want 含加载超时", ev.Err.Error())
+	}
+}
+
+// file-loaded 认领加载：此后超过原时限数倍也不得出现 LoadTimeoutError。
+func TestLoadWatchdogClearedOnFileLoaded(t *testing.T) {
+	setLoadWatchdogTimeout(t, 300*time.Millisecond)
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.Play("https://example.com/a.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	fake.pushEvent(`{"event":"file-loaded"}`)
+	if _, ok := waitEvent(t, p, 2*time.Second).(TrackStartedEvent); !ok {
+		t.Fatalf("want TrackStartedEvent")
+	}
+	select {
+	case ev := <-p.Events():
+		t.Fatalf("file-loaded 后不应有超时错误, got %#v", ev)
+	case <-time.After(2 * time.Second):
+	}
+}
+
+// end-file reason=eof 认领加载（播完/失败均为加载有结论）。
+func TestLoadWatchdogClearedOnEndFileEOF(t *testing.T) {
+	setLoadWatchdogTimeout(t, 300*time.Millisecond)
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.Play("https://example.com/a.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	fake.pushEvent(`{"event":"end-file","reason":"eof"}`)
+	if _, ok := waitEvent(t, p, 2*time.Second).(TrackEndedEvent); !ok {
+		t.Fatalf("want TrackEndedEvent")
+	}
+	select {
+	case ev := <-p.Events():
+		t.Fatalf("end-file eof 后不应有超时错误, got %#v", ev)
+	case <-time.After(2 * time.Second):
+	}
+}
+
+// end-file reason=error（当前曲目）认领加载：发出 LoadFailedError 且不超时。
+func TestLoadWatchdogClearedOnEndFileError(t *testing.T) {
+	setLoadWatchdogTimeout(t, 300*time.Millisecond)
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.Play("https://example.com/a.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	fake.pushEvent(`{"event":"end-file","reason":"error","playlist_entry_id":1,"file_error":"x"}`)
+	ev := waitErrorEvent(t, p, 2*time.Second)
+	var le *LoadFailedError
+	if !errors.As(ev.Err, &le) {
+		t.Fatalf("want *LoadFailedError, got %T (%v)", ev.Err, ev.Err)
+	}
+	select {
+	case ev := <-p.Events():
+		t.Fatalf("end-file error 后不应有超时错误, got %#v", ev)
+	case <-time.After(2 * time.Second):
+	}
+}
+
+// 陈旧 end-file error（旧曲 id=1 晚到）被过滤丢弃，不得解除新加载的看门狗：
+// 新曲（id=2）仍在取流悬挂 → 超时错误必须照常触发。
+func TestLoadWatchdogStaleEndFileErrorKeepsArmed(t *testing.T) {
+	setLoadWatchdogTimeout(t, 300*time.Millisecond)
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.Play("https://example.com/a.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Play("https://example.com/b.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	fake.pushEvent(`{"event":"end-file","reason":"error","playlist_entry_id":1,"file_error":"x"}`)
+	ev := waitErrorEvent(t, p, 2*time.Second)
+	var le *LoadTimeoutError
+	if !errors.As(ev.Err, &le) {
+		t.Fatalf("陈旧 end-file error 不应解除新加载的看门狗：want *LoadTimeoutError, got %T (%v)", ev.Err, ev.Err)
+	}
+}
+
+// 新 loadfile 重置 deadline：第一次加载的 deadline 不得在第二次加载后误报，
+// 且超时只触发一次（认领后清 deadline 防重复）。
+func TestLoadWatchdogResetOnNewLoad(t *testing.T) {
+	setLoadWatchdogTimeout(t, 300*time.Millisecond)
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.Play("https://example.com/a.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(loadWatchdogTimeout / 2) // 未超时即切歌
+	if err := p.Play("https://example.com/b.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	// 只应收到一次超时（第二次加载的）；第一次的 deadline 已被重置不误报
+	ev := waitErrorEvent(t, p, 2*time.Second)
+	var le *LoadTimeoutError
+	if !errors.As(ev.Err, &le) {
+		t.Fatalf("want *LoadTimeoutError, got %T (%v)", ev.Err, ev.Err)
+	}
+	// 认领后不得重复触发
+	select {
+	case ev := <-p.Events():
+		t.Fatalf("超时认领后不应重复触发, got %#v", ev)
+	case <-time.After(2 * loadWatchdogTimeout):
+	}
+}
+
+// 回归（审查 P1）：断开清理必须清除加载看门狗状态——若 onDisconnect 只清
+// lastLoadID 而残留 loadDeadline，重连后新 watchdogLoop 继承旧 deadline
+//（最多还有 30s）到期误报 LoadTimeoutError → UI 无用户操作自动重播断线前
+// 曲目。断线时刻在途加载必然已死：deadline 归零 + loadResolved=true（重连后
+// 无活跃加载）。
+func TestOnDisconnectClearsLoadDeadline(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.Play("https://example.com/a.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	p.stateMu.Lock()
+	if p.loadDeadline.IsZero() || p.loadResolved {
+		p.stateMu.Unlock()
+		t.Fatal("前置：Play 后看门狗应武装（deadline 非零且 loadResolved=false）")
+	}
+	p.stateMu.Unlock()
+
+	// 设 reconnecting=true：onDisconnect 只清理死状态、不启动 autoReconnect
+	//（避免重连副作用干扰断言），与真实"重连进行中连接又死"路径一致。
+	p.stateMu.Lock()
+	p.reconnecting = true
+	p.stateMu.Unlock()
+
+	p.onDisconnect(p.currentConn())
+
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	if !p.loadDeadline.IsZero() {
+		t.Errorf("onDisconnect 后 loadDeadline = %v, want 零值（重连后不得继承旧 deadline）", p.loadDeadline)
+	}
+	if !p.loadResolved {
+		t.Error("onDisconnect 后 loadResolved 应为 true（断线时刻在途加载已死，无未决结论）")
+	}
+}
+
+// 回归（审查 P1）：superseded 检查必须先于 expired 认领。旧实现先 claim
+//（清 deadline）再查代际——重连后旧代际 loop 最后一片 tick 会先认领（吞掉
+// 新代际的 deadline）再退出；emit 在 superseded 检查之后执行，不会真的误报
+// 超时，真正的破坏是 deadline 被清空。本测试只推进代际（模拟重连已建立新连
+// 接），不启动新 loop：若旧 loop 先认领，deadline 被清空；修复后旧 loop 直
+// 接退出，deadline 保留给（尚不存在的）新代际 loop。
+func TestWatchdogSupersededBeforeClaim(t *testing.T) {
+	setLoadWatchdogTimeout(t, 300*time.Millisecond)
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.Play("https://example.com/a.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	p.stateMu.Lock()
+	if p.loadDeadline.IsZero() {
+		p.stateMu.Unlock()
+		t.Fatal("前置：Play 后 loadDeadline 应为非零")
+	}
+	p.stateMu.Unlock()
+
+	// 模拟重连：connect() 自增 watchdogSeq 启动新代际，旧 loop 的 seq 已过期。
+	// 旧 loop 首个 tick 在 500ms（ticker 周期）后：deadline 已于 300ms 过期，
+	// 该 tick 同时命中 superseded 与 expired——修复前会先认领（清掉新代际
+	// deadline）再退出，不会误报。
+	p.stateMu.Lock()
+	p.watchdogSeq++
+	p.stateMu.Unlock()
+
+	// 等待远超一个 tick 周期：保证旧 loop 已处理（至少一片）tick 并退出。
+	// 2×timeout(600ms) + 600ms 覆盖 ticker 500ms 周期与调度抖动。
+	time.Sleep(2*loadWatchdogTimeout + 600*time.Millisecond)
+
+	// 旧代际不得误报超时
+	select {
+	case ev := <-p.Events():
+		t.Fatalf("旧代际看门狗不得误报超时, got %#v", ev)
+	default:
+	}
+	// 旧代际不得认领：deadline 保留给新代际（仍非零——新 loop 才负责认领）
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	if p.loadDeadline.IsZero() {
+		t.Error("旧代际 loop 不得认领/清空 deadline（应保留给新代际）")
+	}
+}
+
 // 旧版 mpv 可能缺失 file_error 字段：此时 FileError 为空串，
 // 错误消息与原有版本完全一致（向后兼容）。
 func TestMpvPlayerLoadFailedErrorEmptyFileError(t *testing.T) {
@@ -748,6 +979,9 @@ func TestMpvPlayerStartFailureLeavesNoDirtyState(t *testing.T) {
 
 // mpv 启动参数必须含 --ytdl-format=bestaudio：纯音频播放器只需音频流，
 // 避免同时开视频+音频两个流（YouTube 403 风控暴露面翻倍，见设计文档）。
+// 且必须含 --ytdl-raw-options=socket-timeout=15,retries=2：yt-dlp 取流收紧——
+// 403/网络黑洞快速失败（默认 retries=10 指数退避可拖 1-2 分钟，取流悬挂
+// 卡住的来源之一；回归：连播未缓存下一首卡住）。
 // 包装脚本把收到的全部参数记入 MUSIC_TUI_FAKE_MPV_LOG，Start 返回时
 // socket 已就绪（args 行先于 socket 出现），直接读日志断言。
 func TestMpvStartProcessYtdlFormatArg(t *testing.T) {
@@ -769,6 +1003,9 @@ func TestMpvStartProcessYtdlFormatArg(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "--ytdl-format=bestaudio") {
 		t.Errorf("mpv 启动参数应含 --ytdl-format=bestaudio:\n%s", data)
+	}
+	if !strings.Contains(string(data), "--ytdl-raw-options=socket-timeout=15,retries=2") {
+		t.Errorf("mpv 启动参数应含 --ytdl-raw-options=socket-timeout=15,retries=2:\n%s", data)
 	}
 }
 
