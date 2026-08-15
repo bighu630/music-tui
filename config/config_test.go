@@ -490,6 +490,49 @@ func TestLogLevelDefault(t *testing.T) {
 	}
 }
 
+// ── LyricFile 配置节 ─────────────────────────────────────────────
+
+func TestLoadLyricFileEnabled(t *testing.T) {
+	// 缺失 → 默认 true(开启)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"cache":{"enabled":false}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.LyricFile.Enabled {
+		t.Error("lyric_file 缺失时应默认开启")
+	}
+
+	// 显式 false → 关闭
+	path = filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"lyric_file": {"enabled": false}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg2.LyricFile.Enabled {
+		t.Error("lyric_file.enabled=false 时应关闭")
+	}
+
+	// 显式 true → 开启
+	path = filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"lyric_file": {"enabled": true}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg3, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg3.LyricFile.Enabled {
+		t.Error("lyric_file.enabled=true 时应开启")
+	}
+}
+
 func TestLogLevelParse(t *testing.T) {
 	cases := []struct {
 		in   string
