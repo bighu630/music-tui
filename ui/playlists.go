@@ -27,7 +27,7 @@ type plLoadMsg struct {
 // plCreateMsg 命名输入 Enter（新建）。
 type plCreateMsg struct{ name string }
 
-// plLocalAddMsg 本地路径输入 Enter（root 扫描路径并加入选中列表）。
+// plLocalAddMsg 本地路径输入 Enter（root 校验目录并自动新建「本地-<目录名>」列表导入）。
 type plLocalAddMsg struct {
 	path string
 }
@@ -643,7 +643,7 @@ func (p playlistModel) exitURLImport() playlistModel {
 func (p playlistModel) beginLocalAdd() playlistModel {
 	p.mode = plLocalAdd
 	p.input.SetValue("")
-	p.input.Placeholder = "输入本地路径（音频文件或目录），Enter 扫描"
+	p.input.Placeholder = "输入本地音乐目录路径，Enter 扫描"
 	p.input.CursorEnd()
 	p.input.Focus()
 	return p
