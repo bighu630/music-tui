@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"music-tui/logger"
 	"music-tui/model"
 )
 
@@ -128,6 +129,7 @@ func (a *YouTubeAdapter) Search(ctx context.Context, query string) ([]model.Trac
 	}
 	args = append(args, a.headerArgs()...)
 	args = append(args, "--dump-json", "--no-warnings", "--flat-playlist", arg)
+	logger.Debug("yt-dlp 搜索: %s", query)
 	cmd := exec.CommandContext(ctx, a.ytdlpPath, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -137,17 +139,26 @@ func (a *YouTubeAdapter) Search(ctx context.Context, query string) ([]model.Trac
 		// *ExitError（非零退出）或 signal: killed，须以 ctx 状态为准。
 		if ctx.Err() != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				logger.Warn("yt-dlp 搜索失败: %v", err)
 				return nil, fmt.Errorf("搜索超时（%s）: %w", a.timeout, ctx.Err())
 			}
+			logger.Warn("yt-dlp 搜索失败: %v", err)
 			return nil, fmt.Errorf("搜索已取消: %w", ctx.Err())
 		}
 		msg := tail(stderr.String(), maxStderrTail)
 		if msg == "" {
 			msg = "<无输出>"
 		}
+		logger.Warn("yt-dlp 搜索失败: %v", err)
 		return nil, fmt.Errorf("yt-dlp 搜索失败: %w（stderr: %s）", err, msg)
 	}
-	return parseYTDLPOutput(out)
+	tracks, err := parseYTDLPOutput(out)
+	if err != nil {
+		logger.Warn("yt-dlp 搜索失败: %v", err)
+		return nil, err
+	}
+	logger.Debug("yt-dlp 搜索完成: %d 条 (%s)", len(tracks), query)
+	return tracks, nil
 }
 
 // tail 返回 s 末尾最多 max 字节；用于截取错误诊断文本。
@@ -184,6 +195,7 @@ func (a *YouTubeAdapter) FetchPlaylist(ctx context.Context, playlistURL string, 
 	// 直接凭 cookie 拉取，公开歌单不受影响。
 	args = append(args, "--extractor-args", "youtubetab:skip=authcheck")
 	args = append(args, playlistURL)
+	logger.Debug("yt-dlp 拉取歌单: %s", playlistURL)
 	cmd := exec.CommandContext(ctx, a.ytdlpPath, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -193,17 +205,26 @@ func (a *YouTubeAdapter) FetchPlaylist(ctx context.Context, playlistURL string, 
 		// *ExitError（非零退出）或 signal: killed，须以 ctx 状态为准。
 		if ctx.Err() != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				logger.Warn("yt-dlp 歌单拉取失败: %v", err)
 				return model.Playlist{}, fmt.Errorf("歌单拉取超时（%s）: %w", a.plTimeout, ctx.Err())
 			}
+			logger.Warn("yt-dlp 歌单拉取失败: %v", err)
 			return model.Playlist{}, fmt.Errorf("歌单拉取已取消: %w", ctx.Err())
 		}
 		msg := tail(stderr.String(), maxStderrTail)
 		if msg == "" {
 			msg = "<无输出>"
 		}
+		logger.Warn("yt-dlp 歌单拉取失败: %v", err)
 		return model.Playlist{}, fmt.Errorf("yt-dlp 歌单拉取失败: %w（stderr: %s）", err, msg)
 	}
-	return parseYTDLPPlaylist(out)
+	pl, err := parseYTDLPPlaylist(out)
+	if err != nil {
+		logger.Warn("yt-dlp 歌单拉取失败: %v", err)
+		return model.Playlist{}, err
+	}
+	logger.Debug("yt-dlp 歌单完成: %s (id=%s) 条目=%d", pl.Title, pl.ID, len(pl.Tracks))
+	return pl, nil
 }
 
 // entryToTrack 将 yt-dlp 单条条目映射为 Track；ID 为空返回 ok=false。
