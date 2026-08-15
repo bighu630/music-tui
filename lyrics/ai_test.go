@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -317,14 +319,30 @@ func TestIdentifyContextCanceledNoRetry(t *testing.T) {
 }
 
 func TestIdentifyNetworkErrorRetries(t *testing.T) {
-	// 连接拒绝 = 网络错误：重试一次（共 2 次尝试）
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	url := server.URL
-	server.Close() // 关闭后连接必然失败
+	// 连接被拒/断开 = 网络传输错误：重试一次（共 2 次连接尝试）。
+	// 用计数 listener：accept 后立即断开，客户端收到传输错误。
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var accepts int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			atomic.AddInt32(&accepts, 1)
+			conn.Close() // 立即断开 → 客户端写/读失败（url.Error）
+		}
+	}()
 
-	c := NewOpenAIClientWithBaseURL("sk-test", "", url)
+	c := NewOpenAIClientWithBaseURL("sk-test", "", "http://"+ln.Addr().String())
 	if _, err := c.Identify(context.Background(), "晴天", ""); err == nil {
 		t.Fatal("Identify(network error) = nil error, want error")
 	}
-	_ = c // 客户端内部尝试次数无法直接观测，能拿到错误即可
+	if got := atomic.LoadInt32(&accepts); got != 2 {
+		t.Errorf("连接尝试 %d 次, want 2（网络错误重试一次）", got)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -50,7 +51,45 @@ func newAICache(path string) (*aiCache, error) {
 	return c, nil
 }
 
-// load 读入全部行，返回跳过的损坏行数。
+// maxCacheLine 单行最大字节数（正常行 <1KB；超长视为损坏）。
+const maxCacheLine = 1024 * 1024
+
+// errLineTooLong 行超长：整行已丢弃，流位置已越过该行（可继续读取）。
+var errLineTooLong = errors.New("cache line too long")
+
+// readLine 从 reader 读一行（含结尾 \n）：超长行整行丢弃并返回
+// errLineTooLong（不中断后续行读取）；EOF 时返回已读内容与 io.EOF。
+func readLine(br *bufio.Reader) (string, error) {
+	var sb []byte
+	for {
+		frag, err := br.ReadSlice('\n')
+		sb = append(sb, frag...)
+		switch {
+		case err == nil:
+			return string(sb), nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			if len(sb) > maxCacheLine {
+				// 丢弃整行：继续读到换行或 EOF
+				for errors.Is(err, bufio.ErrBufferFull) {
+					_, err = br.ReadSlice('\n')
+				}
+				if err == nil || errors.Is(err, io.EOF) {
+					return "", errLineTooLong
+				}
+				return "", err
+			}
+			continue
+		case errors.Is(err, io.EOF):
+			return string(sb), io.EOF // 末行无换行
+		default:
+			return "", err
+		}
+	}
+}
+
+// load 读入全部行，返回跳过的损坏行数。超长行/坏 JSON 行整行丢弃
+// 但**不中断后续行读取**（回归：TestAICacheHugeLineSkipped——[好, 超长, 好]
+// 三行文件重写后两个好行都必须保留）。
 func (c *aiCache) load() (int, error) {
 	f, err := os.Open(c.path)
 	if err != nil {
@@ -61,31 +100,30 @@ func (c *aiCache) load() (int, error) {
 	}
 	defer f.Close()
 	dropped := 0
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
+	br := bufio.NewReader(f)
+	for {
+		line, err := readLine(br)
+		if line != "" {
+			line = strings.TrimSpace(line)
+			var rec aiCacheLine
+			if json.Unmarshal([]byte(line), &rec) != nil || rec.Key == "" {
+				dropped++
+			} else {
+				c.m[rec.Key] = AIResult{IsSong: rec.IsSong, Title: rec.Title, Artist: rec.Artist}
+			}
 		}
-		var rec aiCacheLine
-		if err := json.Unmarshal([]byte(line), &rec); err != nil || rec.Key == "" {
+		switch {
+		case err == nil:
+			continue
+		case errors.Is(err, errLineTooLong):
 			dropped++
 			continue
-		}
-		c.m[rec.Key] = AIResult{IsSong: rec.IsSong, Title: rec.Title, Artist: rec.Artist}
-	}
-	if err := sc.Err(); err != nil {
-		if errors.Is(err, bufio.ErrTooLong) {
-			// 超长行（损坏）视同普通损坏行：跳过并计入 dropped，
-			// 由调用方重写清理——不因单行垃圾让整个缓存不可用
-			// （回归：TestAICacheHugeLineSkipped）。
-			dropped++
+		case errors.Is(err, io.EOF):
 			return dropped, nil
+		default:
+			return 0, fmt.Errorf("扫描 AI 缓存: %w", err)
 		}
-		return 0, fmt.Errorf("扫描 AI 缓存: %w", err)
 	}
-	return dropped, nil
 }
 
 // Get 按 key 查询；未命中返回 false。
@@ -96,17 +134,21 @@ func (c *aiCache) Get(key string) (AIResult, bool) {
 	return r, ok
 }
 
-// Begin 登记 key 的识别进行中（single-flight）：返回 nil 表示本调用者
-// 成为执行者；返回 channel 表示已有执行者在跑，等待其完成信号。
-func (c *aiCache) Begin(key string) <-chan struct{} {
+// Begin 在**同一锁内**完成「查缓存 + 登记 in-flight」（杜绝查-登窗口的
+// 重复调用）：ok=true → 缓存已命中直接使用；wait!=nil → 已有执行者在
+// 跑，等待其完成信号；否则本调用者为执行者（需 defer End）。
+func (c *aiCache) Begin(key string) (r AIResult, ok bool, wait <-chan struct{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if r, ok := c.m[key]; ok {
+		return r, true, nil
+	}
 	if ch, ok := c.inflight[key]; ok {
-		return ch
+		return AIResult{}, false, ch
 	}
 	ch := make(chan struct{})
 	c.inflight[key] = ch
-	return nil
+	return AIResult{}, false, nil
 }
 
 // End 结束识别并释放等待者（执行者 defer 调用）。

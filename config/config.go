@@ -127,6 +127,9 @@ func (c *Config) Save(path string) error {
 		return fmt.Errorf("序列化配置: %w", err)
 	}
 	tmp := path + ".tmp"
+	// 清陈旧 tmp（可能为崩溃残留的旧权限文件；os.WriteFile 不 chmod
+	// 已存在文件，必须先移除才能保证 0600 生效）
+	_ = os.Remove(tmp)
 	// 0600：配置文件含 OpenAI API key，禁止其他本地用户读取
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("写入配置文件: %w", err)

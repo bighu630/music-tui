@@ -172,12 +172,15 @@ func TestAICacheUnmarshal(t *testing.T) {
 	}
 }
 
-// TestAICacheHugeLineSkipped 超长行（>Scanner 缓冲上限）视同损坏行：
-// 跳过并重写，不阻止加载与使用。
+// TestAICacheHugeLineSkipped 超长行（>maxCacheLine）视同损坏行：整行
+// 跳过但不中断后续行（[好, 超长, 好] → 重写后两个好行都在），
+// 不阻止加载与使用。
 func TestAICacheHugeLineSkipped(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ai.jsonl")
 	huge := "{\"key\":\"H\",\"is_song\":true,\"title\":\"" + strings.Repeat("晴", 400*1024) + "\"}"
-	data := "{\"key\":\"A|B\",\"is_song\":true,\"title\":\"A\",\"artist\":\"B\"}\n" + huge + "\n"
+	data := "{\"key\":\"A|B\",\"is_song\":true,\"title\":\"A\",\"artist\":\"B\"}\n" +
+		huge + "\n" +
+		"{\"key\":\"C|D\",\"is_song\":false}\n"
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -188,16 +191,22 @@ func TestAICacheHugeLineSkipped(t *testing.T) {
 	if _, ok := c.Get("A|B"); !ok {
 		t.Error("超长行前的好行丢失")
 	}
+	if got, ok := c.Get("C|D"); !ok || got.IsSong {
+		t.Error("超长行后的好行丢失（超长行不得中断后续读取）")
+	}
 	if _, ok := c.Get("H"); ok {
 		t.Error("超长行竟然被加载")
 	}
-	// 文件被重写：超长行已清除
+	// 文件被重写：超长行已清除，两个好行保留
 	cleaned, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(cleaned) > 1024 {
 		t.Errorf("重写后文件仍含超长行: %d 字节", len(cleaned))
+	}
+	if !strings.Contains(string(cleaned), "A|B") || !strings.Contains(string(cleaned), "C|D") {
+		t.Errorf("重写后好行丢失:\n%s", cleaned)
 	}
 }
 
