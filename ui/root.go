@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -18,6 +17,7 @@ import (
 	"music-tui/cache"
 	"music-tui/cover"
 	"music-tui/history"
+	"music-tui/logger"
 	"music-tui/lyrics"
 	"music-tui/model"
 	"music-tui/player"
@@ -805,7 +805,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 非 NotFound 错误（lrclib 超时/服务端错误）打日志便于诊断：
 			// AI 识别失败已在 lyrics 包打印，此处覆盖 lrclib 链。
 			if msg.err != nil && !errors.Is(msg.err, lyrics.ErrNotFound) {
-				log.Printf("歌词拉取失败（lrclib 链）: %v", msg.err)
+				logger.Warn("歌词拉取失败（lrclib 链）: %v", msg.err)
 			}
 			m.home = m.home.setLyrics(msg.err, msg.lyrics)
 			if msg.err == nil && msg.title != "" {
@@ -832,7 +832,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case historyResultMsg:
 		if msg.err != nil {
-			log.Printf("写入历史失败（不影响播放）: %v", msg.err)
+			logger.Warn("写入历史失败（不影响播放）: %v", msg.err)
 		}
 		return m, nil
 
@@ -1148,16 +1148,21 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		if m.queueSkip {
 			m.queueSkip = false
 			if tr, ok := m.queue.Current(); ok {
+				logger.Info("曲目结束(删除解耦): 连播顺延曲目 %s - %s", tr.Title, tr.Artist)
 				return m.beginPlay(tr)
 			}
 			if tr, ok := m.queue.Next(); ok {
+				logger.Info("曲目结束(删除解耦): 连播下一首 %s - %s", tr.Title, tr.Artist)
 				return m.beginPlay(tr)
 			}
+			logger.Info("曲目结束: 队列为空，停止播放")
 			return m.stopAfterEnd()
 		}
 		if tr, ok := m.queue.Next(); ok {
+			logger.Info("曲目结束: 连播下一首 %s - %s", tr.Title, tr.Artist)
 			return m.beginPlay(tr)
 		}
+		logger.Info("曲目结束: 无下一首，停止播放")
 		return m.stopAfterEnd()
 	case player.ErrorEvent:
 		// 加载/播放有结论（失败、断开、超时）：加载中提示结束。重试/跳过路径
@@ -1193,6 +1198,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 			default:
 				hint = m.failureHint(le)
 			}
+			logger.Warn("播放失败(%s): %v", hint, ev.Err)
 			// 续播恢复（PlayPaused 静默加载）期间撞取流失败：不自动重试——
 			// 恢复上下文已作废（重试会走 beginPlay→Play()：发声、从 0:00、
 			// 非暂停，静默丢弃恢复语义），保留“恢复播放失败”语义：状态重置 + 横幅
@@ -1209,6 +1215,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 			}
 			if m.retryCount < maxPlayRetries {
 				m.retryCount++
+				logger.Warn("播放失败，自动重试 %d/%d: %s - %s (id=%s)", m.retryCount, maxPlayRetries, m.state.Track.Title, m.state.Track.Artist, m.state.Track.ID)
 				m, cmd := m.showToast(fmt.Sprintf("播放失败：%s，正在自动重试（%d/%d）…", hint, m.retryCount, maxPlayRetries), toastWarning)
 				m.state.Playing = false
 				m.home = m.home.syncState(m.state)
@@ -1236,10 +1243,12 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 				// 跳过失败曲目继续连播（toast 告知用户哪首失败）。
 				// 目标曲目已在本轮失败集合中（队列回绕撞回已失败曲目）：不跳，
 				// 走下方停止路径，避免无限交替重播（回归：TestLoadFailAllTracksFailStopsLoop）。
+				logger.Warn("重试耗尽，跳过失败曲目继续连播: %s - %s (id=%s)", skip.Title, skip.Artist, skip.ID)
 				m2, cmd := m.skipFailedTrack(*skip, hint)
 				return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
 			}
 			// 单曲重试耗尽：停止播放，等待用户操作（空格重播同曲）
+			logger.Error("播放失败，重试 %d 次耗尽，停止播放: %v", maxPlayRetries, ev.Err)
 			m.ended = true
 			m, cmd := m.showToast(fmt.Sprintf("播放失败：%s，已重试 %d 次。请稍后重试或更换歌曲", hint, maxPlayRetries), toastError)
 			m.state.Playing = false
@@ -1247,6 +1256,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 		}
 		m.retryCount = 0
+		logger.Warn("播放器错误: %v", ev.Err)
 		m.ended = true
 		m, cmd := m.showToast(ev.Err.Error(), toastError)
 		m.state.Playing = false
@@ -1382,11 +1392,14 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 	if path, ok := m.cache.Lookup(track.ID); ok {
 		target = path
 		m.playingFromCache = true
+		logger.Info("播放(缓存命中): %s - %s (id=%s) 文件=%s", track.Title, track.Artist, track.ID, path)
 	} else {
 		m.playingFromCache = false
+		logger.Info("播放: %s - %s (id=%s) url=%s", track.Title, track.Artist, track.ID, track.URL)
 		// 缓存预热不在 beginPlay 触发（见上方注释）：TrackStarted 统一启动
 	}
 	if err := m.player.Play(target); err != nil {
+		logger.Error("播放命令失败: %s - %s (id=%s): %v", track.Title, track.Artist, track.ID, err)
 		m.loadingSince = time.Time{} // 加载未开始即失败：无加载中提示
 		m, cmd := m.showToast("播放失败: "+err.Error(), toastError)
 		m.state = model.PlaybackState{}
@@ -1438,7 +1451,7 @@ func (m Model) notifyTrack(t *model.Track) {
 func (m Model) saveSession() {
 	if m.state.Track == nil {
 		if err := m.session.Clear(); err != nil {
-			log.Printf("清除会话失败: %v", err)
+			logger.Warn("清除会话失败: %v", err)
 		}
 		return
 	}
@@ -1448,7 +1461,7 @@ func (m Model) saveSession() {
 		Ended:    m.ended,
 	}
 	if err := m.session.Save(st); err != nil {
-		log.Printf("保存会话失败: %v", err)
+		logger.Warn("保存会话失败: %v", err)
 	}
 }
 
@@ -1471,7 +1484,9 @@ func resumeCmd(m Model) tea.Cmd {
 			target = path
 			fromCache = true
 		}
+		logger.Info("续播恢复: %s - %s (id=%s) pos=%.1f fromCache=%v", track.Title, track.Artist, track.ID, pos, fromCache)
 		if err := m.player.PlayPaused(target, pos); err != nil {
+			logger.Error("续播恢复失败: %v", err)
 			return resumeResultMsg{err: err, fromCache: fromCache}
 		}
 		return resumeResultMsg{fromCache: fromCache}
@@ -1539,10 +1554,12 @@ func (m Model) togglePlay() (Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.state.Playing {
+		logger.Debug("用户暂停")
 		return m, func() tea.Msg {
 			return playerOpResultMsg{err: m.player.Pause()}
 		}
 	}
+	logger.Debug("用户继续播放")
 	return m, func() tea.Msg {
 		return playerOpResultMsg{err: m.player.Resume()}
 	}
@@ -1560,6 +1577,7 @@ func (m Model) restartSameTrack() (Model, tea.Cmd) {
 
 // seekCmd 首页 ←/→ 触发的 seek（绝对位置，UI 侧已 clamp）。
 func seekCmd(p player.Player, target float64) tea.Cmd {
+	logger.Debug("seek 到 %.1fs", target)
 	return func() tea.Msg {
 		return playerOpResultMsg{err: p.Seek(target)}
 	}
