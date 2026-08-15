@@ -1,6 +1,11 @@
 // Package player 定义播放器接口与事件类型；mpv 实现见 mpv.go。
 package player
 
+import (
+	"fmt"
+	"time"
+)
+
 // Event 是播放器事件接口，由各具体事件类型实现（封闭接口）。
 type Event interface {
 	isEvent()
@@ -52,6 +57,15 @@ func (e *LoadFailedError) Error() string {
 		return "mpv 播放出错（end-file reason=error）: " + e.FileError
 	}
 	return "mpv 播放出错（end-file reason=error）"
+}
+
+// LoadTimeoutError 表示加载超时：loadfile 后限时未收到 file-loaded/end-file
+// （mpv 取流悬挂：yt-dlp 卡死/网络黑洞/403 重试退避），看门狗主动报错，
+// UI 据此走现有重试/跳过链路，不再无限期卡住。
+type LoadTimeoutError struct{ Timeout time.Duration }
+
+func (e *LoadTimeoutError) Error() string {
+	return fmt.Sprintf("加载超时（%s 内未就绪）", e.Timeout)
 }
 
 // Player 是播放器接口，ui 层只依赖此接口。
