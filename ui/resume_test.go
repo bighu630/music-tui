@@ -52,9 +52,11 @@ func newResumeTestModel(t *testing.T, st *session.State, onTrack func(*model.Tra
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 缓存指向不存在的 yt-dlp：恢复路径不会触发 CacheAsync，即使触发
-	// 后台下载也立即失败退出（无网络无泄漏）。
-	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, "/nonexistent/yt-dlp", "", nil)
+	// 缓存为禁用态（Disabled）：本测试线聚焦恢复状态机，不含缓存集成（缓存命中/
+	// 下载/兑底由 cache_test.go 的 newCacheTestModel* 覆盖）。禁用缓存 = “下载不可用”：
+	// 恢复作废后的取流失败（TestResumeLoadFailNoAutoRetry 后半段）走现有重试链路，
+	// 不被缓存兑底分支拦截。
+	cm := cache.Disabled()
 	ytStore, err := ytm.NewStore(filepath.Join(t.TempDir(), "ytm.json"))
 	if err != nil {
 		t.Fatal(err)

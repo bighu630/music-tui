@@ -54,6 +54,29 @@ type playerEventMsg struct {
 	ev player.Event
 }
 
+// fallbackState 缓存兜底状态机。active：ErrorEvent 后等待下载完成（阻断 URL 重试，
+// 避免与下载并发访问同一 URL 放大 403 风控——回归：连播未缓存下一首卡住）；
+// beginPlay 注册的“仅监听”（WaitDone）不置 active。canceled：用户手动操作取消。
+type fallbackState struct {
+	active        bool
+	trackID       string
+	gen           int    // 发起时的播放代际（消息 gen 校验）
+	hint          string // 原错误提示（放弃兜底时复用）
+	isLoadTimeout bool   // 原错误类型（放弃兜底时复用）
+	canceled      bool
+}
+
+// cacheFallbackDoneMsg 缓存下载完成（成功或失败都触发）；gen 不匹配/已取消则丢弃。
+type cacheFallbackDoneMsg struct {
+	trackID string
+	gen     int
+}
+
+// cacheFallbackTimeoutMsg 兜底等待超时（fallbackWaitTimeout）：放弃等待，恢复现有重试链路。
+type cacheFallbackTimeoutMsg struct {
+	gen int
+}
+
 // playResultMsg 播放结果（预留：异步播放改造时使用）。
 // 注意：当前实现中 startPlay 同步调用 player.Play（见 startPlay 注释），
 // 因此本消息当前无人生产；保留类型仅为兼容外部消息路由。
@@ -233,6 +256,9 @@ const saveInterval = 5 * time.Second
 const maxPlayRetries = 2           // 每首曲目最多自动重试次数
 var retryBackoff = 2 * time.Second // 重试间隔（包级变量：测试可调小以缩短等待）
 
+// fallbackWaitTimeout 缓存兜底等待下载完成的上限（包级变量：测试可调小）。
+var fallbackWaitTimeout = 90 * time.Second
+
 // Model 顶层模型：持有共享播放状态、播放队列与五个页面，负责全局按键、
 // 页面切换、服务调用与结果路由。
 type Model struct {
@@ -283,6 +309,12 @@ type Model struct {
 	// 播放失败自动重试状态
 	retryCount int // 当前曲目已自动重试次数（新曲加载成功/结束/手动播放时重置）
 	playGen    int // 播放代际计数器：每次 beginPlay 自增；过期重试消息（用户已换曲）丢弃
+	// playStarted 当前曲目是否已开始播放（TrackStartedEvent 到达置 true；
+	// beginPlay/恢复成功重置 false）——缓存兜底据此判断“mpv 未开始播放”时切本地。
+	playStarted bool
+	// fallback 缓存兜底状态：mpv URL 播放失败/未开始 + 缓存下载完成后改用本地文件播放。
+	// 详见 fallbackState 注释。
+	fallback fallbackState
 	// failedTracks 本轮取流失败（重试耗尽被跳过）的曲目 ID 集合：
 	// 队列回绕时防止“失败→跳过→回绕→再失败”无限交替重播死循环
 	// （回归：TestLoadFailAllTracksFailStopsLoop）。TrackStartedEvent 清空——
@@ -821,6 +853,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m2, cmd := m.playQueueTrack()
 		return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
 
+	case cacheFallbackDoneMsg:
+		// 监听身份校验：代际不匹配（用户已切歌/重播）或已取消（用户暂停）→ 丢弃
+		if msg.gen != m.playGen || m.fallback.canceled || m.fallback.trackID != msg.trackID {
+			return m, waitForPlayerEvents(m.player)
+		}
+		if m.state.Track == nil || m.state.Track.ID != msg.trackID {
+			return m, waitForPlayerEvents(m.player)
+		}
+		// 已开始播放/已播本地/已结束/当前曲已被删除（queueSkip）→ 无需兜底，丢弃
+		if m.playStarted || m.playingFromCache || m.ended || m.queueSkip {
+			return m, waitForPlayerEvents(m.player)
+		}
+		if path, ok := m.cache.Lookup(msg.trackID); ok {
+			logger.Warn("缓存下载完成，改用本地文件: %s", path)
+			m2, cmd := m.beginPlay(*m.state.Track)
+			m2, tcmd := m2.showToast("已改用缓存文件播放", toastSuccess)
+			return m2, tea.Batch(cmd, tcmd, waitForPlayerEvents(m.player))
+		}
+		// 下载失败（信号关闭但未命中）：若处于兜底等待 → 放弃，走现有重试链路（原错误提示）
+		if m.fallback.active {
+			m.fallback.active = false
+			return m.retryOrSkipLoadFailure(m.fallback.hint, m.fallback.isLoadTimeout, []tea.Cmd{waitForPlayerEvents(m.player)})
+		}
+		return m, waitForPlayerEvents(m.player)
+
+	case cacheFallbackTimeoutMsg:
+		if msg.gen != m.playGen || !m.fallback.active {
+			return m, waitForPlayerEvents(m.player)
+		}
+		logger.Warn("缓存兜底等待超时(%s)，恢复自动重试", fallbackWaitTimeout)
+		m.fallback.active = false
+		return m.retryOrSkipLoadFailure(m.fallback.hint, m.fallback.isLoadTimeout, []tea.Cmd{waitForPlayerEvents(m.player)})
+
 	case resumeResultMsg:
 		// 命中/未命中标记回填（成功分支据此在异步 LoadFailed 时移除损坏缓存）。
 		m.playingFromCache = msg.fromCache
@@ -854,6 +919,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 提示（loadingSince 只在 beginPlay 设置，审查 P2-1）。TrackStartedEvent
 		// 到达时统一清除（现有分支已清），失败分支已置零。
 		m.loadingSince = time.Now()
+		// 恢复加载进行中：mpv 未开始播放（TrackStartedEvent 到达统一置 true），
+		// 缓存兜底监听（beginPlay 的 WaitDone）在恢复期间到达时据此判断。
+		m.playStarted = false
 		// 恢复成功：按当前模式补 SetLoop（beginPlay 有显式 SetLoop，恢复路径
 		// 此前漏设——单曲循环模式下恢复会丢失 mpv loop-file 语义；回归：
 		// TestResumeSuccessSetsLoopPerMode）。失败仅记 toast 不阻断恢复。
@@ -1223,6 +1291,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.retryCount = 0                   // 新曲加载成功，重试预算重置
 		m.failedTracks = map[string]bool{} // 任何曲目加载成功 = 新一轮：本轮失败集合作废
 		m.resuming = false                 // 恢复加载成功：进入正常播放态，恢复上下文作废
+		m.playStarted = true               // mpv 已开始播放（缓存兜底据此不再切本地）
 		m.ended = false
 		m.loadingSince = time.Time{} // 加载成功：加载中提示结束
 		// 事件链存活标记：TrackStarted 到达 = UI 事件消费链健康（连播后首个
@@ -1330,59 +1399,38 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 				m.notifyTrack(nil)
 				return m.syncQueueViews(), tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 			}
-			if m.retryCount < maxPlayRetries {
-				m.retryCount++
-				if t := m.state.Track; t != nil {
-					logger.Warn("播放失败，自动重试 %d/%d: %s - %s (id=%s)", m.retryCount, maxPlayRetries, t.Title, t.Artist, t.ID)
-				} else {
-					logger.Warn("播放失败，自动重试 %d/%d", m.retryCount, maxPlayRetries)
+			// 缓存兜底：URL 取流失败/超时且未播本地文件 → 缓存已命中立即切本地；
+			// 未命中则启动/接入下载并等待完成（限时 fallbackWaitTimeout），完成后若仍未
+			// 开始播放自动切本地；下载不可用（禁用/无 yt-dlp）或等待放弃 → 走下方
+			// retryOrSkipLoadFailure 现有链路（原错误提示保留）。fromCache 失败（缓存
+			// 文件损坏，条目已移除）不兜底——重下同一 URL 大概率再失败，且与 mpv 并发
+			// 访问同一 URL 放大 403 风控（回归：TestCacheFallbackOnlyOnce）。
+			if !fromCache && !m.playingFromCache && m.state.Track != nil && !m.fallback.active {
+				tr := m.state.Track
+				if path, ok := m.cache.Lookup(tr.ID); ok {
+					logger.Warn("播放失败，改用缓存文件: %s - %s (id=%s) 文件=%s", tr.Title, tr.Artist, tr.ID, path)
+					m2, cmd := m.beginPlay(*tr) // beginPlay 内部重新 Lookup 自动命中缓存
+					// toast 提示（在 beginPlay 之后调用 showToast，注意 beginPlay 清 toast）
+					m2, tcmd := m2.showToast("播放失败，已改用缓存文件播放", toastSuccess)
+					return m2, tea.Batch(append([]tea.Cmd{cmd, tcmd}, cmds...)...)
 				}
-				m, cmd := m.showToast(fmt.Sprintf("播放失败：%s，正在自动重试（%d/%d）…", hint, m.retryCount, maxPlayRetries), toastWarning)
-				m.state.Playing = false
-				m.home = m.home.syncState(m.state)
-				return m, tea.Batch(cmd, waitForPlayerEvents(m.player), retryPlayCmd(m.playGen))
-			}
-			// 重试耗尽：跳过失败曲目继续连播。注意 Next 现为回绕语义——单曲队列/
-			// 重复 ID 会把失败曲目自身送回，继续播放会陷入“失败→重试→耗尽→
-			// 重播失败曲”死循环，故候选与失败曲目同 ID 时视为无曲可跳，保留
-			// “停止 + 等待用户操作”语义（ended=true）。
-			var skip *model.Track
-			if m.queueSkip {
-				// 重试耗尽且存在删除解耦标记：镜像 TrackEnded 的兜底逻辑——
-				// 指针已顺延，播放顺延曲目（当前位）而非 Next()，避免跳过头
-				// （回归：TestLoadFailExhaustedSkipRespectsQueueSkip）。
-				m.queueSkip = false
-				if tr, ok := m.queue.Current(); ok {
-					skip = &tr
-				} else if tr, ok := m.queue.Next(); ok {
-					skip = &tr
+				done := m.cache.CacheAsync(*tr)
+				if done == nil {
+					done = m.cache.WaitDone(tr.ID) // 已在途：接既有信号
 				}
-			} else if tr, ok := m.queue.Next(); ok {
-				skip = &tr
+				if done != nil {
+					m.fallback = fallbackState{active: true, trackID: tr.ID, gen: m.playGen, hint: hint, isLoadTimeout: isLoadTimeout}
+					m, cmd := m.showToast("缓存下载中，完成后将自动播放…", toastWarning)
+					return m, tea.Batch(cmd, waitCacheDone(m.cache, m.fallback.trackID, m.fallback.gen, done), fallbackTimeoutCmd(m.fallback.gen), waitForPlayerEvents(m.player))
+				}
+				// done == nil：缓存禁用/无 yt-dlp/既不在途 → 兜底不可用，走现有链路
+			} else if m.fallback.active && m.state.Track != nil && m.fallback.trackID == m.state.Track.ID {
+				// 兜底等待中再次收到播放失败：忽略（不重复启动下载/不消耗重试预算），
+				// 等待状态保持，下载完成/超时统一收口（回归：TestCacheFallbackActiveIgnoresSecondError）。
+				logger.Debug("缓存兜底等待中再次收到播放失败，忽略: %v", ev.Err)
+				return m, tea.Batch(waitForPlayerEvents(m.player))
 			}
-			if skip != nil && (m.state.Track == nil || skip.ID != m.state.Track.ID) && !m.failedTracks[skip.ID] {
-				// 跳过失败曲目继续连播（toast 告知用户哪首失败）。
-				// 目标曲目已在本轮失败集合中（队列回绕撞回已失败曲目）：不跳，
-				// 走下方停止路径，避免无限交替重播（回归：TestLoadFailAllTracksFailStopsLoop）。
-				logger.Warn("重试耗尽，跳过失败曲目继续连播: %s - %s (id=%s)", skip.Title, skip.Artist, skip.ID)
-				m2, cmd := m.skipFailedTrack(*skip, hint)
-				// 跳过 = 播放状态变更（新当前曲）：立即重算预加载目标，不必等下次
-				// TrackStarted——否则目标仍指向刚跳到的当前曲，预载会与 mpv 取流并发
-				// 访问同一 URL 放大 403 风控。回绕后目标可能撞回刚失败曲目
-				//（failedTracks 成员）：对其发起有界预载重试（MaxDownloadAttempts 次 ×
-				// DownloadRetryBackoff 退避 ≈ 数秒）是设计内接受的浪费——失败静默、
-				// 不与 mpv 并发同 URL（失败曲目已停止取流），与"失败静默"策略一致。
-				m2.refreshPreload()
-				return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
-			}
-			// 单曲重试耗尽：停止播放，等待用户操作（空格重播同曲）
-			logger.Error("播放失败，重试 %d 次耗尽，停止播放: %v", maxPlayRetries, ev.Err)
-			m.ended = true
-			m.refreshPreload() // ended 门控：清空预加载目标
-			m, cmd := m.showToast(fmt.Sprintf("播放失败：%s，已重试 %d 次。请稍后重试或更换歌曲", hint, maxPlayRetries), toastError)
-			m.state.Playing = false
-			m.home = m.home.syncState(m.state)
-			return m, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
+			return m.retryOrSkipLoadFailure(hint, isLoadTimeout, cmds)
 		}
 		m.retryCount = 0
 		logger.Warn("播放器错误: %v", ev.Err)
@@ -1394,6 +1442,65 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 	}
 	return m, tea.Batch(cmds...)
+}
+
+// retryOrSkipLoadFailure 播放失败（LoadFailed/LoadTimeout）后的重试/跳过/停止链路：
+// 预算内自动重试（URL），耗尽后跳过失败曲目继续连播或停止。hint 为失败提示。
+// 供 ErrorEvent 与缓存兜底放弃（下载失败/超时）共用。
+func (m Model) retryOrSkipLoadFailure(hint string, isLoadTimeout bool, cmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	if m.retryCount < maxPlayRetries {
+		m.retryCount++
+		if t := m.state.Track; t != nil {
+			logger.Warn("播放失败，自动重试 %d/%d: %s - %s (id=%s)", m.retryCount, maxPlayRetries, t.Title, t.Artist, t.ID)
+		} else {
+			logger.Warn("播放失败，自动重试 %d/%d", m.retryCount, maxPlayRetries)
+		}
+		m, cmd := m.showToast(fmt.Sprintf("播放失败：%s，正在自动重试（%d/%d）…", hint, m.retryCount, maxPlayRetries), toastWarning)
+		m.state.Playing = false
+		m.home = m.home.syncState(m.state)
+		return m, tea.Batch(cmd, waitForPlayerEvents(m.player), retryPlayCmd(m.playGen))
+	}
+	// 重试耗尽：跳过失败曲目继续连播。注意 Next 现为回绕语义——单曲队列/
+	// 重复 ID 会把失败曲目自身送回，继续播放会陷入“失败→重试→耗尽→
+	// 重播失败曲”死循环，故候选与失败曲目同 ID 时视为无曲可跳，保留
+	// “停止 + 等待用户操作”语义（ended=true）。
+	var skip *model.Track
+	if m.queueSkip {
+		// 重试耗尽且存在删除解耦标记：镜像 TrackEnded 的兜底逻辑——
+		// 指针已顺延，播放顺延曲目（当前位）而非 Next()，避免跳过头
+		// （回归：TestLoadFailExhaustedSkipRespectsQueueSkip）。
+		m.queueSkip = false
+		if tr, ok := m.queue.Current(); ok {
+			skip = &tr
+		} else if tr, ok := m.queue.Next(); ok {
+			skip = &tr
+		}
+	} else if tr, ok := m.queue.Next(); ok {
+		skip = &tr
+	}
+	if skip != nil && (m.state.Track == nil || skip.ID != m.state.Track.ID) && !m.failedTracks[skip.ID] {
+		// 跳过失败曲目继续连播（toast 告知用户哪首失败）。
+		// 目标曲目已在本轮失败集合中（队列回绕撞回已失败曲目）：不跳，
+		// 走下方停止路径，避免无限交替重播（回归：TestLoadFailAllTracksFailStopsLoop）。
+		logger.Warn("重试耗尽，跳过失败曲目继续连播: %s - %s (id=%s)", skip.Title, skip.Artist, skip.ID)
+		m2, cmd := m.skipFailedTrack(*skip, hint)
+		// 跳过 = 播放状态变更（新当前曲）：立即重算预加载目标，不必等下次
+		// TrackStarted——否则目标仍指向刚跳到的当前曲，预载会与 mpv 取流并发
+		// 访问同一 URL 放大 403 风控。回绕后目标可能撞回刚失败曲目
+		//（failedTracks 成员）：对其发起有界预载重试（MaxDownloadAttempts 次 ×
+		// DownloadRetryBackoff 退避 ≈ 数秒）是设计内接受的浪费——失败静默、
+		// 不与 mpv 并发同 URL（失败曲目已停止取流），与“失败静默”策略一致。
+		m2.refreshPreload()
+		return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
+	}
+	// 单曲重试耗尽：停止播放，等待用户操作（空格重播同曲）
+	logger.Error("播放失败，重试 %d 次耗尽，停止播放: %v", maxPlayRetries, hint)
+	m.ended = true
+	m.refreshPreload() // ended 门控：清空预加载目标
+	m, cmd := m.showToast(fmt.Sprintf("播放失败：%s，已重试 %d 次。请稍后重试或更换歌曲", hint, maxPlayRetries), toastError)
+	m.state.Playing = false
+	m.home = m.home.syncState(m.state)
+	return m, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 }
 
 // waitForPlayerEvents 阻塞监听播放器事件流；通道关闭时返回 nil（循环终止）。
@@ -1415,6 +1522,22 @@ func retryPlayCmd(gen int) tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(retryBackoff)
 		return retryPlayMsg{gen: gen}
+	}
+}
+
+// waitCacheDone 监听缓存下载完成信号：done 关闭 → 发 cacheFallbackDoneMsg（捕获 gen）。
+func waitCacheDone(cm *cache.Manager, trackID string, gen int, done <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		<-done
+		return cacheFallbackDoneMsg{trackID: trackID, gen: gen}
+	}
+}
+
+// fallbackTimeoutCmd 兜底等待限时：fallbackWaitTimeout 后发 cacheFallbackTimeoutMsg。
+func fallbackTimeoutCmd(gen int) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(fallbackWaitTimeout)
+		return cacheFallbackTimeoutMsg{gen: gen}
 	}
 }
 
@@ -1516,6 +1639,12 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 	m.resuming = false // 任何 beginPlay = 用户新意图或重试：恢复上下文作废
 	// （重试路径不会在 resuming=true 时发生——恢复中取流失败走恢复失败分支，不调度重试）
 	m.playGen++ // 播放代际递增：使在途重试消息过期（用户换曲后不再重试旧曲）
+	// 新加载开始：mpv 尚未开始播放（TrackStartedEvent 到达统一置 true）。
+	// 放在此处（而非 URL 分支）保证 Play 成功/失败两个路径都重置。
+	m.playStarted = false
+	// fallback 重置：新播放代际（切本地/切歌/重播）下旧兜底状态（active/canceled）
+	// 作废；在途兜底消息由 gen 校验丢弃（cacheFallbackDoneMsg 分支）。
+	m.fallback = fallbackState{trackID: track.ID, gen: m.playGen}
 	m.ended = false
 	m.state = model.PlaybackState{Track: &track, Playing: true, Duration: track.Duration}
 	m.toast = nil // 新曲目开始 = 新状态：清除活跃 toast
@@ -1530,6 +1659,15 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 		m.playingFromCache = false
 		logger.Info("播放: %s - %s (id=%s) url=%s", track.Title, track.Artist, track.ID, track.URL)
 		// 缓存预热不在 beginPlay 触发（见上方注释）：TrackStarted 统一启动
+	}
+	// 缓存兜底监听（仅 URL 路径）：本曲已有在途下载（preload 预载/预热）时注册监听——
+	// 下载完成若 mpv 仍未开始播放（TrackStarted 未到），自动改用本地缓存文件（用户需求：
+	// “下载完成后如果 mpv 还是没有播放就改用下载的文件播放”）。只监听不启动：
+	// 启动下载会与 mpv 内置 yt-dlp 并发访问同一 URL 放大 403 风控（6440188 教训），
+	// 下载启动统一由 TrackStarted 预热/兜底分支负责。
+	var cacheDoneCmd tea.Cmd
+	if done := m.cache.WaitDone(track.ID); done != nil {
+		cacheDoneCmd = waitCacheDone(m.cache, track.ID, m.playGen, done)
 	}
 	if err := m.player.Play(target); err != nil {
 		logger.Error("播放命令失败: %s - %s (id=%s): %v", track.Title, track.Artist, track.ID, err)
@@ -1553,6 +1691,7 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 	}
 	return m.syncQueueViews(), tea.Batch(
 		loopCmd,
+		cacheDoneCmd,
 		fetchLyricsCmd(m.lyrics, track),
 		fetchCoverCmd(m.cover, track),
 		addHistoryCmd(m.history, track),
@@ -1689,7 +1828,19 @@ func (m Model) togglePlay() (Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.state.Playing {
-		logger.Debug("用户暂停")
+		// 缓存兜底等待期间用户暂停 = 取消兜底（下载完成不再切本地，避免打扰用户）：
+		// 转停止态（ended），保留原错误提示，空格可重播（restartSameTrack）。
+		if m.fallback.active {
+			logger.Warn("用户暂停，取消缓存兜底等待")
+			m.fallback.active = false
+			m.fallback.canceled = true
+			m.ended = true
+			m.loadingSince = time.Time{}
+			m.state.Playing = false
+			m.home = m.home.syncState(m.state)
+			m, cmd := m.showToast("已取消缓存兜底："+m.fallback.hint, toastError)
+			return m, tea.Batch(cmd)
+		}
 		return m, func() tea.Msg {
 			return playerOpResultMsg{err: m.player.Pause()}
 		}
