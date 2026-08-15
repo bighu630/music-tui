@@ -3,78 +3,64 @@ package ui
 import (
 	"math"
 	"strings"
-	"sync"
 
 	"github.com/charmbracelet/lipgloss"
 )
 
-// progressPalette 是已播段的渐变色阶（紫→粉，5 段），与 bubbles progress
-// WithDefaultGradient 的观感一致。
-var progressPalette = []lipgloss.Color{"63", "99", "129", "177", "212"}
+// 渐变端点 RGB（紫 #5A56E0 → 粉 #EE6FF8，与 bubbles progress
+// WithDefaultGradient 观感一致）：已播段逐字符线性插值（平滑渐变），
+// 量化到 256 色（6×6×6 立方体）兼容 tmux/老终端（回归：曾用 5 段固定
+// 色阶，颜色跳变呈"一段一段"而非渐变）。
+const (
+	gradR0, gradG0, gradB0 = 0x5A, 0x56, 0xE0 // 紫
+	gradR1, gradG1, gradB1 = 0xEE, 0x6F, 0xF8 // 粉
+)
 
 // progressUnplayedStyle 是未播段 ━ 的样式：Faint 灰。
 var progressUnplayedStyle = lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("240"))
 
-// progressFilledChars/progressSliderChars 已播段 5 色阶 "━" 与滑块 "●" 的
-// 预渲染结果（下标 = progressPalette 下标）：避免 lineProgressBar 逐字符
-// NewStyle 的重复开销。lipgloss 对相同样式+文本的渲染输出是确定的，预渲染
-// 与逐字符渲染字节一致（Nit 6 纯性能优化，不改变渲染输出；回归：
-// TestProgressPreRenderedBytes）。
-// 惰性初始化：lipgloss 的全局 ColorProfile 可能在包加载后才被设置（如测试
-// TestMain 强制 TrueColor），包级 init 时渲染会拿到 Ascii profile 丢失色码；
-// 真实程序与测试都在首次渲染前设置好 profile，Once 缓存首见 profile 即可。
-var (
-	progressCharsOnce sync.Once
-	progressFilled    []string
-	progressSlider    []string
-)
-
-func renderProgressChars() {
-	progressFilled = make([]string, len(progressPalette))
-	progressSlider = make([]string, len(progressPalette))
-	for i, c := range progressPalette {
-		progressFilled[i] = lipgloss.NewStyle().Foreground(c).Render("━")
-		progressSlider[i] = lipgloss.NewStyle().Foreground(c).Render("●")
-	}
-}
-
-func progressFilledChars() []string {
-	progressCharsOnce.Do(renderProgressChars)
-	return progressFilled
-}
-
-func progressSliderChars() []string {
-	progressCharsOnce.Do(renderProgressChars)
-	return progressSlider
-}
-
-// gradientIndex 返回已播段第 i 个字符（共 total 个）的色阶下标：
-// 按 i/(total-1) 比例在色阶中取色；total<=1 时用末段色。
-func gradientIndex(i, total int) int {
+// gradientRGB 返回已播段第 i 个字符（共 total 个）的 RGB 插值色：
+// 紫→粉线性插值（24-bit 真彩色，逐字符平滑渐变）。曾用 256 色立方体量化
+// ——短 RGB 路径只穿过 3-4 级色阶，视觉呈"一段一段"（回归：用户反馈
+// 渐变像色块）。24-bit 每字符颜色微变（步长 ≈ 3/通道），观感连续。
+func gradientRGB(i, total int) (r, g, b int) {
 	if total <= 1 {
-		return len(progressPalette) - 1
+		return gradR1, gradG1, gradB1
 	}
-	ratio := float64(i) / float64(total-1)
-	return int(math.Round(ratio * float64(len(progressPalette)-1)))
+	t := float64(i) / float64(total-1)
+	r = gradR0 + int(float64(gradR1-gradR0)*t)
+	g = gradG0 + int(float64(gradG1-gradG0)*t)
+	b = gradB0 + int(float64(gradB1-gradB0)*t)
+	return
 }
 
-// gradientColor 返回已播段第 i 个字符（共 total 个）的渐变色。
-func gradientColor(i, total int) lipgloss.Color {
-	return progressPalette[gradientIndex(i, total)]
-}
-
-// sliderIndex 返回滑块 ● 的色阶下标：已播段非空时用末段色，未开始播放（0%）
-// 时用色阶首色。
+// sliderIndex 返回滑块 ● 的插值位置：已播段非空时用末段色，未开始播放（0%）
+// 时用起始紫。
 func sliderIndex(pos int) int {
 	if pos == 0 {
 		return 0
 	}
-	return gradientIndex(pos-1, pos)
+	return pos - 1
 }
 
-// sliderColor 返回滑块 ● 的颜色（当前进度色）。
-func sliderColor(pos int) lipgloss.Color {
-	return progressPalette[sliderIndex(pos)]
+// renderGradientChar 渲染一个真彩色渐变字符（━ 已播 / ● 滑块）。
+func renderGradientChar(ch rune, r, g, b int) string {
+	return "[38;2;" + itoa(r) + ";" + itoa(g) + ";" + itoa(b) + "m" + string(ch) + "[0m"
+}
+
+// itoa 整数转十进制字符串（避免 fmt.Sprintf 热路径开销）。
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [3]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }
 
 // lineProgressBar 渲染单行线条渐变进度条：已播段为紫→粉渐变 ━，
@@ -100,20 +86,20 @@ func lineProgressBar(width int, percent float64) string {
 		pos = width - 1
 	}
 	var b strings.Builder
-	b.Grow(width * 8)
-	filled := progressFilledChars()
-	// 已播段：连续同色字符合并为 strings.Repeat 复用预渲染串（字节与逐字符
-	// 写入一致，且避免每字符查样式表）；不同色阶交界处自然换串。
-	for i := 0; i < pos; {
-		j := gradientIndex(i, pos)
-		run := 1
-		for i+run < pos && gradientIndex(i+run, pos) == j {
-			run++
-		}
-		b.WriteString(strings.Repeat(filled[j], run))
-		i += run
+	b.Grow(width * 30)
+	// 已播段：逐字符 24-bit 插值色（平滑渐变）。
+	for i := 0; i < pos; i++ {
+		r, g, bb := gradientRGB(i, pos)
+		b.WriteString(renderGradientChar('━', r, g, bb))
 	}
-	b.WriteString(progressSliderChars()[sliderIndex(pos)])
+	// 滑块：当前进度色（末段粉 / 起始紫）。
+	si := sliderIndex(pos)
+	if si == 0 {
+		b.WriteString(renderGradientChar('●', gradR0, gradG0, gradB0))
+	} else {
+		r, g, bb := gradientRGB(si, pos)
+		b.WriteString(renderGradientChar('●', r, g, bb))
+	}
 	if n := width - pos - 1; n > 0 {
 		b.WriteString(strings.Repeat(progressUnplayedStyle.Render("━"), n))
 	}

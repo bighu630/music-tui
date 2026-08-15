@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -70,30 +69,22 @@ func TestLineProgress(t *testing.T) {
 // TestProgressPreRenderedBytes 预渲染常量必须与逐字符 NewStyle().Render 的
 // 输出字节一致（Nit 6 预渲染是纯性能优化，不得改变渲染输出）。
 func TestProgressPreRenderedBytes(t *testing.T) {
-	for i, c := range progressPalette {
-		if got := progressFilledChars()[i]; got != lipgloss.NewStyle().Foreground(c).Render("━") {
-			t.Errorf("progressFilledChars[%d] 与逐字符渲染不一致: %q", i, got)
-		}
-		if got := progressSliderChars()[i]; got != lipgloss.NewStyle().Foreground(c).Render("●") {
-			t.Errorf("progressSliderChars[%d] 与逐字符渲染不一致: %q", i, got)
-		}
+	// 渲染确定性：同参数两次渲染字节一致；端点颜色正确（紫→粉 24-bit）。
+	bar := lineProgressBar(60, 0.5)
+	if bar != lineProgressBar(60, 0.5) {
+		t.Error("同参数渲染结果应确定性一致")
 	}
-	// gradientIndex/sliderIndex 与 color 包装函数的一致性（防索引越界/错位）
-	for total := 1; total <= 30; total++ {
-		for i := 0; i < total; i++ {
-			if got := gradientIndex(i, total); got < 0 || got >= len(progressPalette) {
-				t.Fatalf("gradientIndex(%d, %d) = %d 越界", i, total, got)
-			}
-			if gradientColor(i, total) != progressPalette[gradientIndex(i, total)] {
-				t.Errorf("gradientColor(%d, %d) 与 index 不一致", i, total)
-			}
-		}
-		if s := sliderIndex(total); s < 0 || s >= len(progressPalette) {
-			t.Fatalf("sliderIndex(%d) = %d 越界", total, s)
-		}
+	r0, g0, b0 := gradientRGB(0, 2)
+	if r0 != gradR0 || g0 != gradG0 || b0 != gradB0 {
+		t.Errorf("渐变首色 RGB = (%d,%d,%d), want 紫端点", r0, g0, b0)
 	}
-	if sliderColor(0) != progressPalette[0] {
-		t.Error("sliderColor(0) 应用色阶首色")
+	r1, g1, b1 := gradientRGB(1, 2)
+	if r1 != gradR1 || g1 != gradG1 || b1 != gradB1 {
+		t.Errorf("渐变末色 RGB = (%d,%d,%d), want 粉端点", r1, g1, b1)
+	}
+	// sliderIndex 边界
+	if sliderIndex(0) != 0 || sliderIndex(10) != 9 {
+		t.Errorf("sliderIndex 边界错误: %d %d", sliderIndex(0), sliderIndex(10))
 	}
 }
 
@@ -142,19 +133,19 @@ func TestLineProgressGradient(t *testing.T) {
 	if !strings.Contains(bar, "\x1b[") {
 		t.Fatal("lineProgressBar(20, 0.5) 已播段不含 ANSI 色码")
 	}
-	// 渐变色阶 > 1：同一进度下不同位置颜色不同。
+	// 渐变色阶 > 1：同一进度下不同位置颜色不同（24-bit 真彩色 38;2;）。
 	colors := map[string]bool{}
 	for _, c := range sgrCodes(played) {
-		if strings.HasPrefix(c, "38;5;") {
+		if strings.HasPrefix(c, "38;2;") {
 			colors[c] = true
 		}
 	}
 	if len(colors) < 2 {
 		t.Errorf("已播段渐变色阶种类 = %d, want > 1 (%v)", len(colors), colors)
 	}
-	// 已播段不应出现灰色码。
+	// 已播段不应出现灰色码（38;5;240 是未播段样式）。
 	for _, c := range sgrCodes(played) {
-		if c == "38;5;240" {
+		if strings.Contains(c, "38;5;240") {
 			t.Errorf("已播段出现灰色码 38;5;240")
 		}
 	}
@@ -165,6 +156,28 @@ func TestLineProgressGradient(t *testing.T) {
 		}
 		t.Errorf("未播段出现非灰/Faint 的 ANSI 码 %q", c)
 	}
+
+	// 渐变平滑性：已播段相邻字符的通道差 ≤ 理论插值步长 + 1（浮点截断容差）；
+	// 曾用 5 段固定色阶/256 色量化，相邻字符色差大呈"一段一段"（回归）。
+	pos := 10                           // 20*0.5
+	step := (gradR1-gradR0)/(pos-1) + 2 // R 通道理论步长 + 容差（R 跨距最大）
+	pr, pg, pb := 0, 0, 0
+	for i := 0; i < pos; i++ {
+		cr, cg, cb := gradientRGB(i, pos)
+		if i > 0 {
+			if absInt(cr-pr) > step || absInt(cg-pg) > step || absInt(cb-pb) > step {
+				t.Errorf("渐变不连续: 字符 %d RGB(%d,%d,%d) → (%d,%d,%d)（阈值 %d）", i, pr, pg, pb, cr, cg, cb, step)
+			}
+		}
+		pr, pg, pb = cr, cg, cb
+	}
+}
+
+func absInt(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // isGrayOnly 报告 SGR 参数串是否仅由 Faint(2) 与灰前景(38;5;240) 组成（顺序任意）。
