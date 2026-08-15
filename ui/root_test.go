@@ -242,12 +242,12 @@ func newYTTestModel(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, onTrack
 }
 
 // newTestModelBase 组装除 yt 外的全部服务与模型（newTestModel/newYTTestModel 共用）。
-// 缓存指向临时目录 + 不存在的 yt-dlp（CacheAsync 后台下载立即失败退出，无网络无泄漏）。
+// 缓存为禁用态（Disabled）：本测试线聚焦 UI 播放状态机，不含缓存集成——缓存命中/
+// 下载/兑底路径由 cache_test.go 的 newCacheTestModel*（显式注入真实缓存）覆盖。
+// 禁用缓存 = “下载不可用”：ErrorEvent 的缓存兑底分支（需 CacheAsync 启动下载）
+// 不参与，取流失败直接走现有重试链路——与既有 LoadFail 系列测试语义一致。
 func newTestModelBase(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapter, yt *ytm.Client, onTrack func(*model.Track)) Model {
-	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, "/nonexistent/yt-dlp", "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cm := cache.Disabled()
 	return newTestModelBaseWithCache(t, fp, fa, yt, onTrack, cm)
 }
 
@@ -2569,5 +2569,626 @@ func TestQueueMoveThenTrackEndedPlaysNewNext(t *testing.T) {
 	}
 	if m.state.Track == nil || m.state.Track.ID != "t3" || !m.state.Playing {
 		t.Errorf("连播后 state = %+v, want t3 播放中", m.state)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 缓存兜底播放（cache fallback）：mpv URL 取流失败 → 缓存命中立即切本地；
+// 未命中则启动/接入下载并限时等待（fallbackWaitTimeout），完成后若仍未开始
+// 播放自动切本地；超时或下载失败放弃等待恢复现有重试链路；暂停/切歌/删除当前
+// 曲取消兜底；恢复路径不兜底；兜底等待中重复失败忽略。消息驱动（m.Update），
+// 异步等待用轮询 + 总超时（waitUntil），不依赖固定 sleep 的计时器竞态。
+//
+// 模型组装复用 ui/cache_test.go 的 newCacheTestModelWithYtdlp（返回真实缓存
+// Manager 与缓存目录）与 presetCache（预置缓存条目）——与既有缓存测试同一套
+// 环境；本文件只补兜底状态机相关 helper 与用例。
+// ---------------------------------------------------------------------------
+
+// fakeYtDlpOK 写假 yt-dlp 脚本（下载成功版）到 t.TempDir() 并返回路径。
+// 基于 writeFakeYtDlp（ui/cache_test.go，与 cache/download_test.go 的
+// fakeYtDlpBody/fakeAudioOut 同款 -o 解析）：写 EBML/WebM 魔数 + 零填充到
+// 2048 字节（≥ cache.MinAudioSize，内容校验通过）——CacheAsync 真实下载→注册
+// 全链路走通。开头 sleep 0.05 是确定性守卫：兜底测试依赖“下载在途时 beginPlay
+// 的 Lookup 必 miss”（产物 ≥50ms 后才落盘，同步的 beginPlay 不可能撞上命中）。
+func fakeYtDlpOK(t *testing.T) string {
+	t.Helper()
+	return writeFakeYtDlp(t, `sleep 0.05
+printf '\032\105\337\243' > "$out"
+head -c 2044 /dev/zero >> "$out"`)
+}
+
+// fakeYtDlpFail 写假 yt-dlp 脚本（下载失败版）：立即 exit 1（模拟 yt-dlp 报错，
+// 下载预算耗尽失败、不产出文件）。
+func fakeYtDlpFail(t *testing.T) string {
+	t.Helper()
+	return writeFakeYtDlp(t, "exit 1")
+}
+
+// waitUntil 轮询等待条件成立（20ms 间隔，总超时 10s），超时 t.Fatal(msg)。
+// 用于异步副作用（后台缓存下载完成等）断言——避免固定 sleep 引入计时器竞态。
+// （与既有 waitFor(t, timeout, cond) 区分：Go 不支持重载，超时固定 10s + 带
+// 语义化失败消息。）
+func waitUntil(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal(msg)
+}
+
+// shrinkDownloadRetries 调小失败下载的重试间隔（假 yt-dlp 失败脚本下后台下载
+// 预算耗尽从 ~8s 缩到 ~50ms），t.Cleanup 恢复原值。
+func shrinkDownloadRetries(t *testing.T) {
+	t.Helper()
+	old := cache.DownloadRetryBackoff
+	cache.DownloadRetryBackoff = 10 * time.Millisecond
+	t.Cleanup(func() { cache.DownloadRetryBackoff = old })
+}
+
+// speedUpRetry 调小重试间隔与 toast 定时器（execRetryBatch 同步执行 batch 时
+// 的 toast tick 会阻塞到定时器到期），t.Cleanup 恢复原值。
+func speedUpRetry(t *testing.T) {
+	t.Helper()
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	t.Cleanup(func() { retryBackoff = old })
+	toastErrorDuration = time.Millisecond
+	t.Cleanup(func() { toastErrorDuration = 5 * time.Second })
+}
+
+// loadFail 是标准取流失败事件（mpv end-file error）。
+func loadFail() player.Event {
+	return player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}
+}
+
+// 缓存已就绪（缓存命中）：URL 取流失败立即改用缓存文件播放（不等待下载），
+// 且只兜底一次——之后再失败（缓存文件损坏语义）移除条目、恢复 URL 重试，不再
+// 重复切本地。注意顺序：先播放（此时缓存 miss → URL），再预置缓存文件——
+// beginPlay 对已命中条目会直接播本地，无法构造“URL 失败后切本地”的兜底场景。
+func TestCacheFallbackImmediateWhenCacheReady(t *testing.T) {
+	speedUpRetry(t)
+	m, fp, cm, dir := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpOK(t))
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr}) // 缓存 miss：播放 URL
+	if fp.playCount() != 1 || fp.lastPlayed() != tr.URL {
+		t.Fatalf("初始播放应走 URL: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	local := presetCache(t, cm, dir, tr.ID) // 下载完成（缓存就绪）
+
+	// URL 取流失败 → 缓存已命中：立即切本地（不等待下载、不走 URL 重试）
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if fp.playCount() != 2 || fp.lastPlayed() != local {
+		t.Fatalf("应立即可用缓存文件: playCount=%d lastPlayed=%q, want %q", fp.playCount(), fp.lastPlayed(), local)
+	}
+	if !strings.Contains(activeToastText(m), "已改用缓存文件") {
+		t.Errorf("toast = %q, want 含“已改用缓存文件”", activeToastText(m))
+	}
+	if !m.playingFromCache {
+		t.Error("切本地后 playingFromCache 应为 true")
+	}
+	if m.fallback.active {
+		t.Error("命中切换不应进入兜底等待")
+	}
+
+	// 再次失败（从缓存播放失败 = 缓存文件损坏）：不再兜底——条目被移除
+	//（Lookup miss），恢复 URL 重试链路（重试是延迟 cmd，先断言不立即播放）
+	m, cmd := update(m, playerEventMsg{ev: loadFail()})
+	if _, ok := m.cache.Lookup(tr.ID); ok {
+		t.Error("缓存文件播放失败后条目应被移除（不再兜底）")
+	}
+	if fp.playCount() != 2 {
+		t.Errorf("重试是延迟 cmd，不应立即 Play: playCount=%d, want 2", fp.playCount())
+	}
+	toast := activeToastText(m)
+	if !strings.Contains(toast, "缓存文件损坏") || !strings.Contains(toast, "自动重试") {
+		t.Errorf("toast = %q, want 含“缓存文件损坏”与“自动重试”", toast)
+	}
+	// 执行重试：条目已移除 → 重新走 URL（而非本地）
+	m = execRetryBatch(m, cmd, fp)
+	if fp.playCount() != 3 || fp.lastPlayed() != tr.URL {
+		t.Errorf("重试应重新走 URL: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+}
+
+// 未缓存时取流失败：进入兜底等待（不立即 URL 重试），下载完成后（轮询 Lookup
+// 命中）发 cacheFallbackDoneMsg → 改用本地缓存文件播放。
+func TestCacheFallbackWaitsDownloadThenPlaysLocal(t *testing.T) {
+	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpOK(t))
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	if fp.playCount() != 1 || fp.lastPlayed() != tr.URL {
+		t.Fatalf("初始播放应走 URL: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+
+	// 取流失败 → 启动下载并进入等待：不触发 URL 重试（Play 次数不增）
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if !m.fallback.active {
+		t.Fatal("取流失败后应进入缓存兜底等待")
+	}
+	if m.fallback.trackID != tr.ID || m.fallback.gen != m.playGen {
+		t.Errorf("fallback = %+v, want trackID=%s gen=%d", m.fallback, tr.ID, m.playGen)
+	}
+	if fp.playCount() != 1 {
+		t.Fatalf("等待下载期间不应触发 URL 重试: playCount=%d, want 1", fp.playCount())
+	}
+	if !strings.Contains(activeToastText(m), "缓存下载中") {
+		t.Errorf("toast = %q, want 含“缓存下载中”", activeToastText(m))
+	}
+
+	// 下载完成（轮询 Lookup 命中）→ 发完成消息 → 改用本地文件
+	gen := m.playGen
+	waitUntil(t, func() bool {
+		_, ok := m.cache.Lookup(tr.ID)
+		return ok
+	}, "后台下载应完成并命中缓存")
+	local, _ := m.cache.Lookup(tr.ID)
+	m, _ = update(m, cacheFallbackDoneMsg{trackID: tr.ID, gen: gen})
+	if fp.playCount() != 2 || fp.lastPlayed() != local {
+		t.Fatalf("下载完成后应改用缓存文件: playCount=%d lastPlayed=%q, want %q", fp.playCount(), fp.lastPlayed(), local)
+	}
+	if !strings.Contains(activeToastText(m), "已改用缓存文件") {
+		t.Errorf("toast = %q, want 含“已改用缓存文件”", activeToastText(m))
+	}
+	if !m.playingFromCache {
+		t.Error("切本地后 playingFromCache 应为 true")
+	}
+	if m.fallback.active {
+		t.Error("切本地后不应再处于兜底等待")
+	}
+}
+
+// 下载在途时 beginPlay 注册的兜底监听（WaitDone）：下载完成后若 mpv 仍未开始
+// 播放（playStarted=false）→ 切本地；若 TrackStartedEvent 已到（mpv 已开始
+// 播放）→ 丢弃，保持 URL 播放（对照组子测试）。
+func TestCacheFallbackDoneChecksPlayStarted(t *testing.T) {
+	t.Run("未开始播放则切本地", func(t *testing.T) {
+		m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpOK(t))
+		tr := testTrack("t1")
+
+		done := m.cache.CacheAsync(tr) // 预热已在途下载
+		if done == nil {
+			t.Fatal("CacheAsync 应启动下载")
+		}
+		m, _ = update(m, trackSelectedMsg{track: tr}) // beginPlay 注册 WaitDone 监听
+		if fp.playCount() != 1 || fp.lastPlayed() != tr.URL {
+			t.Fatalf("在途下载期间播放应走 URL: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+		}
+		if m.playStarted {
+			t.Fatal("TrackStarted 未到，playStarted 应为 false")
+		}
+
+		waitUntil(t, func() bool {
+			_, ok := m.cache.Lookup(tr.ID)
+			return ok
+		}, "后台下载应完成并命中缓存")
+		local, _ := m.cache.Lookup(tr.ID)
+		m, _ = update(m, cacheFallbackDoneMsg{trackID: tr.ID, gen: m.playGen})
+		if fp.playCount() != 2 || fp.lastPlayed() != local {
+			t.Fatalf("下载完成且未开始播放应切本地: playCount=%d lastPlayed=%q, want %q", fp.playCount(), fp.lastPlayed(), local)
+		}
+		if !strings.Contains(activeToastText(m), "已改用缓存文件") {
+			t.Errorf("toast = %q, want 含“已改用缓存文件”", activeToastText(m))
+		}
+	})
+
+	t.Run("已开始播放则丢弃", func(t *testing.T) {
+		m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpOK(t))
+		tr := testTrack("t1")
+
+		if done := m.cache.CacheAsync(tr); done == nil {
+			t.Fatal("CacheAsync 应启动下载")
+		}
+		m, _ = update(m, trackSelectedMsg{track: tr})
+		if fp.playCount() != 1 || fp.lastPlayed() != tr.URL {
+			t.Fatalf("初始播放应走 URL: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+		}
+		waitUntil(t, func() bool {
+			_, ok := m.cache.Lookup(tr.ID)
+			return ok
+		}, "后台下载应完成并命中缓存")
+
+		// mpv 已开始播放（URL 取流成功）→ 完成消息应丢弃，保持 URL 播放
+		m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+		if !m.playStarted {
+			t.Fatal("TrackStarted 后 playStarted 应为 true")
+		}
+		m, _ = update(m, cacheFallbackDoneMsg{trackID: tr.ID, gen: m.playGen})
+		if fp.playCount() != 1 || fp.lastPlayed() != tr.URL {
+			t.Errorf("已开始播放后完成消息应丢弃: playCount=%d lastPlayed=%q, want 仍为 URL", fp.playCount(), fp.lastPlayed())
+		}
+		if m.playingFromCache {
+			t.Error("丢弃后不应标记 playingFromCache")
+		}
+	})
+}
+
+// 兜底等待限时（fallbackWaitTimeout）到期：放弃等待，恢复现有重试链路
+// （URL 重试，retryCount=1）——下载仍失败也无妨（超时先到）。
+func TestCacheFallbackTimeoutFallsThroughToRetry(t *testing.T) {
+	oldTimeout := fallbackWaitTimeout
+	fallbackWaitTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { fallbackWaitTimeout = oldTimeout })
+	speedUpRetry(t)
+	shrinkDownloadRetries(t)
+
+	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpFail(t))
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	if fp.playCount() != 1 {
+		t.Fatalf("初始 playCount = %d, want 1", fp.playCount())
+	}
+
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if !m.fallback.active {
+		t.Fatal("取流失败后应进入缓存兜底等待")
+	}
+
+	// 超时消息（fallbackTimeoutCmd 到期产物）→ 放弃等待，恢复重试链路
+	gen := m.playGen
+	m, cmd := update(m, cacheFallbackTimeoutMsg{gen: gen})
+	if m.fallback.active {
+		t.Error("超时后应退出兜底等待")
+	}
+	if m.retryCount != 1 {
+		t.Fatalf("超时放弃后 retryCount = %d, want 1", m.retryCount)
+	}
+	if !strings.Contains(activeToastText(m), "自动重试") {
+		t.Errorf("toast = %q, want 含“自动重试”", activeToastText(m))
+	}
+
+	// 执行重试 batch：URL 重试发生（Play 调用次数增加）
+	m = execRetryBatch(m, cmd, fp)
+	waitUntil(t, func() bool { return fp.playCount() >= 2 }, "超时放弃后应发生 URL 重试（Play 调用次数增加）")
+	if fp.playCount() != 2 || fp.lastPlayed() != tr.URL {
+		t.Errorf("重试应再次播放 URL: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+}
+
+// 下载失败（假 yt-dlp exit 1，预算耗尽）：WaitDone 信号关闭但 Lookup 未命中
+// → cacheFallbackDoneMsg 走放弃分支 → retryOrSkipLoadFailure（URL 重试）。
+func TestCacheFallbackDownloadFailedFallsThrough(t *testing.T) {
+	speedUpRetry(t)
+	shrinkDownloadRetries(t)
+
+	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpFail(t))
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if !m.fallback.active {
+		t.Fatal("取流失败后应进入缓存兜底等待")
+	}
+
+	// 下载彻底结束（inflight 清除 = WaitDone 返回 nil）且 Lookup 持续 miss
+	gen := m.playGen
+	waitUntil(t, func() bool { return m.cache.WaitDone(tr.ID) == nil }, "下载应结束（inflight 清除）")
+	for i := 0; i < 5; i++ {
+		if _, ok := m.cache.Lookup(tr.ID); ok {
+			t.Fatal("下载失败后不应命中缓存")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// 完成消息（下载失败）：放弃兜底 → 恢复重试链路
+	m, cmd := update(m, cacheFallbackDoneMsg{trackID: tr.ID, gen: gen})
+	if m.fallback.active {
+		t.Error("下载失败后应退出兜底等待")
+	}
+	if m.retryCount != 1 {
+		t.Fatalf("放弃后 retryCount = %d, want 1", m.retryCount)
+	}
+	if !strings.Contains(activeToastText(m), "自动重试") {
+		t.Errorf("toast = %q, want 含“自动重试”", activeToastText(m))
+	}
+	if fp.playCount() != 1 {
+		t.Fatalf("重试是延迟 cmd，不应立即 Play: playCount=%d, want 1", fp.playCount())
+	}
+
+	// 执行重试 batch：URL 再次播放
+	m = execRetryBatch(m, cmd, fp)
+	waitUntil(t, func() bool { return fp.playCount() >= 2 }, "放弃后应发生 URL 重试")
+	if fp.playCount() != 2 || fp.lastPlayed() != tr.URL {
+		t.Errorf("重试应再次播放 URL: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+}
+
+// 兜底只发生一次：切本地后再失败（缓存文件损坏语义）不再次兜底——条目被移除
+// （Lookup miss），重试走 URL 而非本地（回归：避免“URL 失败→切本地→本地损坏→
+// 重下同一 URL→再失败”的死循环）。
+func TestCacheFallbackOnlyOnce(t *testing.T) {
+	speedUpRetry(t)
+	m, fp, cm, dir := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpOK(t))
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr}) // 缓存 miss：URL
+	presetCache(t, cm, dir, tr.ID)                // 缓存就绪
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	local, _ := m.cache.Lookup(tr.ID)
+	if fp.lastPlayed() != local {
+		t.Fatalf("第一次失败应切本地: lastPlayed=%q, want %q", fp.lastPlayed(), local)
+	}
+
+	// 再次失败：不再兜底——条目移除（Lookup miss），重试走 URL
+	m, cmd := update(m, playerEventMsg{ev: loadFail()})
+	if _, ok := m.cache.Lookup(tr.ID); ok {
+		t.Error("二次失败后缓存条目应被移除（Remove 被调用）")
+	}
+	toast := activeToastText(m)
+	if !strings.Contains(toast, "缓存文件损坏") || !strings.Contains(toast, "自动重试") {
+		t.Errorf("toast = %q, want 含“缓存文件损坏”与“自动重试”", toast)
+	}
+	m = execRetryBatch(m, cmd, fp)
+	if fp.lastPlayed() == local {
+		t.Error("重试不应再播本地（兜底只发生一次）")
+	}
+	if fp.lastPlayed() != tr.URL {
+		t.Errorf("重试应走 URL: lastPlayed=%q, want %q", fp.lastPlayed(), tr.URL)
+	}
+}
+
+// 兜底等待期间用户暂停：取消兜底（ended + active=false + canceled=true +
+// toast），下载完成消息随后到达 → 丢弃（不再播放）。
+func TestCacheFallbackPauseCancels(t *testing.T) {
+	shrinkDownloadRetries(t)
+	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpFail(t))
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if !m.fallback.active {
+		t.Fatal("取流失败后应进入缓存兜底等待")
+	}
+	gen := m.playGen
+
+	// 暂停 = 取消兜底（转停止态，空格可重播）
+	m, _ = update(m, togglePlayMsg{})
+	if !m.ended {
+		t.Error("取消后 ended 应为 true")
+	}
+	if m.fallback.active {
+		t.Error("取消后 fallback.active 应为 false")
+	}
+	if !m.fallback.canceled {
+		t.Error("取消后 fallback.canceled 应为 true")
+	}
+	if m.state.Playing {
+		t.Error("取消后 Playing 应为 false")
+	}
+	if !strings.Contains(activeToastText(m), "已取消缓存兜底") {
+		t.Errorf("toast = %q, want 含“已取消缓存兜底”", activeToastText(m))
+	}
+
+	// 下载完成消息（取消后到达）：丢弃，不再播放
+	m, _ = update(m, cacheFallbackDoneMsg{trackID: tr.ID, gen: gen})
+	if fp.playCount() != 1 {
+		t.Errorf("取消后完成消息应丢弃（不再 Play）: playCount=%d, want 1", fp.playCount())
+	}
+	if fp.lastPlayed() != tr.URL {
+		t.Errorf("取消后不应切本地: lastPlayed=%q", fp.lastPlayed())
+	}
+}
+
+// 兜底等待期间用户切歌：播放代际递增，旧曲完成消息（gen 不匹配）丢弃——
+// 最后播放的是新曲 URL，无本地切换。
+func TestCacheFallbackSwitchTrackCancels(t *testing.T) {
+	shrinkDownloadRetries(t)
+	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpFail(t))
+	trackA, trackB := testTrack("t1"), testTrack("t2")
+
+	m, _ = update(m, trackSelectedMsg{track: trackA})
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if !m.fallback.active {
+		t.Fatal("取流失败后应进入缓存兜底等待")
+	}
+	genA := m.playGen // G1
+
+	// 切到 B：代际递增，兜底状态作废
+	m, _ = update(m, trackSelectedMsg{track: trackB})
+	if fp.playCount() != 2 || fp.lastPlayed() != trackB.URL {
+		t.Fatalf("切歌后应播放 B 的 URL: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	if m.playGen == genA {
+		t.Fatal("切歌后播放代际应递增")
+	}
+	if m.fallback.active {
+		t.Error("切歌后不应再处于兜底等待")
+	}
+
+	// 旧曲 A 的完成消息（gen=G1）：丢弃
+	m, _ = update(m, cacheFallbackDoneMsg{trackID: trackA.ID, gen: genA})
+	if fp.playCount() != 2 || fp.lastPlayed() != trackB.URL {
+		t.Errorf("旧曲完成消息应丢弃: playCount=%d lastPlayed=%q, want 仍为 B 的 URL", fp.playCount(), fp.lastPlayed())
+	}
+	if m.playingFromCache {
+		t.Error("丢弃后不应标记 playingFromCache")
+	}
+}
+
+// 续播恢复路径不参与缓存兜底：恢复加载（PlayPaused）后取流失败走“恢复播放
+// 失败”分支（状态重置 + 横幅），不触发兜底等待（Play 次数不变、fallback 不激活）。
+func TestCacheFallbackResumeNotApplied(t *testing.T) {
+	m, fp := newResumeTestModel(t, sessionState(66.6, false), nil)
+	if !m.resuming {
+		t.Fatal("恢复场景应置 resuming 标记")
+	}
+
+	msgs := execCmds(resumeCmd(m))
+	m, cmd := update(m, msgs[0])
+	_ = execCmds(cmd) // 歌词/封面等与本测试无关
+	if fp.pausedCount() != 1 {
+		t.Fatalf("恢复应 PlayPaused: paused=%d", fp.pausedCount())
+	}
+
+	// 恢复加载取流失败 → “恢复播放失败”分支（不兜底）
+	m, cmd = update(m, playerEventMsg{ev: loadFail()})
+	if !strings.Contains(activeToastText(m), "恢复播放失败") {
+		t.Errorf("toast = %q, want 含“恢复播放失败”", activeToastText(m))
+	}
+	if fp.playCount() != 0 {
+		t.Errorf("恢复失败不应调用 Play: playCount=%d", fp.playCount())
+	}
+	if m.fallback.active {
+		t.Error("恢复失败不应激活缓存兜底")
+	}
+	if m.resuming {
+		t.Error("恢复失败处理后 resuming 应复位")
+	}
+	if m.state.Track != nil || m.state.Playing {
+		t.Errorf("恢复失败后状态应重置: %+v", m.state)
+	}
+	if cmd == nil {
+		t.Fatal("恢复失败后事件监听链应存活（cmd 应为非 nil）")
+	}
+}
+
+// 兜底等待期间删除当前曲（queueSkip=true）：完成消息丢弃（不再播放），
+// queueSkip 保持（删除解耦语义不受干扰）。
+func TestCacheFallbackDeleteCurrentCancels(t *testing.T) {
+	shrinkDownloadRetries(t)
+	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpFail(t))
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if !m.fallback.active {
+		t.Fatal("取流失败后应进入缓存兜底等待")
+	}
+	gen := m.playGen
+
+	// 删除当前曲：queueSkip 置位
+	m, _ = update(m, queueDeleteMsg{index: m.queue.CurrentIndex()})
+	if !m.queueSkip {
+		t.Fatal("删除当前曲后应置 queueSkip")
+	}
+
+	// 完成消息：丢弃（不再 Play），queueSkip 保持
+	m, _ = update(m, cacheFallbackDoneMsg{trackID: tr.ID, gen: gen})
+	if fp.playCount() != 1 {
+		t.Errorf("删除当前曲后完成消息应丢弃（不再 Play）: playCount=%d, want 1", fp.playCount())
+	}
+	if !m.queueSkip {
+		t.Error("丢弃后 queueSkip 应保持")
+	}
+}
+
+// 兜底等待中再次收到播放失败：忽略（不重复启动下载、不消耗重试预算），
+// 等待状态保持，由下载完成/超时统一收口。
+func TestCacheFallbackActiveIgnoresSecondError(t *testing.T) {
+	shrinkDownloadRetries(t)
+	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpFail(t))
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if !m.fallback.active {
+		t.Fatal("取流失败后应进入缓存兜底等待")
+	}
+	if fp.playCount() != 1 {
+		t.Fatalf("初始 playCount = %d, want 1", fp.playCount())
+	}
+
+	// 等待中再次失败：忽略——不重复启动（Play 次数不变）、active 保持、
+	// retryCount 不消耗、toast 不变（等待继续）
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if fp.playCount() != 1 {
+		t.Errorf("二次失败不应重复启动: playCount=%d, want 1", fp.playCount())
+	}
+	if !m.fallback.active {
+		t.Error("二次失败后兜底等待应保持 active")
+	}
+	if m.retryCount != 0 {
+		t.Errorf("二次失败不应消耗重试预算: retryCount=%d, want 0", m.retryCount)
+	}
+	if !strings.Contains(activeToastText(m), "缓存下载中") {
+		t.Errorf("toast = %q, want 仍为等待提示（含“缓存下载中”）", activeToastText(m))
+	}
+}
+
+// 回归（审查 P1）：mpv 取流悬挂 → LoadTimeoutError 激活兜底（active=true）→
+// 取流恢复 TrackStartedEvent 只置 playStarted 不清 fallback.active → 90s 超时
+// 消息（gen 未变、active 仍 true）对正在播放的曲目伪重试（retryCount=1 +
+// 自动重试 toast + retryPlayCmd 重播当前曲，用户可听中断/跳回 0:00）。修复：
+// TrackStarted 复位 fallback（active=false），超时消息再丢弃（playStarted 门控）。
+func TestCacheFallbackTrackStartedResetsActive(t *testing.T) {
+	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpFail(t))
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	if fp.playCount() != 1 || fp.lastPlayed() != tr.URL {
+		t.Fatalf("初始播放应走 URL: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+
+	// 取流失败 → 兜底激活（等待下载，阻断 URL 重试，retryCount 不消耗）
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if !m.fallback.active {
+		t.Fatal("取流失败后应进入缓存兜底等待")
+	}
+	if m.retryCount != 0 {
+		t.Fatalf("兜底等待不应消耗重试预算: retryCount=%d, want 0", m.retryCount)
+	}
+
+	// mpv 取流恢复：TrackStartedEvent → 兜底状态必须复位（active=false），
+	// 否则超时消息会对正在播放的曲目伪重试（P1）
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 100}})
+	if !m.playStarted {
+		t.Fatal("TrackStarted 后 playStarted 应为 true")
+	}
+	if m.fallback.active {
+		t.Error("TrackStarted 后 fallback.active 应复位为 false（兜底状态作废）")
+	}
+
+	// 超时消息（悬挂期间 fallbackTimeoutCmd 的到期产物，gen 未变）→ 丢弃：
+	// 不触发 URL 重试（Play 不增）、retryCount 不增、无“自动重试”toast
+	gen := m.playGen
+	m, cmd := update(m, cacheFallbackTimeoutMsg{gen: gen})
+	_ = cmd
+	if fp.playCount() != 1 {
+		t.Errorf("已开始播放后超时消息应丢弃（不再 Play）: playCount=%d, want 1", fp.playCount())
+	}
+	if m.retryCount != 0 {
+		t.Errorf("已开始播放后超时消息不应消耗重试预算: retryCount=%d, want 0", m.retryCount)
+	}
+	if strings.Contains(activeToastText(m), "自动重试") {
+		t.Errorf("toast = %q, want 不含“自动重试”", activeToastText(m))
+	}
+}
+
+// 回归（审查 P2）：togglePlay 取消兜底转停止态（ended=true）但未清空预加载
+// 目标——与其余停止路径（stopAfterEnd/ErrorEvent ended 分支）不一致：已取消
+// 的播放不应再预载下一首。修复：取消路径补 refreshPreload()（ended 门控）。
+func TestCacheFallbackPauseCancelRefreshesPreload(t *testing.T) {
+	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpFail(t))
+	tr1, tr2 := testTrack("t1"), testTrack("t2")
+
+	m, _ = update(m, trackSelectedMsg{track: tr1})
+	if fp.playCount() != 1 || fp.lastPlayed() != tr1.URL {
+		t.Fatalf("初始播放应走 URL: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	// 队列追加下一首 → 预加载目标建立（tr2）
+	m, _ = update(m, trackAppendMsg{track: tr2})
+	if tgt := m.preloader.Target(); tgt == nil || tgt.ID != tr2.ID {
+		t.Fatalf("追加下一首后预加载目标应为 %s: got %+v", tr2.ID, tgt)
+	}
+
+	// 取流失败 → 兜底等待
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if !m.fallback.active {
+		t.Fatal("取流失败后应进入缓存兜底等待")
+	}
+
+	// 暂停取消兜底 → 停止态：预加载目标必须清空（ended 门控，与其他停止路径一致）
+	m, _ = update(m, togglePlayMsg{})
+	if !m.ended {
+		t.Fatal("取消兜底后 ended 应为 true")
+	}
+	if m.preloader.Target() != nil {
+		t.Errorf("取消兜底后预加载目标应清空: got %+v, want nil", m.preloader.Target())
 	}
 }

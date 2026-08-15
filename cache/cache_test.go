@@ -609,7 +609,7 @@ func TestCacheAsyncFailureOnlyLogs(t *testing.T) {
 		cm.mu.Lock()
 		inFlight := cm.inflight["fail-id"]
 		cm.mu.Unlock()
-		if !inFlight {
+		if inFlight == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -731,7 +731,7 @@ func TestCacheAsyncTimeoutKillsAndCleans(t *testing.T) {
 		cm.mu.Lock()
 		inFlight := cm.inflight[id]
 		cm.mu.Unlock()
-		if !inFlight {
+		if inFlight == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -857,6 +857,145 @@ func TestCacheAsyncDoneClosedAfterFailure(t *testing.T) {
 	waitDone(t, done2)
 }
 
+// ---- WaitDone（缓存兜底播放的前置：监听在途下载的完成信号） ----
+
+// blockingYtDlpBody 返回假 yt-dlp 脚本体：先阻塞轮询等待 release 文件出现，
+// 再执行 extra（可用 $out 落盘）——下载在途窗口被拉长到确定可观测，
+// 测试在窗口内做 WaitDone 断言（不依赖下载 goroutine 的调度时序）。
+func blockingYtDlpBody(release, extra string) string {
+	return fakeYtDlpBody(`while [ ! -f "` + release + `" ]; do sleep 0.05; done
+` + extra)
+}
+
+// 在途下载期间 WaitDone 返回的 channel 与 CacheAsync 首次发起时返回的是
+// 同一 channel（== 比较）；下载完成后两个句柄指向的信号都关闭。
+func TestWaitDoneInflightSameSignal(t *testing.T) {
+	dir := t.TempDir()
+	release := filepath.Join(dir, "release")
+	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+		writeFakeYtDlp(t, blockingYtDlpBody(release, fakeAudioOut)))
+	const id = "waitdone-same-1"
+	done1 := cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
+	if done1 == nil {
+		t.Fatal("首次 CacheAsync 应启动下载并返回完成信号")
+	}
+	// 在途窗口内：WaitDone 返回与 CacheAsync 首次发起返回的是同一 channel
+	wd := cm.WaitDone(id)
+	if wd == nil {
+		t.Fatal("在途 WaitDone = nil, want 完成信号")
+	}
+	if wd != done1 {
+		t.Fatalf("WaitDone = %v, want 与 CacheAsync 返回同一 channel %v", wd, done1)
+	}
+	// 释放下载 → 完成：两个句柄指向的信号都关闭
+	if err := os.WriteFile(release, []byte("go"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, done1)
+	if !doneClosed(done1) {
+		t.Error("CacheAsync 返回的完成信号未关闭")
+	}
+	if !doneClosed(wd) {
+		t.Error("WaitDone 返回的完成信号未关闭")
+	}
+	// 结束后 inflight 已清除：再查返回 nil
+	if got := cm.WaitDone(id); got != nil {
+		t.Errorf("下载结束后 WaitDone = %v, want nil", got)
+	}
+}
+
+// 无在途下载返回 nil：未启动、已缓存（条目存在）、已完成（下载结束 inflight
+// 清除）三种场景，以及 Disabled manager 恒 nil。
+func TestWaitDoneNoInflightNil(t *testing.T) {
+	dir := t.TempDir()
+	release := filepath.Join(dir, "release")
+	cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+		writeFakeYtDlp(t, blockingYtDlpBody(release, fakeAudioOut)))
+	// 未启动
+	if got := cm.WaitDone("never-started"); got != nil {
+		t.Errorf("未启动 ID WaitDone = %v, want nil", got)
+	}
+	// 已缓存（条目存在，无在途）
+	writeCacheFile(t, dir, SafeName("cached-1"))
+	if err := cm.Register("cached-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := cm.WaitDone("cached-1"); got != nil {
+		t.Errorf("已缓存 ID WaitDone = %v, want nil", got)
+	}
+	// 已完成（下载结束、inflight 清除）
+	const id = "waitdone-nil-1"
+	done := cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id})
+	if done == nil {
+		t.Fatal("CacheAsync 应启动下载")
+	}
+	if err := os.WriteFile(release, []byte("go"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, done)
+	if got := cm.WaitDone(id); got != nil {
+		t.Errorf("下载结束后 WaitDone = %v, want nil", got)
+	}
+	// Disabled manager 恒 nil
+	if got := Disabled().WaitDone("x"); got != nil {
+		t.Errorf("Disabled WaitDone = %v, want nil", got)
+	}
+}
+
+// 下载彻底结束（成功注册 / 失败预算耗尽）时，WaitDone 拿到的信号关闭：
+// 调用方 <-done 不会永久阻塞。
+func TestWaitDoneClosesOnDownloadEnd(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		dir := t.TempDir()
+		release := filepath.Join(dir, "release")
+		cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+			writeFakeYtDlp(t, blockingYtDlpBody(release, fakeAudioOut)))
+		const id = "waitdone-close-ok"
+		if done := cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id}); done == nil {
+			t.Fatal("CacheAsync 应启动下载")
+		}
+		wd := cm.WaitDone(id)
+		if wd == nil {
+			t.Fatal("在途 WaitDone = nil, want 完成信号")
+		}
+		if err := os.WriteFile(release, []byte("go"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		waitDone(t, wd)
+		// 成功路径：信号关闭时注册已完成，Lookup 命中
+		if _, ok := cm.Lookup(id); !ok {
+			t.Error("完成信号关闭后 Lookup 应命中（成功注册）")
+		}
+	})
+	t.Run("failure", func(t *testing.T) {
+		defer func(old time.Duration) { DownloadRetryBackoff = old }(DownloadRetryBackoff)
+		defer func(old int) { MaxDownloadAttempts = old }(MaxDownloadAttempts)
+		DownloadRetryBackoff = time.Millisecond
+		MaxDownloadAttempts = 2
+
+		dir := t.TempDir()
+		release := filepath.Join(dir, "release")
+		cm := newTestManagerWithYtdlp(t, Options{Enabled: true, MaxEntries: 100, Dir: dir},
+			writeFakeYtDlp(t, blockingYtDlpBody(release, `echo "HTTP Error 403" >&2; exit 1`)))
+		const id = "waitdone-close-fail"
+		if done := cm.CacheAsync(model.Track{ID: id, URL: "https://youtube.com/watch?v=" + id}); done == nil {
+			t.Fatal("CacheAsync 应启动下载")
+		}
+		wd := cm.WaitDone(id)
+		if wd == nil {
+			t.Fatal("在途 WaitDone = nil, want 完成信号")
+		}
+		if err := os.WriteFile(release, []byte("go"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		waitDone(t, wd)
+		// 失败路径：信号同样关闭，但未注册
+		if _, ok := cm.Lookup(id); ok {
+			t.Error("失败后 Lookup 不应命中")
+		}
+	})
+}
+
 // 下载成功但 register 持久化失败（index.json 被占位成目录）→ 已下载文件应被
 // 删除，避免孤儿滞留；inflight 清除。
 func TestCacheAsyncRegisterFailureRemovesFile(t *testing.T) {
@@ -875,7 +1014,7 @@ func TestCacheAsyncRegisterFailureRemovesFile(t *testing.T) {
 		cm.mu.Lock()
 		inFlight := cm.inflight[id]
 		cm.mu.Unlock()
-		if !inFlight {
+		if inFlight == nil {
 			break
 		}
 		if time.Now().After(deadline) {
