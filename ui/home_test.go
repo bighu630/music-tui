@@ -348,8 +348,9 @@ func TestHomeBottomControlRows(t *testing.T) {
 // TestHomeControlBarPositions 渲染列位置必须与 controlBarLayout 命中区间一致：
 // 中栏 "|<" 起点 == lay.centerStart，右栏模式文本起点 == lay.rightStart。
 // （回归：padLeft 按 leftW 上限计算，标题实际宽度小于 leftW 时未补齐差额，
-//  中栏/右栏整体贴左偏移——用户终端验证发现 "顺序 9/25 后面一大堆空"，
-//  且鼠标命中区间（按 layout）与渲染位置错位导致点击失效。）
+//
+//	中栏/右栏整体贴左偏移——用户终端验证发现 "顺序 9/25 后面一大堆空"，
+//	且鼠标命中区间（按 layout）与渲染位置错位导致点击失效。）
 func TestHomeControlBarPositions(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -397,8 +398,9 @@ func colOf(line, substr string) int {
 // TestHomeControlBarCentered 宽窗口下中栏操作键应位于屏幕水平中心：
 // centerStart == (width-centerBarW)/2。
 // （回归：曾在中栏在“左栏右缘~右栏左缘”之间居中——左栏（标题）宽、右栏
-//  （模式）窄时中栏被推到右侧，窗口越宽越明显：用户终端验证 W≈120 时
-//  “|< || >| 顺序 10/25 都到右边去了”。）
+//
+//	（模式）窄时中栏被推到右侧，窗口越宽越明显：用户终端验证 W≈120 时
+//	“|< || >| 顺序 10/25 都到右边去了”。）
 func TestHomeControlBarCentered(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
