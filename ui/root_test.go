@@ -3110,3 +3110,85 @@ func TestCacheFallbackActiveIgnoresSecondError(t *testing.T) {
 		t.Errorf("toast = %q, want 仍为等待提示（含“缓存下载中”）", activeToastText(m))
 	}
 }
+
+// 回归（审查 P1）：mpv 取流悬挂 → LoadTimeoutError 激活兜底（active=true）→
+// 取流恢复 TrackStartedEvent 只置 playStarted 不清 fallback.active → 90s 超时
+// 消息（gen 未变、active 仍 true）对正在播放的曲目伪重试（retryCount=1 +
+// 自动重试 toast + retryPlayCmd 重播当前曲，用户可听中断/跳回 0:00）。修复：
+// TrackStarted 复位 fallback（active=false），超时消息再丢弃（playStarted 门控）。
+func TestCacheFallbackTrackStartedResetsActive(t *testing.T) {
+	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpFail(t))
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	if fp.playCount() != 1 || fp.lastPlayed() != tr.URL {
+		t.Fatalf("初始播放应走 URL: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+
+	// 取流失败 → 兜底激活（等待下载，阻断 URL 重试，retryCount 不消耗）
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if !m.fallback.active {
+		t.Fatal("取流失败后应进入缓存兜底等待")
+	}
+	if m.retryCount != 0 {
+		t.Fatalf("兜底等待不应消耗重试预算: retryCount=%d, want 0", m.retryCount)
+	}
+
+	// mpv 取流恢复：TrackStartedEvent → 兜底状态必须复位（active=false），
+	// 否则超时消息会对正在播放的曲目伪重试（P1）
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 100}})
+	if !m.playStarted {
+		t.Fatal("TrackStarted 后 playStarted 应为 true")
+	}
+	if m.fallback.active {
+		t.Error("TrackStarted 后 fallback.active 应复位为 false（兜底状态作废）")
+	}
+
+	// 超时消息（悬挂期间 fallbackTimeoutCmd 的到期产物，gen 未变）→ 丢弃：
+	// 不触发 URL 重试（Play 不增）、retryCount 不增、无“自动重试”toast
+	gen := m.playGen
+	m, cmd := update(m, cacheFallbackTimeoutMsg{gen: gen})
+	_ = cmd
+	if fp.playCount() != 1 {
+		t.Errorf("已开始播放后超时消息应丢弃（不再 Play）: playCount=%d, want 1", fp.playCount())
+	}
+	if m.retryCount != 0 {
+		t.Errorf("已开始播放后超时消息不应消耗重试预算: retryCount=%d, want 0", m.retryCount)
+	}
+	if strings.Contains(activeToastText(m), "自动重试") {
+		t.Errorf("toast = %q, want 不含“自动重试”", activeToastText(m))
+	}
+}
+
+// 回归（审查 P2）：togglePlay 取消兜底转停止态（ended=true）但未清空预加载
+// 目标——与其余停止路径（stopAfterEnd/ErrorEvent ended 分支）不一致：已取消
+// 的播放不应再预载下一首。修复：取消路径补 refreshPreload()（ended 门控）。
+func TestCacheFallbackPauseCancelRefreshesPreload(t *testing.T) {
+	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpFail(t))
+	tr1, tr2 := testTrack("t1"), testTrack("t2")
+
+	m, _ = update(m, trackSelectedMsg{track: tr1})
+	if fp.playCount() != 1 || fp.lastPlayed() != tr1.URL {
+		t.Fatalf("初始播放应走 URL: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	// 队列追加下一首 → 预加载目标建立（tr2）
+	m, _ = update(m, trackAppendMsg{track: tr2})
+	if tgt := m.preloader.Target(); tgt == nil || tgt.ID != tr2.ID {
+		t.Fatalf("追加下一首后预加载目标应为 %s: got %+v", tr2.ID, tgt)
+	}
+
+	// 取流失败 → 兜底等待
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if !m.fallback.active {
+		t.Fatal("取流失败后应进入缓存兜底等待")
+	}
+
+	// 暂停取消兜底 → 停止态：预加载目标必须清空（ended 门控，与其他停止路径一致）
+	m, _ = update(m, togglePlayMsg{})
+	if !m.ended {
+		t.Fatal("取消兜底后 ended 应为 true")
+	}
+	if m.preloader.Target() != nil {
+		t.Errorf("取消兜底后预加载目标应清空: got %+v, want nil", m.preloader.Target())
+	}
+}

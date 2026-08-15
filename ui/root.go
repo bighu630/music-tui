@@ -879,7 +879,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForPlayerEvents(m.player)
 
 	case cacheFallbackTimeoutMsg:
-		if msg.gen != m.playGen || !m.fallback.active {
+		// 丢弃：代际不匹配/兜底未激活/已开始播放（悬挂恢复，P1 回归：
+		// TestCacheFallbackTrackStartedResetsActive）/已结束
+		if msg.gen != m.playGen || !m.fallback.active || m.playStarted || m.ended {
 			return m, waitForPlayerEvents(m.player)
 		}
 		logger.Warn("缓存兜底等待超时(%s)，恢复自动重试", fallbackWaitTimeout)
@@ -1294,6 +1296,13 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.playStarted = true               // mpv 已开始播放（缓存兜底据此不再切本地）
 		m.ended = false
 		m.loadingSince = time.Time{} // 加载成功：加载中提示结束
+		// mpv 已开始播放：缓存兜底状态作废（active 复位——否则悬挂恢复后 90s 超时
+		// 消息会对正在播放的曲目伪重试，回归：TestCacheFallbackTrackStartedResetsActive）；
+		// canceled/hint 一并清空，与 beginPlay 对称（Track 非 nil 才重置：兜底激活
+		// 本身要求 Track 非 nil，此处与分支内其余 Track 访问同一守卫）。
+		if m.state.Track != nil {
+			m.fallback = fallbackState{trackID: m.state.Track.ID, gen: m.playGen}
+		}
 		// 事件链存活标记：TrackStarted 到达 = UI 事件消费链健康（连播后首个
 		// 关键事件；若日志缺失说明事件链断裂，进度/歌词将冻结，见 TrackEnded 分支注释）
 		if m.state.Track != nil {
@@ -1415,6 +1424,9 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 					return m2, tea.Batch(append([]tea.Cmd{cmd, tcmd}, cmds...)...)
 				}
 				done := m.cache.CacheAsync(*tr)
+				// LoadTimeout 时 mpv 仍在取流（看门狗只报错不杀加载）：兜底下载与
+				// mpv 内置 yt-dlp 并发访问同一 URL 可能放大 403 风控——功能固有取舍
+				//（不下载则无法兜底），接受该风险；LoadFailed 场景 mpv 已终结无此问题。
 				if done == nil {
 					done = m.cache.WaitDone(tr.ID) // 已在途：接既有信号
 				}
@@ -1835,6 +1847,7 @@ func (m Model) togglePlay() (Model, tea.Cmd) {
 			m.fallback.active = false
 			m.fallback.canceled = true
 			m.ended = true
+			m.refreshPreload() // ended 门控：清空预加载目标（与其他停止路径一致，审查 P2）
 			m.loadingSince = time.Time{}
 			m.state.Playing = false
 			m.home = m.home.syncState(m.state)
