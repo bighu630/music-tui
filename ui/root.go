@@ -200,6 +200,18 @@ func ytVerifyErrorText(err error) string {
 	return err.Error()
 }
 
+// ytInvalidAfterSync 按同步/导入/刷新结果更新验证失败标记：
+// 成功 → 清除；ErrNotLoggedIn/ErrSessionInvalid → 置位；其他错误（网络等）→ 保持。
+func ytInvalidAfterSync(prev bool, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ytm.ErrNotLoggedIn) || errors.Is(err, ytm.ErrSessionInvalid) {
+		return true
+	}
+	return prev
+}
+
 // saveInterval 播放中自动保存会话的节流间隔。
 const saveInterval = 5 * time.Second
 
@@ -590,6 +602,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // 防御：未集成 yt 时丢弃结果
 		}
 		m.ytSyncing = false
+		m.ytInvalid = ytInvalidAfterSync(m.ytInvalid, msg.err)
 		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, m.ytInvalid)
 		if msg.err != nil {
 			m.notice = ""
@@ -625,6 +638,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // 防御：未集成 yt 时丢弃结果
 		}
 		m.ytSyncing = false
+		m.ytInvalid = ytInvalidAfterSync(m.ytInvalid, msg.err)
 		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, m.ytInvalid)
 		if msg.err != nil {
 			m.notice = ""
@@ -665,6 +679,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // 防御：未集成 yt 时丢弃结果
 		}
 		m.ytSyncing = false
+		m.ytInvalid = ytInvalidAfterSync(m.ytInvalid, msg.err)
 		m.plPage = m.plPage.setYTSyncStatus(m.ytLogin, false, m.ytInvalid)
 		if msg.err != nil {
 			m.notice = ""

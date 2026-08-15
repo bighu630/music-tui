@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"music-tui/model"
@@ -22,6 +23,15 @@ type RemotePlaylist struct {
 // URL 返回该歌单的可拉取 URL。
 func (r RemotePlaylist) URL() string {
 	return "https://music.youtube.com/playlist?list=" + url.QueryEscape(r.ID)
+}
+
+// FetchURL 返回该映射的可拉取 URL：url: 前缀（无 list 参数的导入，如频道 URL）
+// 直接用原始 URL，其余经 playlist?list= 构造。
+func (r RemotePlaylist) FetchURL() string {
+	if strings.HasPrefix(r.ID, "url:") {
+		return strings.TrimPrefix(r.ID, "url:")
+	}
+	return r.URL()
 }
 
 // SyncResult 是一次同步的结果。
@@ -73,7 +83,7 @@ func (c *Client) SyncOne(ctx context.Context, pl *playlists.Store, playlistID st
 		return SyncResult{}, err
 	}
 	remote := RemotePlaylist{ID: entry.PlaylistID}
-	fetched, err := c.fetcher.FetchPlaylist(ctx, remote.URL(), search.CookieArgs{File: p})
+	fetched, err := c.fetcher.FetchPlaylist(ctx, remote.FetchURL(), search.CookieArgs{File: p})
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("拉取歌单失败: %w", err)
 	}

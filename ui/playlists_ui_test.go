@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1298,6 +1299,112 @@ func TestYTSyncAllNotLoggedIn(t *testing.T) {
 	}
 	if m.ytSyncing {
 		t.Error("失败后 syncing 应复位")
+	}
+}
+
+// 跟进项 C：ytInvalid 随同步结果更新——验证失败置位后成功 SyncAll 清除；
+// 验证有效态下 SyncAll 返回 ErrSessionInvalid → 置位。
+func TestYTSyncDoneUpdatesInvalidState(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := env.store.SetPastedLogin("SAPISID=sap; __Secure-3PAPISID=3p"); err != nil {
+		t.Fatal(err)
+	}
+	env.refreshYTStatus()
+	env.fetcher.playlists[ytTrackURL("PLAAA")] = model.Playlist{
+		ID: "PLAAA", Title: "我的最爱",
+		Tracks: []model.Track{testTrack("v1")},
+	}
+	env.fetcher.playlists[ytTrackURL("PLBBB")] = model.Playlist{
+		ID: "PLBBB", Title: "通勤歌单",
+		Tracks: []model.Track{testTrack("v2")},
+	}
+	m := env.m
+
+	// 验证失败 → 置位（状态区降级展示）
+	m, _ = update(m, ytVerifyDoneMsg{err: ytm.ErrSessionInvalid})
+	if !m.ytInvalid {
+		t.Fatal("验证失败后 ytInvalid 应为 true")
+	}
+	if got := stripANSI(m.plPage.view()); !strings.Contains(got, "已登录（验证失败）") {
+		t.Errorf("验证失败后状态区应降级: %q", got)
+	}
+
+	// 成功 SyncAll → 清除标记（状态区恢复已登录）
+	cmd := ytSyncAllCmd(env.client, env.m.pl)
+	var sd ytSyncDoneMsg
+	for _, msg := range execCmds(cmd) {
+		if dm, ok := msg.(ytSyncDoneMsg); ok {
+			sd = dm
+		}
+	}
+	if sd.err != nil {
+		t.Fatalf("SyncAll 应成功: %v", sd.err)
+	}
+	m, _ = update(m, sd)
+	if m.ytInvalid {
+		t.Error("成功同步后应清除验证失败标记")
+	}
+	if got := stripANSI(m.plPage.view()); strings.Contains(got, "验证失败") {
+		t.Errorf("成功同步后状态区不应再降级: %q", got)
+	}
+
+	// 会话失效（browse 403 → ErrSessionInvalid）→ 置位
+	env.client.SetHTTPClient(&http.Client{Transport: ytRoundTripper{code: 403, body: ""}})
+	cmd = ytSyncAllCmd(env.client, env.m.pl)
+	sd = ytSyncDoneMsg{}
+	for _, msg := range execCmds(cmd) {
+		if dm, ok := msg.(ytSyncDoneMsg); ok {
+			sd = dm
+		}
+	}
+	if !errors.Is(sd.err, ytm.ErrSessionInvalid) {
+		t.Fatalf("SyncAll 应返回 ErrSessionInvalid, got %v", sd.err)
+	}
+	m, _ = update(m, sd)
+	if !m.ytInvalid {
+		t.Error("SyncAll 返回 ErrSessionInvalid 后应置位验证失败标记")
+	}
+	if got := stripANSI(m.plPage.view()); !strings.Contains(got, "已登录（验证失败）") {
+		t.Errorf("失效后状态区应降级: %q", got)
+	}
+}
+
+// 跟进项 C（导入/刷新 handler）：成功清除、会话错误置位、其他错误保持。
+func TestYTImportRefreshDoneUpdateInvalidState(t *testing.T) {
+	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	if _, err := env.store.SetPastedLogin("SAPISID=sap; __Secure-3PAPISID=3p"); err != nil {
+		t.Fatal(err)
+	}
+	env.refreshYTStatus()
+	m := env.m
+
+	m, _ = update(m, ytVerifyDoneMsg{err: ytm.ErrNotLoggedIn}) // 验证失败 → 置位
+	if !m.ytInvalid {
+		t.Fatal("验证失败后 ytInvalid 应为 true")
+	}
+
+	// 成功导入 → 清除
+	m, _ = update(m, ytImportDoneMsg{res: ytm.SyncResult{Remote: ytm.RemotePlaylist{ID: "PLX", Title: "导入歌单"}, ListName: "YT: 导入歌单", TrackCount: 1}})
+	if m.ytInvalid {
+		t.Error("成功导入后应清除验证失败标记")
+	}
+
+	// 刷新返回 ErrSessionInvalid（包装形式，errors.Is 可识别）→ 置位
+	m, _ = update(m, ytRefreshDoneMsg{err: fmt.Errorf("拉取歌单失败: %w", ytm.ErrSessionInvalid)})
+	if !m.ytInvalid {
+		t.Error("刷新返回 ErrSessionInvalid 后应置位验证失败标记")
+	}
+
+	// 其他错误（网络等）→ 保持置位
+	m, _ = update(m, ytImportDoneMsg{err: errors.New("yt-dlp 网络错误")})
+	if !m.ytInvalid {
+		t.Error("网络错误不应清除验证失败标记")
+	}
+
+	// 成功刷新 → 清除
+	m, _ = update(m, ytRefreshDoneMsg{res: ytm.SyncResult{Remote: ytm.RemotePlaylist{ID: "PLX", Title: "导入歌单"}, ListName: "YT: 导入歌单", TrackCount: 2}})
+	if m.ytInvalid {
+		t.Error("成功刷新后应清除验证失败标记")
 	}
 }
 

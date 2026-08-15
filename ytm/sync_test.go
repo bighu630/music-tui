@@ -299,6 +299,52 @@ func TestSyncOneRefreshesImportedPlaylist(t *testing.T) {
 	}
 }
 
+// 跟进项 A：无 list 参数的导入（url: 前缀映射，如频道 URL）刷新时必须直接用
+// 原始 URL 拉取，不得经 playlist?list=url%3A... 构造垃圾 URL。
+func TestSyncOneRefreshesURLPrefixedEntry(t *testing.T) {
+	env := newSyncEnv(t, "") // browse 枚举只有 PLAAA/PLBBB/PLCCC
+	rawURL := "https://music.youtube.com/channel/xxx"
+	// 预置：已导入的无 list 参数歌单（映射键为 url: 前缀）
+	if _, err := env.pls.Create("YT: 频道歌单"); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.pls.AddTrack("YT: 频道歌单", testTrack("old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.UpsertSync(SyncEntry{PlaylistID: "url:" + rawURL, ListName: "YT: 频道歌单", Count: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// fetcher 只预置原始 URL：若 SyncOne 构造出垃圾 URL 会命中“未预置 URL”错误
+	env.fetcher.playlists[rawURL] = model.Playlist{
+		ID: "url:" + rawURL, Title: "频道歌单",
+		Tracks: []model.Track{testTrack("v1"), testTrack("v2")},
+	}
+
+	res, err := env.client.SyncOne(context.Background(), env.pls, "url:"+rawURL)
+	if err != nil {
+		t.Fatalf("url: 前缀映射刷新应成功: %v", err)
+	}
+	if res.New {
+		t.Error("已有映射应刷新而非新建")
+	}
+	if res.ListName != "YT: 频道歌单" || res.TrackCount != 2 {
+		t.Errorf("res = %+v", res)
+	}
+	// 断言 fetcher 收到原始 URL（非 playlist?list=url%3A... 垃圾 URL）
+	if len(env.fetcher.urls) != 1 || env.fetcher.urls[0] != rawURL {
+		t.Errorf("fetcher 应收到原始 URL %q, got %v", rawURL, env.fetcher.urls)
+	}
+	// 内容整体替换
+	tracks := env.pls.Tracks("YT: 频道歌单")
+	if len(tracks) != 2 || tracks[0].ID != "v1" || tracks[1].ID != "v2" {
+		t.Errorf("刷新后 = %+v", tracks)
+	}
+	// SyncEntry 保持 url: 映射键并更新计数
+	if e, _ := env.store.FindSync("url:" + rawURL); e.ListName != "YT: 频道歌单" || e.Count != 2 {
+		t.Errorf("SyncEntry 应保持 url: 映射键并更新计数: %+v", e)
+	}
+}
+
 // SyncOne 语义：远端标题变更时刷新仍写入原映射列表（ListName 保持原名），
 // 不因标题变化新建列表。
 func TestSyncOneKeepsListNameWhenRemoteTitleChanged(t *testing.T) {
