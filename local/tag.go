@@ -139,8 +139,10 @@ func parseMPEGHeader(b []byte) (frameLen, samples, bitrate, samplerate int, ok b
 	switch layer {
 	case 3: // Layer1：帧长 = (12*bitrate/samplerate + padding) * 4
 		frameLen = (12*bitrate/samplerate + padding) * 4
-	default: // Layer2/3：帧长 = 144*bitrate/samplerate + padding
-		frameLen = 144*bitrate/samplerate + padding
+	default: // Layer2/3：帧长 = 每帧样本数/8 * bitrate/samplerate + padding
+		// MPEG1 Layer3 = 1152/8 = 144；MPEG2/2.5 Layer3 = 576/8 = 72；Layer2 一律 144。
+		// （旧实现 Layer3 一律 144，MPEG2/2.5 帧长被算大一倍 → 扫描错位。）
+		frameLen = samples/8*bitrate/samplerate + padding
 	}
 	return frameLen, samples, bitrate, samplerate, frameLen >= 4
 }
@@ -192,22 +194,37 @@ func mp3Duration(f *os.File, size int64) float64 {
 		if _, err := f.ReadAt(payload, audioStart+4); err == nil {
 			magic := string(payload[sideInfo : sideInfo+4])
 			if magic == "Xing" || magic == "Info" {
-				if n := readUint32BE(payload[sideInfo+8 : sideInfo+12]); n > 0 {
-					return float64(n) * float64(samples) / float64(samplerate)
+				// flags 位 0（frames 字段存在）置位才读帧数走快路径；
+				// 否则（如仅 bytes 位）继续走 CBR/VBR 扫描。
+				if flags := readUint32BE(payload[sideInfo+4 : sideInfo+8]); flags&1 != 0 {
+					if n := readUint32BE(payload[sideInfo+8 : sideInfo+12]); n > 0 {
+						return float64(n) * float64(samples) / float64(samplerate)
+					}
 				}
 			}
 		}
 	}
 
-	// CBR 判断：文件剩余字节对帧长取模容差 < 64 → 视为 CBR，帧数 = 剩余/帧长
-	// （容差容忍 ID3v1 之类的小尾巴）。取模判断前抽查中部两帧帧头
+	// 剥离 ID3v1 尾（最后 128 字节以 "TAG" 开头）——否则 CBR 文件剩余字节对
+	// 帧长取模恒 ≥64 误落 VBR 全文件扫描（帧长 <128 时还会多算一帧）；
+	// VBR 扫描的终止边界同样用它。
+	audioEnd := size
+	if size >= 128 && size-128 >= audioStart {
+		var tag [3]byte
+		if _, err := f.ReadAt(tag[:], size-128); err == nil && string(tag[:]) == "TAG" {
+			audioEnd -= 128
+		}
+	}
+
+	// CBR 判断：剩余音频字节对帧长取模容差 < 64 → 视为 CBR，帧数 = 剩余/帧长
+	// （容差容忍残余小尾巴）。取模判断前抽查中部两帧帧头
 	// （比特率/采样率/版本层一致）——防止 VBR 文件总长度恰好与首帧长同余
 	// 而被误判；其余情况（含带大尾标签的 CBR）落 VBR 逐帧扫描（精确）。
-	remaining := size - audioStart
+	remaining := audioEnd - audioStart
 	spotOK := true
 	for k := 1; k <= 2; k++ {
 		off := audioStart + int64(k)*int64(frameLen)
-		if off+4 > size {
+		if off+4 > audioEnd {
 			break
 		}
 		var h [4]byte
@@ -226,9 +243,9 @@ func mp3Duration(f *os.File, size int64) float64 {
 	}
 
 	// VBR 兜底：从首帧起逐帧扫描计数（每帧按帧头算帧长 seek 跳过）；
-	// 遇到无效帧头视为音频结束，用已累计帧数。
+	// 遇到无效帧头或越过音频末尾视为音频结束，用已累计帧数。
 	frames := int64(0)
-	for off := audioStart; off+4 <= size; {
+	for off := audioStart; off+4 <= audioEnd; {
 		var h [4]byte
 		if _, err := f.ReadAt(h[:], off); err != nil {
 			break

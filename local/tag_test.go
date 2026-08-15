@@ -25,6 +25,12 @@ func be32(n uint32) []byte {
 	return b
 }
 
+func be64(n uint64) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, n)
+	return b
+}
+
 // syncsafe 将 n 编码为 4 字节 ID3v2 syncsafe 整数。
 func syncsafe(n int) []byte {
 	return []byte{
@@ -40,16 +46,55 @@ func id3TextFrame(id, text string) []byte {
 	return append(f, content...)
 }
 
-// mpeg1Layer3Bitrate 是 MPEG1 Layer3 比特率表（kbps），index 0 = free。
-var mpeg1Layer3Bitrate = [...]int{0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320}
-
-// mp3Frame 构造一帧 MPEG1 Layer3 音频帧（给定 bitrate index，44100Hz 无 padding）。
-func mp3Frame(bitrateIndex int) []byte {
-	h := []byte{0xFF, 0xFB, byte(bitrateIndex << 4), 0x00}
-	frameLen := 144 * mpeg1Layer3Bitrate[bitrateIndex] * 1000 / 44100
+// mpegFrame 构造一帧 MPEG 音频帧（版本/层/比特率 index/采样率 index 参数化，
+// 无 padding、无 CRC、立体声模式）。帧长按规范公式独立计算——表与
+// parseMPEGHeader 镜像，避免测试与实现互为依赖。
+func mpegFrame(version, layer byte, bitrateIndex, srIndex int) []byte {
+	// byte1 = 111 VV LL P：sync(111) + version + layer + protection（1 = 无 CRC）
+	h := []byte{0xFF, 0xE0 | version<<3 | layer<<1 | 0x01, byte(bitrateIndex<<4 | srIndex<<2), 0x00}
+	// 比特率表（kbps，index 0 = free、15 = 无效）
+	var bitrates [16]int
+	switch layer {
+	case 3: // Layer1
+		bitrates = [...]int{0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0}
+	case 2: // Layer2
+		bitrates = [...]int{0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0}
+	default: // Layer3（64kbps 的 index 8 在 MPEG1/MPEG2 表中一致，测试仅用到该点）
+		bitrates = [...]int{0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0}
+	}
+	// 采样率表（Hz）
+	var srs [3]int
+	switch version {
+	case 3: // MPEG1
+		srs = [...]int{44100, 48000, 32000}
+	case 2: // MPEG2
+		srs = [...]int{22050, 24000, 16000}
+	default: // MPEG2.5
+		srs = [...]int{11025, 12000, 8000}
+	}
+	// 每帧样本数
+	samples := 1152
+	switch {
+	case layer == 3: // Layer1
+		samples = 384
+	case layer == 1 && version != 3: // MPEG2/2.5 Layer3
+		samples = 576
+	}
+	// 帧长（字节）
+	var frameLen int
+	if layer == 3 { // Layer1
+		frameLen = (12 * bitrates[bitrateIndex] * 1000 / srs[srIndex]) * 4
+	} else { // Layer2/3
+		frameLen = samples / 8 * bitrates[bitrateIndex] * 1000 / srs[srIndex]
+	}
 	f := make([]byte, frameLen)
 	copy(f, h)
 	return f
+}
+
+// mp3Frame 构造一帧 MPEG1 Layer3 音频帧（给定 bitrate index，44100Hz 无 padding）。
+func mp3Frame(bitrateIndex int) []byte {
+	return mpegFrame(3, 1, bitrateIndex, 0) // MPEG1 Layer3 44100Hz
 }
 
 // writeID3v2MP3 写一个 ID3v2.3 标签（TIT2/TPE1，UTF-8）+ N 帧 MPEG1 Layer3 音频。
@@ -130,8 +175,8 @@ func writeWAV(t *testing.T, path string, dataBytes int) {
 func writeM4A(t *testing.T, path string, durationSec uint32) {
 	t.Helper()
 	var b []byte
-	// ftyp（24 字节）
-	b = append(b, be32(24)...)
+	// ftyp（20 字节：8 头 + major brand 4 + version 4 + compatible brand 4）
+	b = append(b, be32(20)...)
 	b = append(b, "ftyp"...)
 	b = append(b, "M4A "...)
 	b = append(b, be32(0)...)
@@ -149,7 +194,35 @@ func writeM4A(t *testing.T, path string, durationSec uint32) {
 	moov = append(moov, be32(uint32(8+len(mvhd)))...)
 	moov = append(moov, "moov"...)
 	moov = append(moov, mvhd...)
-	b = append(b, be32(uint32(8+len(moov)))...)
+	b = append(b, moov...)
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeM4Av1 写一个最小 M4A：ftyp + moov/mvhd v1（8 字节 duration）。
+func writeM4Av1(t *testing.T, path string, durationMillis uint64) {
+	t.Helper()
+	var b []byte
+	// ftyp（20 字节）
+	b = append(b, be32(20)...)
+	b = append(b, "ftyp"...)
+	b = append(b, "M4A "...)
+	b = append(b, be32(0)...)
+	b = append(b, "M4A "...)
+	// moov → mvhd v1
+	var mvhdPayload []byte
+	mvhdPayload = append(mvhdPayload, 0x01, 0x00, 0x00, 0x00)  // version 1 + flags
+	mvhdPayload = append(mvhdPayload, make([]byte, 16)...)     // creation + modification（各 8 字节）
+	mvhdPayload = append(mvhdPayload, be32(1000)...)           // timescale
+	mvhdPayload = append(mvhdPayload, be64(durationMillis)...) // duration（8 字节）
+	mvhdPayload = append(mvhdPayload, make([]byte, 80)...)     // 其余字段
+	mvhd := append(be32(uint32(8+len(mvhdPayload))), "mvhd"...)
+	mvhd = append(mvhd, mvhdPayload...)
+	var moov []byte
+	moov = append(moov, be32(uint32(8+len(mvhd)))...)
+	moov = append(moov, "moov"...)
+	moov = append(moov, mvhd...)
 	b = append(b, moov...)
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
@@ -260,6 +333,109 @@ func TestReadDurationMP3Xing(t *testing.T) {
 	}
 }
 
+func TestReadDurationMP3XingNoFramesFlag(t *testing.T) {
+	// Xing flags 不含 frames 位（仅 bytes 位）→ 不得走快路径（否则会把 bytes
+	// 字段误当帧数），回退 CBR 扫描，时长仍正确。
+	p := filepath.Join(t.TempDir(), "xing-noframes.mp3")
+	var b []byte
+	for i := 0; i < 500; i++ {
+		b = append(b, mp3Frame(9)...) // 128kbps 417 字节
+	}
+	xing := append([]byte("Xing"), be32(0x00000002)...) // flags: 仅 bytes 位
+	xing = append(xing, be32(500*417)...)               // bytes 字段
+	copy(b[36:], xing)
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := readDuration(p)
+	want := 500.0 * 1152 / 44100 // ≈ 13.061
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("readDuration(Xing 无 frames 位) = %v，期望 ≈ %v", got, want)
+	}
+}
+
+func TestReadDurationMPEG2Layer3CBR(t *testing.T) {
+	// MPEG2 Layer3（576 样本/帧）CBR：500 帧 64kbps/22050Hz → 500*576/22050 s。
+	// 帧长 = 72*64000/22050 = 208 字节；若按 MPEG1 的 144 公式（417 字节）算，
+	// CBR 取模失配 → VBR 扫描错位 → 时长错误。
+	p := filepath.Join(t.TempDir(), "mpeg2.mp3")
+	var b []byte
+	for i := 0; i < 500; i++ {
+		b = append(b, mpegFrame(2, 1, 8, 0)...) // MPEG2 Layer3 64kbps 22050Hz
+	}
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := readDuration(p)
+	want := 500.0 * 576 / 22050 // ≈ 13.061
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("readDuration(MPEG2 Layer3 CBR) = %v，期望 ≈ %v", got, want)
+	}
+}
+
+func TestReadDurationMPEG2Xing(t *testing.T) {
+	// MPEG2 Layer3 + Xing（立体声 side info 17 字节，flags 仅 frames 位）→ 快路径
+	p := filepath.Join(t.TempDir(), "mpeg2-xing.mp3")
+	frame := mpegFrame(2, 1, 8, 0)                      // 208 字节：4 头 + 204 payload
+	xing := append([]byte("Xing"), be32(0x00000001)...) // flags: frames
+	xing = append(xing, be32(400)...)
+	copy(frame[17+4:], xing) // side info 17 字节后
+	if err := os.WriteFile(p, frame, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := readDuration(p)
+	want := 400.0 * 576 / 22050 // ≈ 10.449
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("readDuration(MPEG2 Xing) = %v，期望 ≈ %v", got, want)
+	}
+}
+
+func TestReadDurationMP3CBRID3v1(t *testing.T) {
+	// CBR 帧 + 尾部 128 字节 ID3v1 标签（"TAG" 前缀）：剥离尾标签后按音频字节
+	// 取模判 CBR；若不剥离，帧长 104 字节时取模余 24 <64 会把 128 字节尾标签
+	// 也当音频，多算一帧（1001 帧 → 误差 ≈ 0.026s > 容差）。
+	p := filepath.Join(t.TempDir(), "id3v1.mp3")
+	var b []byte
+	for i := 0; i < 1000; i++ {
+		b = append(b, mp3Frame(1)...) // 32kbps → 帧长 104 字节
+	}
+	b = append(b, "TAG"...)
+	b = append(b, make([]byte, 125)...) // 曲名/歌手/专辑/年份/注释/流派
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := readDuration(p)
+	want := 1000.0 * 1152 / 44100 // ≈ 26.122
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("readDuration(CBR+ID3v1) = %v，期望 ≈ %v", got, want)
+	}
+}
+
+func TestReadDurationMP3ID3v24Footer(t *testing.T) {
+	// ID3v2.4 footer（flags 0x10，10 字节 "3DI" 尾）→ 音频起始偏移 +10 跳过正确
+	p := filepath.Join(t.TempDir(), "v24-footer.mp3")
+	tagBody := id3TextFrame("TIT2", "t")
+	var b []byte
+	b = append(b, "ID3"...)
+	b = append(b, 0x04, 0x00, 0x10) // v2.4，flags 0x10 = 带 footer
+	b = append(b, syncsafe(len(tagBody))...)
+	b = append(b, tagBody...)
+	b = append(b, "3DI"...)
+	b = append(b, 0x04, 0x00, 0x10)
+	b = append(b, syncsafe(len(tagBody))...)
+	for i := 0; i < 100; i++ {
+		b = append(b, mp3Frame(9)...)
+	}
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := readDuration(p)
+	want := 100.0 * 1152 / 44100 // ≈ 2.612
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("readDuration(ID3v2.4 footer) = %v，期望 ≈ %v", got, want)
+	}
+}
+
 // ---- readDuration：flac / wav / m4a ----
 
 func TestReadDurationFLAC(t *testing.T) {
@@ -280,12 +456,57 @@ func TestReadDurationWAV(t *testing.T) {
 	}
 }
 
+func TestReadDurationWAVOddChunks(t *testing.T) {
+	// 奇数长度 chunk：data 882001 字节 + 1 字节 padding；其前另有一个奇数长度
+	// junk chunk 验证 chunk 对齐跳过 → 时长 = data size / byteRate
+	p := filepath.Join(t.TempDir(), "odd.wav")
+	var b []byte
+	b = append(b, "RIFF"...)
+	// 文件总长 = 12 头 + junk(8+3+1) + fmt(8+16) + data(8+882001+1)
+	b = append(b, be32(uint32(4+(8+3+1)+(8+16)+(8+882001+1)))...)
+	b = append(b, "WAVE"...)
+	b = append(b, "junk"...)
+	b = append(b, be32(3)...) // 奇数长度
+	b = append(b, 'a', 'b', 'c')
+	b = append(b, 0x00) // padding 对齐
+	b = append(b, "fmt "...)
+	b = append(b, be32(16)...)
+	b = append(b, be16(1)...)      // PCM
+	b = append(b, be16(2)...)      // 双声道
+	b = append(b, be32(44100)...)  // sample rate
+	b = append(b, be32(176400)...) // byteRate = 44100*2*2
+	b = append(b, be16(4)...)      // blockAlign
+	b = append(b, be16(16)...)     // bitsPerSample
+	b = append(b, "data"...)
+	b = append(b, be32(882001)...) // 奇数长度 data
+	b = append(b, make([]byte, 882001)...)
+	b = append(b, 0x00) // padding 对齐
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := readDuration(p)
+	want := 882001.0 / 176400 // ≈ 5.000006
+	if math.Abs(got-want) > 0.001 {
+		t.Errorf("readDuration(WAV 奇数 chunk) = %v，期望 ≈ %v", got, want)
+	}
+}
+
 func TestReadDurationM4A(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "a.m4a")
 	writeM4A(t, p, 285)
 	got := readDuration(p)
 	if math.Abs(got-285.0) > 0.001 {
 		t.Errorf("readDuration(M4A) = %v，期望 285.0", got)
+	}
+}
+
+func TestReadDurationM4Av1(t *testing.T) {
+	// mvhd version 1：8 字节 duration → 285.5s（timescale 1000）
+	p := filepath.Join(t.TempDir(), "v1.m4a")
+	writeM4Av1(t, p, 285500)
+	got := readDuration(p)
+	if math.Abs(got-285.5) > 0.001 {
+		t.Errorf("readDuration(M4A v1) = %v，期望 285.5", got)
 	}
 }
 
