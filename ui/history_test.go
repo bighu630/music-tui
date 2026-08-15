@@ -92,14 +92,15 @@ func TestHistoryEmptyView(t *testing.T) {
 func TestHistoryItemTitleAndDescription(t *testing.T) {
 	tr := testTrack("t1")
 	item := historyItem{entry: historyEntry(tr)}
-	if item.Title() != tr.Title {
-		t.Errorf("Title = %q", item.Title())
+	want := tr.Title + " - " + tr.Artist + " · "
+	if !strings.HasPrefix(item.Title(), want) {
+		t.Errorf("Title = %q, want 前缀 %q", item.Title(), want)
 	}
 	if item.FilterValue() != tr.Title+" "+tr.Artist {
 		t.Errorf("FilterValue = %q", item.FilterValue())
 	}
-	if item.Description() == "" {
-		t.Error("Description 不应为空")
+	if item.Description() != "" {
+		t.Errorf("Description = %q, want 空（单行模式）", item.Description())
 	}
 }
 
