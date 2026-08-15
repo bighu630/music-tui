@@ -39,3 +39,22 @@ func TestFormatPlayedAt(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatTrackLine(t *testing.T) {
+	cases := []struct {
+		name, title, artist, meta, want string
+	}{
+		{"正常", "晴天", "周杰伦", "03:45", "晴天 - 周杰伦 · 03:45"},
+		{"空作者", "晴天", "", "03:45", "晴天 · 03:45"},
+		{"空附加", "晴天", "周杰伦", "", "晴天 - 周杰伦"},
+		{"空作者空附加", "晴天", "", "", "晴天"},
+		{"标题含连字符", "A - B", "C", "01:00", "A - B - C · 01:00"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := formatTrackLine(c.title, c.artist, c.meta); got != c.want {
+				t.Errorf("formatTrackLine(%q,%q,%q) = %q, want %q", c.title, c.artist, c.meta, got, c.want)
+			}
+		})
+	}
+}

@@ -34,3 +34,16 @@ func formatPlayedAt(t time.Time, now time.Time) string {
 	}
 	return t.Format("2006-01-02 15:04")
 }
+
+// formatTrackLine 拼接单行歌曲条目："标题 - 作者 · 附加"。
+// 作者为空时省略 " - " 分隔符；附加信息（时长/播放时间）为空时省略 " · " 段。
+func formatTrackLine(title, artist, meta string) string {
+	line := title
+	if artist != "" {
+		line += " - " + artist
+	}
+	if meta != "" {
+		line += " · " + meta
+	}
+	return line
+}

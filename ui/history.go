@@ -26,10 +26,10 @@ type historyItem struct {
 	entry history.Entry
 }
 
-func (i historyItem) Title() string { return i.entry.Track.Title }
-func (i historyItem) Description() string {
-	return i.entry.Track.Artist + " · " + formatPlayedAt(i.entry.PlayedAt, time.Now())
+func (i historyItem) Title() string {
+	return formatTrackLine(i.entry.Track.Title, i.entry.Track.Artist, formatPlayedAt(i.entry.PlayedAt, time.Now()))
 }
+func (i historyItem) Description() string { return "" }
 func (i historyItem) FilterValue() string { return i.entry.Track.Title + " " + i.entry.Track.Artist }
 
 // historyModel 历史页：列表 + 重播/删除/清空。数据由 root 经 setEntries 推入。
@@ -42,6 +42,7 @@ type historyModel struct {
 
 func newHistoryModel() historyModel {
 	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = false // 单行条目（标题 - 作者 · 播放时间）
 	l := list.New(nil, delegate, 80, 24)
 	l.Title = "最近播放"
 	l.SetShowHelp(false)

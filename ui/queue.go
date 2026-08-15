@@ -41,19 +41,15 @@ func (i queueItem) Title() string {
 	if i.current {
 		prefix = "▶ "
 	}
-	title := fmt.Sprintf("%s%2d. %s", prefix, i.idx+1, i.track.Title)
+	line := fmt.Sprintf("%s%2d. %s", prefix, i.idx+1,
+		formatTrackLine(i.track.Title, i.track.Artist, formatDuration(i.track.Duration)))
 	if i.current {
-		title = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")).Render(title)
+		line = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")).Render(line)
 	}
-	return title
+	return line
 }
 
-func (i queueItem) Description() string {
-	if i.track.Artist == "" {
-		return formatDuration(i.track.Duration)
-	}
-	return i.track.Artist + " · " + formatDuration(i.track.Duration)
-}
+func (i queueItem) Description() string { return "" }
 
 func (i queueItem) FilterValue() string { return i.track.Title + " " + i.track.Artist }
 
@@ -77,6 +73,7 @@ type queueModel struct {
 
 func newQueueModel() queueModel {
 	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = false // 单行条目（▶ 序号. 标题 - 作者 · 时长）
 	l := list.New(nil, delegate, 80, 24)
 	l.Title = "播放队列"
 	l.SetShowHelp(false)
