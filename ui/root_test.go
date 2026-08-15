@@ -1634,10 +1634,16 @@ func TestStatusBarLongTitleTruncated(t *testing.T) {
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("一首名字特别长特别长特别长特别长特别长特别长的歌"))
 	_ = execCmds(cmd)
-	m, _ = update(m, tea.WindowSizeMsg{Width: 40, Height: 24})
+	// 21 列：left("⏵ 顺序 · 1/1")=12 格，旧实现 right=Truncate(title, w/2=10)
+	// 后 12+10=22 > 21 折行（40/24 列下 left+right 恰不超宽，复现不了回归）。
+	m, _ = update(m, tea.WindowSizeMsg{Width: 21, Height: 24})
 	lines := strings.Split(m.View(), "\n")
-	if w := ansi.StringWidth(lines[23]); w > 40 {
-		t.Errorf("窄窗口状态栏行宽 = %d, want ≤ 40", w)
+	if w := ansi.StringWidth(lines[23]); w > 21 {
+		t.Errorf("窄窗口状态栏行宽 = %d, want ≤ 21", w)
+	}
+	// 截断必须真的发生：标题 68 格远宽于剩余宽度，右侧应含省略号
+	if !strings.Contains(lines[23], "…") {
+		t.Errorf("窄窗口状态栏右侧标题应被截断含省略号, got %q", lines[23])
 	}
 	if !strings.Contains(lines[23], "顺序") {
 		t.Errorf("窄窗口状态栏应含模式信息, got %q", lines[23])

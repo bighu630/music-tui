@@ -1021,6 +1021,8 @@ func (m Model) overlayToast(out string) string {
 	// 截断基准 m.width-2（预留 "  " 分隔符 2 格）：覆盖行 = 截断 toast + "  "
 	// 恒 ≤ m.width，不折行。截断保留尾部语义——失败原因/后续动作（如
 	// “已重试 N 次，跳过继续播放”）在句尾，头部歌曲名在状态栏/队列已可见。
+	// ⚠/✔/ℹ 图标与消息头部随截断一起被截掉（ANSI 颜色样式保留）——这是有意
+	// 取舍：动作语义在句尾，头部歌曲名在状态栏/队列可见，并非截断丢失。
 	// 注意 ansi.TruncateLeft 的 n 是“从左侧删掉多少格”而非目标宽度
 	// （result = tw - n + prefixW，… 占 1 格）；且跨界字符整簇保留，结果可比
 	// tw - n + 1 再宽 1 格（CJK 宽字符），故 n 多给 1 格余量保证 ≤ m.width-2。
@@ -1038,9 +1040,18 @@ func (m Model) overlayToast(out string) string {
 	if keep > 0 {
 		line = ansi.Truncate(lines[idx], keep, "") + "\x1b[0m"
 	}
-	if m.width <= 2 {
-		// 极端窄窗口：仅输出 toast 文本（无分隔符），避免 keep 钳 0 后
-		// line + "  " + text 仍超宽
+	if m.width > 0 && m.width <= 2 {
+		// 极端窄窗口（1-2 列）：分隔符 2 格就占满，原文放不下——按可用宽度
+		// 截断（2 列保留类型图标 + "…"，1 列仅 "…"），覆盖行宽恒 ≤ m.width
+		// 不折行。不用 ansi.Truncate(text, m.width, "…") 的原因：1 列预算下它
+		// 仍会输出首字符整簇（如 "⚠" 1 格 + "…" = 2 格）超宽。
+		if m.width == 2 {
+			lines[idx] = ansi.Truncate(text, 2, "…")
+		} else {
+			lines[idx] = "…"
+		}
+	} else if m.width <= 0 {
+		// 窗口尺寸未初始化（首帧/测试直接 View）：尚无宽度约束，按原文渲染
 		lines[idx] = text
 	} else {
 		lines[idx] = line + "  " + text
