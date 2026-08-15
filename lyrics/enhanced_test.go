@@ -123,7 +123,8 @@ func TestEnhancedDeterministicHitSkipsAI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ly, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
+	res, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
+	ly := res.Lyrics
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -155,7 +156,8 @@ func TestEnhancedAIPathHits(t *testing.T) {
 	c, aiCalls, _ := newEnhancedTestEnv(t, lrclibAIMatch(&aiGetCount), func(w http.ResponseWriter, r *http.Request) {
 		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
 	})
-	ly, err := c.Fetch(context.Background(), model.Track{Title: "【周杰倫】晴天 MV", Artist: "周杰倫官方頻道", Duration: 269.0})
+	res, err := c.Fetch(context.Background(), model.Track{Title: "【周杰倫】晴天 MV", Artist: "周杰倫官方頻道", Duration: 269.0})
+	ly := res.Lyrics
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -344,7 +346,8 @@ func TestEnhancedLRCCachePersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ly, err := c2.Fetch(context.Background(), track)
+	res, err := c2.Fetch(context.Background(), track)
+	ly := res.Lyrics
 	if err != nil {
 		t.Fatalf("重启后 Fetch: %v", err)
 	}
@@ -430,5 +433,72 @@ func TestEnhancedPassesThroughNonNotFound(t *testing.T) {
 	}
 	if aiCalls != 0 {
 		t.Errorf("AI 调用 %d 次, want 0（服务端错误不应进入 AI 路径）", aiCalls)
+	}
+}
+
+// TestEnhancedAIResultCarriesCleanTitle AI 命中：FetchResult 携带清洗后
+// 歌名/歌手（live 路径），展示层可覆盖原始 YouTube 标题。
+func TestEnhancedAIResultCarriesCleanTitle(t *testing.T) {
+	var aiGetCount int32
+	c, _, _ := newEnhancedTestEnv(t, lrclibAIMatch(&aiGetCount), func(w http.ResponseWriter, r *http.Request) {
+		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
+	})
+	res, err := c.Fetch(context.Background(), model.Track{Title: "【周杰倫】晴天 MV", Artist: "周杰倫官方頻道", Duration: 269.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if res.Title != "晴天" || res.Artist != aiArtist {
+		t.Errorf("Title/Artist = %q/%q, want 晴天/%s", res.Title, res.Artist, aiArtist)
+	}
+	if res.Lyrics == nil || len(res.Lyrics.Lines) != 1 {
+		t.Errorf("Lyrics = %+v", res.Lyrics)
+	}
+}
+
+// TestEnhancedAIResultCarriesCleanTitleFromCache 双缓存命中路径同样
+// 携带 AI 标题（AI 结果缓存 + 歌词缓存均需返回展示信息）。
+func TestEnhancedAIResultCarriesCleanTitleFromCache(t *testing.T) {
+	var aiGetCount int32
+	c, _, _ := newEnhancedTestEnv(t, lrclibAIMatch(&aiGetCount), func(w http.ResponseWriter, r *http.Request) {
+		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
+	})
+	track := model.Track{Title: "【周杰倫】晴天 MV", Artist: "周杰倫官方頻道", Duration: 269.0}
+	first, err := c.Fetch(context.Background(), track)
+	if err != nil {
+		t.Fatalf("首次 Fetch: %v", err)
+	}
+	second, err := c.Fetch(context.Background(), track)
+	if err != nil {
+		t.Fatalf("二次 Fetch: %v", err)
+	}
+	for i, res := range []FetchResult{first, second} {
+		if res.Title != "晴天" || res.Artist != aiArtist {
+			t.Errorf("第 %d 次 Title/Artist = %q/%q, want 晴天/%s", i+1, res.Title, res.Artist, aiArtist)
+		}
+	}
+}
+
+// TestEnhancedPlainOnlyRejected AI 重查只返回纯文本歌词：视为无歌词
+// （sync-only 规则同样约束 AI 路径）。
+func TestEnhancedPlainOnlyRejected(t *testing.T) {
+	c, _, _ := newEnhancedTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.URL.Query().Get("artist_name") == aiArtist {
+			_ = json.NewEncoder(w).Encode([]lrclibSong{
+				{TrackName: "晴天", ArtistName: aiArtist, Duration: 269.0,
+					PlainLyrics: "故事的小黄花"},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]lrclibSong{})
+	}, func(w http.ResponseWriter, r *http.Request) {
+		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
+	})
+	_, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound（AI 路径同样拒绝纯文本歌词）", err)
 	}
 }

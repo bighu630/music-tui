@@ -140,3 +140,11 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 审查：reviewer 两轮批准（5 项 🟡 修复：视口高度预留/0600/超长行续扫/single-flight/重试分类 + 4 项加固）✅
 - [x] 测试：新增 65 个（ai 19 + 严格阈值 6 + aicache 10 + lrccache 9 + enhanced 12 + config 7 + ui 2 + main 1，含 -count=5 -race 稳定性），全量 build/vet/test -race 全绿
 - [ ] 真机验收（待用户）：配置 api_key 后播放噪声标题曲目 → 歌词经 AI 兜底命中且显示「AI 匹配」；二次播放零请求（缓存命中）；无配置行为不变
+
+## 追加需求（用户 8-15 反馈）：sync-only 歌词 + AI 标题全局展示覆盖
+
+- [x] 用户确认：1A 全局只接受 sync 歌词（纯文本一律无歌词）；2A AI 识别标题/歌手全局替换展示
+- [x] 实现：songToLyrics 删纯文本兜底（确定性 + AI 路径统一）；Lyrics 删 Plain 字段、UI 删 lyricsPlain 态；lrccache 删 .txt 只存 .lrc
+- [x] 实现：Fetcher.Fetch 返回 FetchResult{Lyrics, Title, Artist}；AI 路径（live/缓存命中）携带清洗后歌名/歌手 → 控制栏/状态栏/队列当前项展示覆盖 + MPRIS onTrack 同步 + 切歌清空
+- [x] 测试：lyrics 4 个新测试（纯文本拒绝×2、FetchResult 形状、AI 标题携带×2）+ ui 4 个（控制栏/状态栏/队列当前项/MPRIS 回调），全量 build/vet/test -race 全绿
+- [ ] 真机验收（待用户）：无时间轴歌曲显示「暂无歌词」而非纯文本；AI 命中后全界面显示清洗标题

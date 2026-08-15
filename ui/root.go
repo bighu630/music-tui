@@ -76,10 +76,13 @@ type trackAppendMsg struct {
 	track model.Track
 }
 
-// lyricsResultMsg 歌词异步加载结果。
+// lyricsResultMsg 歌词异步加载结果；title/artist 为 AI 识别出的清洗后
+// 歌名/歌手（空 = 无 AI 信息，展示回落原始标题）。
 type lyricsResultMsg struct {
 	trackID string
 	lyrics  *lyrics.Lyrics
+	title   string
+	artist  string
 	err     error
 }
 
@@ -239,9 +242,9 @@ type Model struct {
 	cache            *cache.Manager // 音频缓存（命中优先本地文件；未命中后台下载）
 	playingFromCache bool           // 当前曲目是否播放自缓存文件（LoadFailed 时据此移除损坏条目）
 
-	state     model.PlaybackState
-	current   page
-	width     int // 窗口宽度（分隔线按此宽度渲染，不写死）
+	state    model.PlaybackState
+	current  page
+	width    int // 窗口宽度（分隔线按此宽度渲染，不写死）
 	hoverTab int // Tab 栏悬停标签下标（= page 枚举值）；-1 = 无悬停
 	// toast 活跃 toast（单条覆盖；定时自动消失，不参与布局）。替代旧 lastError/notice 横幅。
 	toast   *toast
@@ -782,6 +785,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 过期结果（已切歌）丢弃
 		if m.state.Track != nil && msg.trackID == m.state.Track.ID {
 			m.home = m.home.setLyrics(msg.err, msg.lyrics)
+			if msg.err == nil && msg.title != "" {
+				// AI 识别结果：全局展示覆盖（控制栏/状态栏/队列当前项）
+				// + MPRIS 元数据同步（外部消费者感知清洗后歌名）。
+				m.home = m.home.setAITrack(msg.title, msg.artist)
+				m.queuePage = m.queuePage.setAITrack(msg.title, msg.artist)
+				if m.onTrack != nil && m.state.Track != nil {
+					t := *m.state.Track
+					t.Title, t.Artist = msg.title, msg.artist
+					m.onTrack(&t)
+				}
+			}
 		}
 		return m, nil
 
@@ -966,7 +980,7 @@ func (m Model) statusBarView() string {
 	}
 	right := ""
 	if m.state.Track != nil {
-		right = m.state.Track.Title + " - " + m.state.Track.Artist
+		right = m.home.trackLabel()
 	}
 	style := lipgloss.NewStyle().Faint(true)
 	if m.width <= 0 {
@@ -1295,6 +1309,7 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 	m.state = model.PlaybackState{Track: &track, Playing: true, Duration: track.Duration}
 	m.toast = nil // 新曲目开始 = 新状态：清除活跃 toast
 	m.home = m.home.resetForTrack(&track)
+	m.queuePage = m.queuePage.setAITrack("", "") // 切歌：AI 展示覆盖作废
 	target := track.URL
 	if path, ok := m.cache.Lookup(track.ID); ok {
 		target = path
@@ -1400,8 +1415,8 @@ func fetchLyricsCmd(c lyrics.Fetcher, track model.Track) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		ly, err := c.Fetch(ctx, track)
-		return lyricsResultMsg{trackID: track.ID, lyrics: ly, err: err}
+		res, err := c.Fetch(ctx, track)
+		return lyricsResultMsg{trackID: track.ID, lyrics: res.Lyrics, title: res.Title, artist: res.Artist, err: err}
 	}
 }
 

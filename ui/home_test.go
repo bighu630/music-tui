@@ -71,12 +71,6 @@ func TestHomeLyricsStates(t *testing.T) {
 	if m.home.currentLine != -1 {
 		t.Fatalf("currentLine = %d, want -1", m.home.currentLine)
 	}
-
-	// 纯文本歌词
-	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: &lyrics.Lyrics{Plain: "纯文本歌词"}})
-	if m.home.lyricsState != lyricsPlain {
-		t.Fatalf("state = %v, want lyricsPlain", m.home.lyricsState)
-	}
 }
 
 func TestHomeCoverStates(t *testing.T) {
@@ -348,8 +342,9 @@ func TestHomeBottomControlRows(t *testing.T) {
 // TestHomeControlBarPositions 渲染列位置必须与 controlBarLayout 命中区间一致：
 // 中栏 "|<" 起点 == lay.centerStart，右栏模式文本起点 == lay.rightStart。
 // （回归：padLeft 按 leftW 上限计算，标题实际宽度小于 leftW 时未补齐差额，
-//  中栏/右栏整体贴左偏移——用户终端验证发现 "顺序 9/25 后面一大堆空"，
-//  且鼠标命中区间（按 layout）与渲染位置错位导致点击失效。）
+//
+//	中栏/右栏整体贴左偏移——用户终端验证发现 "顺序 9/25 后面一大堆空"，
+//	且鼠标命中区间（按 layout）与渲染位置错位导致点击失效。）
 func TestHomeControlBarPositions(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -397,8 +392,9 @@ func colOf(line, substr string) int {
 // TestHomeControlBarCentered 宽窗口下中栏操作键应位于屏幕水平中心：
 // centerStart == (width-centerBarW)/2。
 // （回归：曾在中栏在“左栏右缘~右栏左缘”之间居中——左栏（标题）宽、右栏
-//  （模式）窄时中栏被推到右侧，窗口越宽越明显：用户终端验证 W≈120 时
-//  “|< || >| 顺序 10/25 都到右边去了”。）
+//
+//	（模式）窄时中栏被推到右侧，窗口越宽越明显：用户终端验证 W≈120 时
+//	“|< || >| 顺序 10/25 都到右边去了”。）
 func TestHomeControlBarCentered(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
@@ -1025,12 +1021,6 @@ func TestHomeLyricsAISourceTag(t *testing.T) {
 	if strings.Contains(m.home.view(), "AI 匹配") {
 		t.Error("确定性来源歌词不应显示「AI 匹配」标识")
 	}
-
-	// 纯文本 AI 歌词同样显示
-	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: &lyrics.Lyrics{Plain: "纯文本", Source: lyrics.LyricsSourceAI}})
-	if !strings.Contains(m.home.view(), "AI 匹配") {
-		t.Error("AI 纯文本歌词应显示「AI 匹配」标识")
-	}
 }
 
 // TestHomeLyricsHeightReservesAITag AI 来源标识占 1 行：视口最高收缩，
@@ -1059,5 +1049,41 @@ func TestHomeLyricsHeightReservesAITag(t *testing.T) {
 	m := homeModel{lyrics: ly, lyricsState: lyricsSynced, height: 3}
 	if h := m.lyricsHeight(); h < 1 {
 		t.Errorf("极窄窗口 lyricsHeight = %d, want ≥1", h)
+	}
+}
+
+// TestHomeControlBarShowsAITitle AI 识别结果到达后，底部控制栏显示
+// 清洗后「晴天 - 周杰伦」而非原始 YouTube 标题。
+func TestHomeControlBarShowsAITitle(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	raw := model.Track{ID: "t1", Title: "T1", Artist: "A", Duration: 200, URL: "http://x/1", Source: "youtube"}
+	m, cmd := m.startPlay(raw)
+	_ = execCmds(cmd)
+
+	// AI 结果到达前：原始标题
+	if got := m.home.view(); !strings.Contains(got, "T1 - A") {
+		t.Errorf("AI 到达前应显示原始标题, got %q", got)
+	}
+	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly, title: "晴天", artist: "周杰伦"})
+	got := m.home.view()
+	// 控制栏左栏宽度有限，标题会截断（如 "晴天 - 周…"），按前缀断言
+	if !strings.Contains(got, "晴天 - 周") {
+		t.Errorf("控制栏应显示 AI 清洗标题, got %q", got)
+	}
+	if strings.Contains(got, "T1 - A") {
+		t.Errorf("控制栏不应再显示原始标题: %q", got)
+	}
+	// 切歌后清空覆盖，回到新曲原始标题
+	raw2 := model.Track{ID: "t2", Title: "T2", Artist: "B", Duration: 200, URL: "http://x/2", Source: "youtube"}
+	m, cmd = m.startPlay(raw2)
+	_ = execCmds(cmd)
+	got2 := m.home.view()
+	if !strings.Contains(got2, "T2 - B") {
+		t.Errorf("切歌后应显示新曲原始标题, got %q", got2)
+	}
+	if strings.Contains(got2, "晴天") {
+		t.Errorf("切歌后 AI 覆盖应清空: %q", got2)
 	}
 }

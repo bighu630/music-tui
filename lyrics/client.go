@@ -23,7 +23,16 @@ var ErrNotFound = errors.New("lyrics not found")
 // Fetcher 是歌词获取服务抽象：*Client（确定性匹配）与 *EnhancedClient
 // （AI 增强）均实现；ui/main 层按配置选择具体实现。
 type Fetcher interface {
-	Fetch(ctx context.Context, track model.Track) (*Lyrics, error)
+	Fetch(ctx context.Context, track model.Track) (FetchResult, error)
+}
+
+// FetchResult 是歌词获取结果。Lyrics 为命中的歌词（nil + ErrNotFound =
+// 无歌词）；Title/Artist 为 AI 识别出的清洗后歌名/歌手——展示层用它
+// 覆盖原始 YouTube 标题（空 = 无 AI 信息，保持原始显示）。
+type FetchResult struct {
+	Lyrics *Lyrics
+	Title  string
+	Artist string
 }
 
 // Client 是 lrclib 的 HTTP 客户端。
@@ -64,7 +73,7 @@ type lrclibSong struct {
 // → 404 或空歌词降级 /api/search；派生候选（去噪/切分/CJK 词元）不带
 // artist 直接走 /api/search（lrclib 对 track_name 精确匹配，噪声词会致
 // 0 结果）。未找到歌词返回 ErrNotFound；网络或服务端错误原样返回。
-func (c *Client) Fetch(ctx context.Context, track model.Track) (*Lyrics, error) {
+func (c *Client) Fetch(ctx context.Context, track model.Track) (FetchResult, error) {
 	for i, cand := range cleanCandidates(track.Title) {
 		// 派生候选恰为歌手名（如 CJK 词元"周杰倫"）是最常见的浪费请求，跳过。
 		if i > 0 && strings.EqualFold(cand, track.Artist) {
@@ -72,13 +81,13 @@ func (c *Client) Fetch(ctx context.Context, track model.Track) (*Lyrics, error) 
 		}
 		ly, err := c.fetchOne(ctx, track, cand, i == 0, maxDurationDelta)
 		if err == nil {
-			return ly, nil
+			return FetchResult{Lyrics: ly}, nil
 		}
 		if !errors.Is(err, ErrNotFound) {
-			return nil, err
+			return FetchResult{}, err
 		}
 	}
-	return nil, ErrNotFound
+	return FetchResult{}, ErrNotFound
 }
 
 // FetchForQuery 用外部清洗后的 title/artist 重查 lrclib（AI 增强路径）：
@@ -210,16 +219,14 @@ func clampWait(d time.Duration) time.Duration {
 	return d
 }
 
-// songToLyrics 将 lrclib 歌曲对象转为 Lyrics：同步歌词优先，退回纯文本；
-// 两者皆空返回 nil。
+// songToLyrics 将 lrclib 歌曲对象转为 Lyrics：仅接受带时间轴的同步歌词；
+// 只有纯文本（plainLyrics）时返回 nil（用户要求：无时间轴歌词没有
+// 使用价值，视为无歌词）。
 func songToLyrics(s lrclibSong) *Lyrics {
 	if s.SyncedLyrics != "" {
 		if ly, err := ParseLRC([]byte(s.SyncedLyrics)); err == nil && len(ly.Lines) > 0 {
 			return ly
 		}
-	}
-	if s.PlainLyrics != "" {
-		return &Lyrics{Plain: s.PlainLyrics}
 	}
 	return nil
 }

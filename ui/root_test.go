@@ -1674,7 +1674,7 @@ func TestToastLifecycle(t *testing.T) {
 }
 
 // TestShowToastTickCmd 校验 showToast 返回的 cmd 产生匹配 id 的过期消息
-//（用 execCmds 执行；时长调小避免测试等待）。
+// （用 execCmds 执行；时长调小避免测试等待）。
 func TestShowToastTickCmd(t *testing.T) {
 	toastErrorDuration = time.Millisecond
 	defer func() { toastErrorDuration = 5 * time.Second }()
@@ -1689,5 +1689,56 @@ func TestShowToastTickCmd(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("showToast 的 cmd 应产生匹配当前 toast id 的过期消息, got %#v", msgs)
+	}
+}
+
+// TestStatusBarShowsAITitle AI 识别结果到达后，底部状态栏右侧显示清洗后
+// 标题；切歌后回落新曲原始标题。
+func TestStatusBarShowsAITitle(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	raw := model.Track{ID: "t1", Title: "T1", Artist: "A", Duration: 200, URL: "http://x/1", Source: "youtube"}
+	m, cmd := m.startPlay(raw)
+	_ = execCmds(cmd)
+
+	if got := m.View(); !strings.Contains(got, "T1 - A") {
+		t.Errorf("AI 到达前状态栏应显示原始标题, got %q", got)
+	}
+	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly, title: "晴天", artist: "周杰伦"})
+	if got := m.View(); !strings.Contains(got, "晴天 - 周") {
+		t.Errorf("状态栏应显示 AI 清洗标题, got %q", got)
+	}
+}
+
+// TestAITrackNotifiesMPRIS AI 识别结果到达时，onTrack 回调收到清洗后
+// 曲目（MPRIS 元数据同步）。
+func TestAITrackNotifiesMPRIS(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	var got []*model.Track
+	m := newTestModel(t, fp, fa, func(track *model.Track) {
+		cp := *track
+		got = append(got, &cp)
+	})
+	raw := model.Track{ID: "t1", Title: "T1", Artist: "A", Duration: 200, URL: "http://x/1", Source: "youtube"}
+	m, cmd := m.startPlay(raw)
+	_ = execCmds(cmd)
+	if len(got) != 1 {
+		t.Fatalf("startPlay 应通知 1 次, got %d", len(got))
+	}
+	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly, title: "晴天", artist: "周杰伦"})
+	if len(got) != 2 {
+		t.Fatalf("AI 结果应再通知 1 次, got %d", len(got))
+	}
+	last := got[1]
+	if last.Title != "晴天" || last.Artist != "周杰伦" || last.ID != "t1" {
+		t.Errorf("AI 通知 = %+v, want 晴天/周杰伦/t1", last)
+	}
+	// 确定性结果（无 AI 信息）不触发额外通知
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	if len(got) != 2 {
+		t.Errorf("无 AI 信息不应触发通知, got %d", len(got))
 	}
 }

@@ -38,26 +38,7 @@ func TestLRCCacheRoundtripSynced(t *testing.T) {
 	}
 }
 
-// TestLRCCacheRoundtripPlain 纯文本歌词存取。
-func TestLRCCacheRoundtripPlain(t *testing.T) {
-	dir := t.TempDir()
-	c, err := newLRCCache(dir)
-	if err != nil {
-		t.Fatalf("newLRCCache: %v", err)
-	}
-	c.Put("晴天", "周杰伦", &Lyrics{Plain: "故事的小黄花\n从出生那年就飘着"})
-
-	got, ok := c.Get("晴天", "周杰伦")
-	if !ok {
-		t.Fatal("Get 未命中")
-	}
-	if got.Plain != "故事的小黄花\n从出生那年就飘着" {
-		t.Errorf("Plain = %q", got.Plain)
-	}
-	if len(got.Lines) != 0 {
-		t.Errorf("plain 缓存不应产出 Lines: %+v", got.Lines)
-	}
-}
+// TestLRCCacheSyncOnly 只缓存带时间轴的同步歌词（无 .txt 形态）。
 
 // TestLRCCacheMiss 未知名不命中。
 func TestLRCCacheMiss(t *testing.T) {
@@ -120,26 +101,32 @@ func TestLRCCacheLongTitle(t *testing.T) {
 	}
 }
 
-// TestLRCCacheSyncPlainNoCollision 同一 title-artist 的同步与纯文本
-// 歌词分文件存储，互不覆盖。
-func TestLRCCacheSyncPlainNoCollision(t *testing.T) {
+// TestLRCCacheSyncOnly 缓存只产出 .lrc 文件；无时间轴的 Lyrics 不写盘；
+// Get 不识别 .txt（sync-only 语义，纯文本歌词整体不采用）。
+func TestLRCCacheSyncOnly(t *testing.T) {
 	dir := t.TempDir()
 	c, err := newLRCCache(dir)
 	if err != nil {
 		t.Fatalf("newLRCCache: %v", err)
 	}
 	c.Put("晴天", "周杰伦", &Lyrics{Lines: []LyricLine{{Time: 1, Text: "synced"}}})
-	c.Put("晴天", "周杰伦", &Lyrics{Plain: "plain"})
-	got, ok := c.Get("晴天", "周杰伦")
-	if !ok || len(got.Lines) != 1 || got.Lines[0].Text != "synced" {
-		t.Errorf("synced 被 plain 覆盖: %+v %v", got, ok)
-	}
+	c.Put("无时间轴", "某人", &Lyrics{})
 	entries, err := os.ReadDir(c.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 {
-		t.Errorf("文件数 = %d, want 2", len(entries))
+	if len(entries) != 1 {
+		t.Fatalf("文件数 = %d, want 1（只缓存同步歌词）", len(entries))
+	}
+	if entries[0].Name() != "晴天-周杰伦.lrc" {
+		t.Errorf("文件名 = %q, want 晴天-周杰伦.lrc", entries[0].Name())
+	}
+	// 手工放置 .txt 也不得命中（sync-only）
+	if err := os.WriteFile(filepath.Join(c.dir, "手工.txt"), []byte("text"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Get("手工", ""); ok {
+		t.Error(".txt 不应被当作歌词缓存命中")
 	}
 }
 

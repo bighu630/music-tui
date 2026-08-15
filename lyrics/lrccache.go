@@ -10,8 +10,9 @@ import (
 )
 
 // lrcCache 是拉取到的歌词本地缓存（AI 增强路径专用）：
-// 文件名 = 清洗后的 "title-artist"，同步歌词存 .lrc（纯 LRC 文本），
-// 纯文本兜底存 .txt，命中直接读文件、不发 lrclib 请求。
+// 文件名 = 清洗后的 "title-artist" + ".lrc"（纯 LRC 文本），命中直接
+// 读文件、不发 lrclib 请求。只缓存带时间轴的同步歌词（本项目不采用
+// 纯文本歌词）。
 type lrcCache struct {
 	dir string
 }
@@ -24,40 +25,32 @@ func newLRCCache(dir string) (*lrcCache, error) {
 	return &lrcCache{dir: dir}, nil
 }
 
-// Get 按 title/artist 查询：优先同步歌词（.lrc），退回纯文本（.txt）。
+// Get 按 title/artist 查询缓存歌词；未命中返回 false。
 func (c *lrcCache) Get(title, artist string) (*Lyrics, bool) {
 	base := c.baseName(title, artist)
-	if data, err := os.ReadFile(filepath.Join(c.dir, base+".lrc")); err == nil {
-		if ly, err := ParseLRC(data); err == nil && len(ly.Lines) > 0 {
-			return ly, true
-		}
+	data, err := os.ReadFile(filepath.Join(c.dir, base+".lrc"))
+	if err != nil {
+		return nil, false
 	}
-	if data, err := os.ReadFile(filepath.Join(c.dir, base+".txt")); err == nil {
-		if text := strings.TrimSpace(string(data)); text != "" {
-			return &Lyrics{Plain: text}, true
-		}
+	if ly, err := ParseLRC(data); err == nil && len(ly.Lines) > 0 {
+		return ly, true
 	}
 	return nil, false
 }
 
-// Put 缓存歌词：同步歌词序列化为 LRC 文本（毫秒精度，ParseLRC 可
-// 无损回读），纯文本按原文存储；两者皆空不写文件。
+// Put 缓存歌词（序列化为 LRC 文本，毫秒精度，ParseLRC 可无损回读）；
+// 无同步行不写文件。
 func (c *lrcCache) Put(title, artist string, ly *Lyrics) {
-	if ly == nil {
+	if ly == nil || len(ly.Lines) == 0 {
 		return
 	}
 	base := c.baseName(title, artist)
-	switch {
-	case len(ly.Lines) > 0:
-		var sb strings.Builder
-		for _, ln := range ly.Lines {
-			fmt.Fprintf(&sb, "[%02d:%02d.%03d]%s\n",
-				int(ln.Time)/60, int(ln.Time)%60, millis(ln.Time), ln.Text)
-		}
-		_ = writeFileIfChanged(filepath.Join(c.dir, base+".lrc"), sb.String())
-	case ly.Plain != "":
-		_ = writeFileIfChanged(filepath.Join(c.dir, base+".txt"), ly.Plain)
+	var sb strings.Builder
+	for _, ln := range ly.Lines {
+		fmt.Fprintf(&sb, "[%02d:%02d.%03d]%s\n",
+			int(ln.Time)/60, int(ln.Time)%60, millis(ln.Time), ln.Text)
 	}
+	_ = writeFileIfChanged(filepath.Join(c.dir, base+".lrc"), sb.String())
 }
 
 // millis 取秒的小数部分毫秒（0-999），round 消除浮点噪声。
