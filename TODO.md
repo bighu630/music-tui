@@ -157,3 +157,9 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] config 加 base_url（缺省空 = 官方；model 可填三方模型名）+ Load 回落 + roundtrip 测试
 - [x] OpenAIClient 空 baseURL 回落官方默认（此前会拼出 "/chat/completions" 坏 URL，已修）
 - [x] main 接线 NewOpenAIClientWithBaseURL；docs 19.2 更新
+
+## 追加需求（用户 8-15 第三轮）：AI 判断改为主路径
+
+- [x] 用户确认：所有歌词请求都走 AI 判断（确定性优先 → AI 兜底命中率差）
+- [x] 实现：EnhancedClient.Fetch 改 AI 优先——识别成功（缓存/single-flight）→ 歌词缓存 → 严格重查（≤3s）→ 确定性兜底（30s）→ 服务端错误透传；AI 失败/非歌曲/空标题 → 纯确定性（负缓存生效）；兜底命中入歌词缓存（AI 键）下次秒回
+- [x] 测试：enhanced 测试全量重写（AI 命中确定性不跑、严格未命中兜底、非歌曲/AI 失败兜底、错误透传、双缓存、负缓存、并发、标题携带、plain 拒绝），全量 build/vet/test -race 全绿

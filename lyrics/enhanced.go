@@ -47,39 +47,49 @@ func NewEnhancedClient(l *Client, ai *OpenAIClient, cacheDir string) (*EnhancedC
 	return &EnhancedClient{lrclib: l, ai: ai, aiCache: aiCache, lrcCache: lrcCache}, nil
 }
 
-// Fetch 执行增强匹配流程：
-//  1. 确定性匹配命中 → 直接返回（Source 空，UI 不标 AI；Title/Artist 空）；
-//  2. 未命中且 AI 禁用/调用失败 → 原样返回确定性结果（ErrNotFound）；
-//  3. AI 识别（结果缓存优先）→ is_song=false 或空标题 → ErrNotFound；
-//  4. 歌词缓存命中 → 返回（Source=ai，Title/Artist = AI 识别结果）；
-//  5. 用清洗后 title/artist 重查 lrclib（get 优先，search 严格 ≤3s）
-//     → 命中入歌词缓存并返回；未命中 → ErrNotFound（与确定性结果一致）。
+// Fetch 执行 AI 优先的增强匹配流程（用户确认：所有歌词请求都走 AI 判断）：
+//  1. AI 未配置 → 纯确定性匹配（行为与无增强一致）；
+//  2. AI 识别（结果缓存优先 + single-flight）失败/非歌曲/空标题 →
+//     确定性匹配兜底（Title/Artist 空，与纯确定性一致）；
+//  3. AI 识别成功 → 歌词缓存命中直接返回；否则严格重查 lrclib
+//     （get 优先，search ≤3s）→ 命中入缓存并返回；
+//  4. 严格重查未命中（ErrNotFound）→ 确定性多候选兜底（30s 阈值）
+//     → 命中入缓存（AI title-artist 键）并返回；
+//  5. lrclib 服务端错误（非 ErrNotFound）原样透传，不做兜底。
 //
-// AI 路径成功时 FetchResult.Title/Artist 携带清洗后歌名/歌手：展示层
-// 用它覆盖原始 YouTube 标题（确定性路径保持空）。
+// AI 识别成功时 FetchResult.Title/Artist 携带清洗后歌名/歌手（展示层
+// 覆盖原始标题），Source 标 ai；纯确定性兜底（2 步）不携带。
 func (e *EnhancedClient) Fetch(ctx context.Context, track model.Track) (FetchResult, error) {
-	ly, err := e.lrclib.Fetch(ctx, track)
-	if err == nil || !errors.Is(err, ErrNotFound) {
-		return ly, err
-	}
 	if e.ai == nil {
-		return FetchResult{}, err
+		return e.lrclib.Fetch(ctx, track)
 	}
 	res, ok := e.identify(ctx, track)
 	if !ok || !res.IsSong || strings.TrimSpace(res.Title) == "" {
-		return FetchResult{}, ErrNotFound
+		// AI 失败/非歌曲/空标题：确定性匹配兜底（与无 AI 行为一致）
+		return e.lrclib.Fetch(ctx, track)
 	}
 	if cached, ok := e.lrcCache.Get(res.Title, res.Artist); ok {
 		cached.Source = LyricsSourceAI
 		return FetchResult{Lyrics: cached, Title: res.Title, Artist: res.Artist}, nil
 	}
-	cached, err := e.lrclib.FetchForQuery(ctx, res.Title, res.Artist, track.Duration)
-	if err != nil {
-		return FetchResult{}, ErrNotFound
+	ly, err := e.lrclib.FetchForQuery(ctx, res.Title, res.Artist, track.Duration)
+	if err == nil {
+		e.lrcCache.Put(res.Title, res.Artist, ly)
+		ly.Source = LyricsSourceAI
+		return FetchResult{Lyrics: ly, Title: res.Title, Artist: res.Artist}, nil
 	}
-	e.lrcCache.Put(res.Title, res.Artist, cached)
-	cached.Source = LyricsSourceAI
-	return FetchResult{Lyrics: cached, Title: res.Title, Artist: res.Artist}, nil
+	if !errors.Is(err, ErrNotFound) {
+		return FetchResult{}, err // 服务端故障透传，兜底只会再撞一次
+	}
+	// 严格重查未命中 → 确定性多候选兜底（30s 阈值，命中率互补）
+	det, err := e.lrclib.Fetch(ctx, track)
+	if err != nil {
+		return FetchResult{}, err
+	}
+	ly = det.Lyrics
+	e.lrcCache.Put(res.Title, res.Artist, ly)
+	ly.Source = LyricsSourceAI
+	return FetchResult{Lyrics: ly, Title: res.Title, Artist: res.Artist}, nil
 }
 
 // identify 识别标题（AI 结果缓存优先，single-flight 合并并发重复识别）；

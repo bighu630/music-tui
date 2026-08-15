@@ -20,11 +20,11 @@ var (
 	_ Fetcher = (*EnhancedClient)(nil)
 )
 
-// aiArtist 是本测试约定的 AI 清洗结果歌手（简化字）——mock 用它
-// 区分「确定性查询」（channel 名，繁体）与「AI 重查」。
+// aiArtist 是本测试约定的 AI 清洗结果歌手（简化字）——mock 用它区分
+// 「AI 严格重查」（artist=aiArtist）与「确定性兜底」（频道名/繁体）。
 const aiArtist = "周杰伦"
 
-// aiHitSong 是 AI 重查命中返回的歌词。
+// aiHitSong 是 AI 严格重查命中返回的歌词。
 var aiHitSong = lrclibSong{
 	TrackName: "晴天", ArtistName: aiArtist, Duration: 269.0,
 	SyncedLyrics: "[00:01.00]故事的小黄花",
@@ -69,13 +69,23 @@ func lrclibNotFound(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode([]lrclibSong{})
 }
 
-// lrclibAIMatch 查询感知 mock：/api/get 仅对 AI 清洗后的查询
+// isAIQuery 判断请求是否为 AI 严格重查（artist_name=aiArtist）。
+func isAIQuery(r *http.Request) bool {
+	return r.URL.Query().Get("artist_name") == aiArtist
+}
+
+// isDetQuery 判断请求是否为确定性兜底查询（非 AI 重查）。
+func isDetQuery(r *http.Request) bool {
+	return r.URL.Query().Get("artist_name") != aiArtist
+}
+
+// lrclibAIMatch 查询感知 mock：/api/get 仅对 AI 严格重查
 // （artist_name=aiArtist）返回歌词并计数（aiGetCount 可为 nil），
-// 其余 get 404、search 空——确定性路径永远未命中，AI 重查按需命中。
+// 其余 get 404、search 空——确定性兜底恒未命中，AI 重查按需命中。
 func lrclibAIMatch(aiGetCount *int32) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/get" {
-			if r.URL.Query().Get("artist_name") == aiArtist {
+			if isAIQuery(r) {
 				if aiGetCount != nil {
 					atomic.AddInt32(aiGetCount, 1)
 				}
@@ -99,48 +109,41 @@ func aiRespond(w http.ResponseWriter, r *http.Request, content string) {
 	})
 }
 
-func TestEnhancedDeterministicHitSkipsAI(t *testing.T) {
-	var aiCalls, lrclibCalls int32
-	lrclib := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&lrclibCalls, 1)
-		_ = json.NewEncoder(w).Encode(lrclibSong{
-			TrackName: "晴天", ArtistName: "周杰伦", Duration: 269.0,
-			SyncedLyrics: "[00:01.00]故事的小黄花",
-		})
-	}))
-	defer lrclib.Close()
-	aiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&aiCalls, 1)
-		t.Error("确定性命中不应调用 AI")
-	}))
-	defer aiServer.Close()
+// aiOK 返回识别「晴天/周杰伦」的 AI mock。
+func aiOK(w http.ResponseWriter, r *http.Request) {
+	aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
+}
 
-	c, err := NewEnhancedClient(
-		NewClientWithBaseURL(lrclib.URL, testUA),
-		NewOpenAIClientWithBaseURL("sk-test", "", aiServer.URL),
-		t.TempDir(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
-	ly := res.Lyrics
+// ── AI 优先流程 ──────────────────────────────────────────────────
+
+// TestEnhancedAIHitsWithoutDeterministic AI 识别成功 + 严格重查命中：
+// 确定性路径完全不跑（lrclib 只收到 1 次 AI 重查请求）。
+func TestEnhancedAIHitsWithoutDeterministic(t *testing.T) {
+	c, aiCalls, lrclibCalls := newEnhancedTestEnv(t, lrclibAIMatch(nil), aiOK)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "【周杰倫】晴天 MV", Artist: "周杰倫官方頻道", Duration: 269.0})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if len(ly.Lines) != 1 {
-		t.Errorf("got %+v", ly.Lines)
+	if res.Lyrics == nil || len(res.Lyrics.Lines) != 1 || res.Lyrics.Lines[0].Text != "故事的小黄花" {
+		t.Errorf("Lyrics = %+v", res.Lyrics)
 	}
-	if ly.Source != "" {
-		t.Errorf("确定性路径 Source = %q, want 空", ly.Source)
+	if res.Lyrics.Source != LyricsSourceAI {
+		t.Errorf("Source = %q, want %q", res.Lyrics.Source, LyricsSourceAI)
 	}
-	if aiCalls != 0 || lrclibCalls != 1 {
-		t.Errorf("AI=%d lrclib=%d, want AI=0 lrclib=1", aiCalls, lrclibCalls)
+	if res.Title != "晴天" || res.Artist != aiArtist {
+		t.Errorf("Title/Artist = %q/%q", res.Title, res.Artist)
+	}
+	if *aiCalls != 1 {
+		t.Errorf("AI 调用 %d 次, want 1", *aiCalls)
+	}
+	if *lrclibCalls != 1 {
+		t.Errorf("lrclib 请求 %d 次, want 1（AI 优先：确定性路径不跑）", *lrclibCalls)
 	}
 }
 
+// TestEnhancedNoAIStillDegrades AI 未配置（nil）：行为与纯确定性客户端
+// 一致——未命中返回 ErrNotFound。
 func TestEnhancedNoAIStillDegrades(t *testing.T) {
-	// AI 未配置（nil）：行为与纯确定性客户端一致——未命中返回 ErrNotFound
 	c, aiCalls, _ := newEnhancedTestEnv(t, lrclibNotFound, nil)
 	_, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
 	if !errors.Is(err, ErrNotFound) {
@@ -151,47 +154,116 @@ func TestEnhancedNoAIStillDegrades(t *testing.T) {
 	}
 }
 
-func TestEnhancedAIPathHits(t *testing.T) {
-	var aiGetCount int32
-	c, aiCalls, _ := newEnhancedTestEnv(t, lrclibAIMatch(&aiGetCount), func(w http.ResponseWriter, r *http.Request) {
-		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
-	})
-	res, err := c.Fetch(context.Background(), model.Track{Title: "【周杰倫】晴天 MV", Artist: "周杰倫官方頻道", Duration: 269.0})
-	ly := res.Lyrics
+// TestEnhancedStrictMissFallsBackToDeterministic AI 严格重查未命中
+// （>3s 候选）→ 确定性兜底（30s 多候选）命中：返回兜底歌词，
+// 展示信息仍用 AI 清洗标题。
+func TestEnhancedStrictMissFallsBackToDeterministic(t *testing.T) {
+	var aiGets, detGets int32
+	c, _, _ := newEnhancedTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			if isAIQuery(r) {
+				atomic.AddInt32(&aiGets, 1)
+				w.WriteHeader(http.StatusNotFound) // AI 严格重查 get 未命中
+				return
+			}
+			atomic.AddInt32(&detGets, 1)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if isAIQuery(r) {
+			// AI 严格重查 search：全部差距 >3s → 未命中
+			_ = json.NewEncoder(w).Encode([]lrclibSong{
+				{TrackName: "晴天", ArtistName: aiArtist, Duration: 275.0, SyncedLyrics: "[00:01.00]现场版"},
+			})
+			return
+		}
+		// 确定性兜底 search：差距 10s ≤30s → 命中
+		_ = json.NewEncoder(w).Encode([]lrclibSong{
+			{TrackName: "晴天", ArtistName: "周杰倫", Duration: 279.0, SyncedLyrics: "[00:01.00]确定性兜底"},
+		})
+	}, aiOK)
+
+	res, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if len(ly.Lines) != 1 || ly.Lines[0].Text != "故事的小黄花" {
-		t.Errorf("got %+v", ly.Lines)
+	if len(res.Lyrics.Lines) != 1 || res.Lyrics.Lines[0].Text != "确定性兜底" {
+		t.Errorf("应返回确定性兜底歌词, got %+v", res.Lyrics.Lines)
 	}
-	if ly.Source != LyricsSourceAI {
-		t.Errorf("Source = %q, want %q", ly.Source, LyricsSourceAI)
+	if res.Title != "晴天" || res.Artist != aiArtist {
+		t.Errorf("兜底路径也应携带 AI 展示信息: %q/%q", res.Title, res.Artist)
 	}
-	if *aiCalls != 1 {
-		t.Errorf("AI 调用 %d 次, want 1", *aiCalls)
+	if res.Lyrics.Source != LyricsSourceAI {
+		t.Errorf("兜底结果 Source = %q, want ai（AI 参与识别）", res.Lyrics.Source)
 	}
-	if aiGetCount != 1 {
-		t.Errorf("AI 重查 /api/get %d 次, want 1", aiGetCount)
+	if aiGets != 1 || detGets != 1 {
+		t.Errorf("aiGets=%d detGets=%d, want 各 1（先严格后兜底）", aiGets, detGets)
 	}
 }
 
-func TestEnhancedAINotSongNegativeCached(t *testing.T) {
-	c, aiCalls, _ := newEnhancedTestEnv(t, lrclibNotFound, func(w http.ResponseWriter, r *http.Request) {
+// TestEnhancedStrictAndDetBothMiss 严格重查与确定性兜底都未命中 →
+// ErrNotFound（不返回差距大的歌词）。
+func TestEnhancedStrictAndDetBothMiss(t *testing.T) {
+	c, _, _ := newEnhancedTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]lrclibSong{})
+	}, aiOK)
+	_, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestEnhancedNotSongFallsBackToDeterministic AI 判定非歌曲 → 确定性
+// 兜底；负缓存生效（不重复调 AI）。
+func TestEnhancedNotSongFallsBackToDeterministic(t *testing.T) {
+	detHit := false
+	c, aiCalls, _ := newEnhancedTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/get" {
+			if isDetQuery(r) {
+				detHit = true
+				_ = json.NewEncoder(w).Encode(lrclibSong{
+					TrackName: "城市漫步", ArtistName: "C", Duration: 600.0,
+					SyncedLyrics: "[00:01.00]Vlog 配乐",
+				})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]lrclibSong{})
+	}, func(w http.ResponseWriter, r *http.Request) {
 		aiRespond(w, r, `{"is_song": false}`)
 	})
-	track := model.Track{Title: "城市漫步 Vlog", Artist: "SomeChannel", Duration: 600.0}
-	for i := 0; i < 2; i++ {
-		if _, err := c.Fetch(context.Background(), track); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("第 %d 次 Fetch err = %v, want ErrNotFound", i+1, err)
-		}
+	track := model.Track{Title: "城市漫步 Vlog", Artist: "C", Duration: 600.0}
+	res, err := c.Fetch(context.Background(), track)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if !detHit {
+		t.Error("非歌曲应走确定性兜底")
+	}
+	if len(res.Lyrics.Lines) != 1 {
+		t.Errorf("兜底歌词 = %+v", res.Lyrics.Lines)
+	}
+	if res.Title != "" || res.Lyrics.Source != "" {
+		t.Errorf("纯确定性兜底不应携带 AI 信息: %q/%q", res.Title, res.Lyrics.Source)
+	}
+	// 负缓存：二次播放不调 AI
+	if _, err := c.Fetch(context.Background(), track); err != nil {
+		t.Fatalf("二次 Fetch: %v", err)
 	}
 	if *aiCalls != 1 {
 		t.Errorf("AI 调用 %d 次, want 1（负缓存应生效）", *aiCalls)
 	}
 }
 
-func TestEnhancedAIFailureNotCached(t *testing.T) {
-	// AI 调用失败：降级 ErrNotFound；失败不缓存（下次仍尝试 AI）
+// TestEnhancedAIFailureFallsBackToDeterministic AI 调用失败（降级）→
+// 确定性兜底；失败不缓存（下次仍尝试 AI）。
+func TestEnhancedAIFailureFallsBackToDeterministic(t *testing.T) {
 	fail := true
 	var aiCalls *int32
 	var c *EnhancedClient
@@ -200,11 +272,11 @@ func TestEnhancedAIFailureNotCached(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
+		aiOK(w, r)
 	})
 	track := model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0}
 	if _, err := c.Fetch(context.Background(), track); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("AI 失败时 err = %v, want ErrNotFound（降级确定性结果）", err)
+		t.Fatalf("AI 失败 + 确定性未命中: err = %v, want ErrNotFound", err)
 	}
 	if *aiCalls != 2 {
 		t.Errorf("AI 调用 %d 次, want 2（瞬时错误重试一次）", *aiCalls)
@@ -218,39 +290,29 @@ func TestEnhancedAIFailureNotCached(t *testing.T) {
 	}
 }
 
-func TestEnhancedAIDurationRuleRejects(t *testing.T) {
-	// AI 清洗后重查的候选全部差距 >3s：视为无歌词。
-	// mock：确定性查询（artist=周杰倫）恒空；AI 重查（artist=周杰伦）
-	// 的 search 返回差距 6s/9s 的候选——确定性路径 30s 阈值不可见它们。
-	c, _, _ := newEnhancedTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/get" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if r.URL.Query().Get("artist_name") == aiArtist {
-			_ = json.NewEncoder(w).Encode([]lrclibSong{
-				{TrackName: "晴天", ArtistName: aiArtist, Duration: 275.0, SyncedLyrics: "[00:01.00]现场版"},
-				{TrackName: "晴天", ArtistName: aiArtist, Duration: 260.0, SyncedLyrics: "[00:01.00]错歌"},
-			})
-			return
-		}
-		_ = json.NewEncoder(w).Encode([]lrclibSong{})
-	}, func(w http.ResponseWriter, r *http.Request) {
-		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
-	})
+// TestEnhancedStrictErrorPassthrough AI 严格重查遇到服务端错误：原样
+// 透传（不再兜底——服务端故障兜底只会再撞一次）。
+func TestEnhancedStrictErrorPassthrough(t *testing.T) {
+	c, aiCalls, lrclibCalls := newEnhancedTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}, aiOK)
 	_, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound（全部候选 >3s 弃用）", err)
+	if err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want 非 NotFound 原样透传", err)
+	}
+	if *aiCalls != 1 {
+		t.Errorf("AI 调用 %d 次, want 1", *aiCalls)
+	}
+	if *lrclibCalls != 1 {
+		t.Errorf("lrclib 请求 %d 次, want 1（严格查询错误不兜底）", *lrclibCalls)
 	}
 }
 
+// TestEnhancedAICachesAvoidRepeatRequests 第二次播放（同标题不同 track
+// ID）：AI 结果缓存 + 歌词缓存命中，既不调用 AI 也不请求 lrclib。
 func TestEnhancedAICachesAvoidRepeatRequests(t *testing.T) {
-	// 第二次播放（同标题不同 track ID）：AI 结果缓存 + 歌词缓存命中，
-	// 既不调用 AI 也不再 AI 重查 lrclib（确定性路径照常先跑）。
 	var aiGetCount int32
-	c, aiCalls, _ := newEnhancedTestEnv(t, lrclibAIMatch(&aiGetCount), func(w http.ResponseWriter, r *http.Request) {
-		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
-	})
+	c, aiCalls, _ := newEnhancedTestEnv(t, lrclibAIMatch(&aiGetCount), aiOK)
 	track1 := model.Track{Title: "【周杰倫】晴天 MV", Artist: "周杰倫官方頻道", Duration: 269.0, ID: "aaa"}
 	track2 := model.Track{Title: "【周杰倫】晴天 MV", Artist: "周杰倫官方頻道", Duration: 269.0, ID: "bbb"}
 
@@ -268,21 +330,20 @@ func TestEnhancedAICachesAvoidRepeatRequests(t *testing.T) {
 	}
 }
 
+// TestEnhancedAICacheHitStillQueriesLrclib AI 结果缓存命中（无歌词
+// 缓存）：跳过 AI，但严格重查 + 确定性兜底仍发生。
 func TestEnhancedAICacheHitStillQueriesLrclib(t *testing.T) {
-	// AI 结果缓存命中（无歌词缓存）：跳过 AI，但 lrclib 重查仍发生
 	aiSearches := int32(0)
 	c, aiCalls, _ := newEnhancedTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/get" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		if r.URL.Query().Get("artist_name") == aiArtist {
+		if isAIQuery(r) {
 			atomic.AddInt32(&aiSearches, 1)
 		}
 		_ = json.NewEncoder(w).Encode([]lrclibSong{})
-	}, func(w http.ResponseWriter, r *http.Request) {
-		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
-	})
+	}, aiOK)
 	track := model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0}
 	for i := 0; i < 2; i++ {
 		if _, err := c.Fetch(context.Background(), track); !errors.Is(err, ErrNotFound) {
@@ -293,35 +354,42 @@ func TestEnhancedAICacheHitStillQueriesLrclib(t *testing.T) {
 		t.Errorf("AI 调用 %d 次, want 1（AI 结果缓存命中，不再调 AI）", *aiCalls)
 	}
 	if aiSearches != 2 {
-		t.Errorf("AI 重查 search %d 次, want 2（无歌词缓存时每次仍重查 lrclib）", aiSearches)
+		t.Errorf("AI 严格重查 search %d 次, want 2（无歌词缓存时每次仍重查）", aiSearches)
 	}
 }
 
-func TestEnhancedAINullTitleRejected(t *testing.T) {
-	// AI 说 is_song=true 但没给 title：视为识别失败，不拿空标题去查询
-	c, _, _ := newEnhancedTestEnv(t, lrclibNotFound, func(w http.ResponseWriter, r *http.Request) {
+// TestEnhancedNullTitleFallsBackToDeterministic AI 识别成功但空标题：
+// 不拿空标题查询，走确定性兜底（结果被负缓存，不重复调 AI）。
+func TestEnhancedNullTitleFallsBackToDeterministic(t *testing.T) {
+	c, aiCalls, _ := newEnhancedTestEnv(t, lrclibNotFound, func(w http.ResponseWriter, r *http.Request) {
 		aiRespond(w, r, `{"is_song": true, "title": ""}`)
 	})
-	_, err := c.Fetch(context.Background(), model.Track{Title: "???", Artist: "?", Duration: 100.0})
-	if !errors.Is(err, ErrNotFound) {
+	track := model.Track{Title: "???", Artist: "?", Duration: 100.0}
+	if _, err := c.Fetch(context.Background(), track); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if _, err := c.Fetch(context.Background(), track); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("二次 err = %v, want ErrNotFound", err)
+	}
+	if *aiCalls != 1 {
+		t.Errorf("AI 调用 %d 次, want 1（空标题结果负缓存，不再调 AI）", *aiCalls)
 	}
 }
 
+// TestEnhancedLRCCachePersistsAcrossRestart 歌词缓存落盘：重建客户端后
+// （模拟重启）AI 结果与歌词都从磁盘命中，不再调用 AI、不再请求 lrclib。
 func TestEnhancedLRCCachePersistsAcrossRestart(t *testing.T) {
-	// 歌词缓存落盘：重建客户端后（模拟重启）AI 结果与歌词都从磁盘命中，
-	// 不再调用 AI、也不再 AI 重查 lrclib。
 	dir := t.TempDir()
 	var aiGetCount int32
-	aiCalls := int32(0)
 	lrclib := httptest.NewServer(http.HandlerFunc(lrclibAIMatch(&aiGetCount)))
 	defer lrclib.Close()
+	aiCalls := int32(0)
 	aiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		aiCalls++
 		if aiCalls > 1 {
 			t.Error("重启后不应再调用 AI")
 		}
-		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
+		aiOK(w, r)
 	}))
 	defer aiServer.Close()
 
@@ -347,12 +415,11 @@ func TestEnhancedLRCCachePersistsAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := c2.Fetch(context.Background(), track)
-	ly := res.Lyrics
 	if err != nil {
 		t.Fatalf("重启后 Fetch: %v", err)
 	}
-	if len(ly.Lines) != 1 || ly.Lines[0].Text != "故事的小黄花" {
-		t.Errorf("重启后歌词 = %+v", ly.Lines)
+	if len(res.Lyrics.Lines) != 1 || res.Lyrics.Lines[0].Text != "故事的小黄花" {
+		t.Errorf("重启后歌词 = %+v", res.Lyrics.Lines)
 	}
 	if aiGetCount != 1 {
 		t.Errorf("AI 重查 %d 次, want 1（重启后歌词缓存命中，不再请求）", aiGetCount)
@@ -366,7 +433,7 @@ func TestEnhancedConcurrentSameTrackSingleFlight(t *testing.T) {
 	aiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&aiCalls, 1)
 		time.Sleep(200 * time.Millisecond) // 拉长识别窗口，让并发请求重叠
-		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
+		aiOK(w, r)
 	}))
 	defer aiServer.Close()
 	lrclib := httptest.NewServer(http.HandlerFunc(lrclibAIMatch(nil)))
@@ -405,44 +472,10 @@ func TestEnhancedConcurrentSameTrackSingleFlight(t *testing.T) {
 	}
 }
 
-// TestEnhancedPassesThroughNonNotFound 确定性路径的非 NotFound 错误
-// （如 lrclib 5xx）必须原样透传，不得吞成 ErrNotFound 或触发 AI。
-func TestEnhancedPassesThroughNonNotFound(t *testing.T) {
-	var aiCalls int32
-	aiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&aiCalls, 1)
-		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
-	}))
-	defer aiServer.Close()
-	lrclib := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer lrclib.Close()
-
-	c, err := NewEnhancedClient(
-		NewClientWithBaseURL(lrclib.URL, testUA),
-		NewOpenAIClientWithBaseURL("sk-test", "", aiServer.URL),
-		t.TempDir(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
-	if err == nil || errors.Is(err, ErrNotFound) {
-		t.Fatalf("err = %v, want 非 NotFound 原样透传", err)
-	}
-	if aiCalls != 0 {
-		t.Errorf("AI 调用 %d 次, want 0（服务端错误不应进入 AI 路径）", aiCalls)
-	}
-}
-
 // TestEnhancedAIResultCarriesCleanTitle AI 命中：FetchResult 携带清洗后
 // 歌名/歌手（live 路径），展示层可覆盖原始 YouTube 标题。
 func TestEnhancedAIResultCarriesCleanTitle(t *testing.T) {
-	var aiGetCount int32
-	c, _, _ := newEnhancedTestEnv(t, lrclibAIMatch(&aiGetCount), func(w http.ResponseWriter, r *http.Request) {
-		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
-	})
+	c, _, _ := newEnhancedTestEnv(t, lrclibAIMatch(nil), aiOK)
 	res, err := c.Fetch(context.Background(), model.Track{Title: "【周杰倫】晴天 MV", Artist: "周杰倫官方頻道", Duration: 269.0})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
@@ -456,12 +489,9 @@ func TestEnhancedAIResultCarriesCleanTitle(t *testing.T) {
 }
 
 // TestEnhancedAIResultCarriesCleanTitleFromCache 双缓存命中路径同样
-// 携带 AI 标题（AI 结果缓存 + 歌词缓存均需返回展示信息）。
+// 携带 AI 标题。
 func TestEnhancedAIResultCarriesCleanTitleFromCache(t *testing.T) {
-	var aiGetCount int32
-	c, _, _ := newEnhancedTestEnv(t, lrclibAIMatch(&aiGetCount), func(w http.ResponseWriter, r *http.Request) {
-		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
-	})
+	c, _, _ := newEnhancedTestEnv(t, lrclibAIMatch(nil), aiOK)
 	track := model.Track{Title: "【周杰倫】晴天 MV", Artist: "周杰倫官方頻道", Duration: 269.0}
 	first, err := c.Fetch(context.Background(), track)
 	if err != nil {
@@ -478,44 +508,36 @@ func TestEnhancedAIResultCarriesCleanTitleFromCache(t *testing.T) {
 	}
 }
 
-// TestEnhancedPlainOnlyRejected AI 重查只返回纯文本歌词：视为无歌词
-// （sync-only 规则同样约束 AI 路径）。
+// TestEnhancedPlainOnlyRejected 纯文本（无时间轴）歌词：严格重查与
+// 确定性兜底都拒绝（sync-only 规则约束全链路）。
 func TestEnhancedPlainOnlyRejected(t *testing.T) {
 	c, _, _ := newEnhancedTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/get" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		if r.URL.Query().Get("artist_name") == aiArtist {
-			_ = json.NewEncoder(w).Encode([]lrclibSong{
-				{TrackName: "晴天", ArtistName: aiArtist, Duration: 269.0,
-					PlainLyrics: "故事的小黄花"},
-			})
-			return
-		}
-		_ = json.NewEncoder(w).Encode([]lrclibSong{})
-	}, func(w http.ResponseWriter, r *http.Request) {
-		aiRespond(w, r, `{"is_song": true, "title": "晴天", "artist": "`+aiArtist+`"}`)
-	})
+		_ = json.NewEncoder(w).Encode([]lrclibSong{
+			{TrackName: "晴天", ArtistName: "周杰伦", Duration: 269.0,
+				PlainLyrics: "故事的小黄花"},
+		})
+	}, aiOK)
 	_, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
 	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound（AI 路径同样拒绝纯文本歌词）", err)
+		t.Fatalf("err = %v, want ErrNotFound（纯文本歌词必须拒绝）", err)
 	}
 }
 
-// TestEnhancedFailurePathsCarryNoTitle 负缓存/AI 失败路径不携带 AI 标题
-// （契约：只有成功识别才填充 FetchResult.Title/Artist）。
+// TestEnhancedFailurePathsCarryNoTitle AI 失败/非歌曲路径的兜底结果
+// 不携带 AI 标题（契约：只有 AI 识别成功才填充）。
 func TestEnhancedFailurePathsCarryNoTitle(t *testing.T) {
-	// is_song=false（负缓存）
 	c, _, _ := newEnhancedTestEnv(t, lrclibNotFound, func(w http.ResponseWriter, r *http.Request) {
 		aiRespond(w, r, `{"is_song": false}`)
 	})
 	res, err := c.Fetch(context.Background(), model.Track{Title: "城市漫步 Vlog", Artist: "C", Duration: 600})
 	if !errors.Is(err, ErrNotFound) || res.Title != "" || res.Artist != "" {
-		t.Errorf("负缓存路径 = %+v, %v, want ErrNotFound 且 Title/Artist 空", res, err)
+		t.Errorf("非歌曲路径 = %+v, %v, want ErrNotFound 且 Title/Artist 空", res, err)
 	}
 
-	// AI 调用失败（降级）
 	c2, _, _ := newEnhancedTestEnv(t, lrclibNotFound, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
