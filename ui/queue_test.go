@@ -562,8 +562,8 @@ func TestAutoAdvancePlayFailure(t *testing.T) {
 	if fp.playCount() != 1 {
 		t.Errorf("失败播放不应计入 playCount, got %d", fp.playCount())
 	}
-	if !strings.Contains(m.lastError, "播放失败") {
-		t.Errorf("lastError = %q, want 含播放失败", m.lastError)
+	if !strings.Contains(activeToastText(m), "播放失败") {
+		t.Errorf("toast = %q, want 含播放失败", activeToastText(m))
 	}
 	if m.state.Track != nil || m.state.Playing {
 		t.Errorf("失败后状态应重置: %+v", m.state)

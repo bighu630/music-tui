@@ -891,8 +891,8 @@ func TestHomeResizeRelayout(t *testing.T) {
 		m, _ = update(m, tea.WindowSizeMsg{Width: sz[0], Height: sz[1]})
 		out := m.home.view()
 		lines := strings.Split(out, "\n")
-		if len(lines) != sz[1]-2 {
-			t.Errorf("%dx%d: 行数 = %d, want %d", sz[0], sz[1], len(lines), sz[1]-2)
+		if len(lines) != sz[1]-3 {
+			t.Errorf("%dx%d: 行数 = %d, want %d", sz[0], sz[1], len(lines), sz[1]-3)
 		}
 		if w := ansi.StringWidth(lines[len(lines)-2]); w != sz[0] {
 			t.Errorf("%dx%d: 进度条行宽 = %d, want %d", sz[0], sz[1], w, sz[0])

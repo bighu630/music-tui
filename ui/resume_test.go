@@ -236,8 +236,8 @@ func TestResumeFailureResets(t *testing.T) {
 	fp.playErr = true
 	msgs := execCmds(resumeCmd(m))
 	m, _ = update(m, msgs[0])
-	if !strings.Contains(m.lastError, "恢复播放失败") {
-		t.Errorf("lastError = %q, want 含恢复播放失败", m.lastError)
+	if !strings.Contains(activeToastText(m), "恢复播放失败") {
+		t.Errorf("toast = %q, want 含恢复播放失败", activeToastText(m))
 	}
 	if m.state.Track != nil || m.state.Playing {
 		t.Errorf("失败后状态应重置: %+v", m.state)

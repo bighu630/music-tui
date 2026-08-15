@@ -164,8 +164,8 @@ func TestLoadFailedFromCacheEvictsThenRetriesNetwork(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("应调度自动重试 cmd")
 	}
-	if !strings.Contains(m.lastError, "缓存文件损坏") {
-		t.Errorf("重试横幅应含缓存文件损坏提示: %q", m.lastError)
+	if !strings.Contains(activeToastText(m), "缓存文件损坏") {
+		t.Errorf("重试横幅应含缓存文件损坏提示: %q", activeToastText(m))
 	}
 	if m.state.Playing {
 		t.Error("重试等待期间 Playing 应为 false")
@@ -233,8 +233,8 @@ func TestResumeCachePreservedOnPlayPausedIpcError(t *testing.T) {
 	if _, ok := cm.Lookup(curID); !ok {
 		t.Error("IPC 层恢复失败与缓存文件无关：条目应保留")
 	}
-	if !strings.Contains(m.lastError, "恢复播放失败") {
-		t.Errorf("lastError = %q, want 含恢复播放失败", m.lastError)
+	if !strings.Contains(activeToastText(m), "恢复播放失败") {
+		t.Errorf("toast = %q, want 含恢复播放失败", activeToastText(m))
 	}
 }
 
@@ -341,8 +341,8 @@ func TestResumeCacheRemovedOnAsyncLoadFailed(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("恢复加载失败后事件监听链应存活（cmd 应为 waitForPlayerEvents，非 nil）")
 	}
-	if !strings.Contains(m.lastError, "恢复播放失败") || !strings.Contains(m.lastError, "缓存文件损坏") {
-		t.Errorf("lastError = %q, want 含“恢复播放失败”与“缓存文件损坏”", m.lastError)
+	if !strings.Contains(activeToastText(m), "恢复播放失败") || !strings.Contains(activeToastText(m), "缓存文件损坏") {
+		t.Errorf("toast = %q, want 含“恢复播放失败”与“缓存文件损坏”", activeToastText(m))
 	}
 	if m.resuming {
 		t.Error("失败处理后 resuming 应复位")

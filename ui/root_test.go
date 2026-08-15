@@ -400,6 +400,15 @@ func update(m Model, msg tea.Msg) (Model, tea.Cmd) {
 	return tm.(Model), cmd
 }
 
+// activeToastText 返回当前活跃 toast 的文本（无 toast 时返回空串）。测试断言用。
+// （注意与 Model 方法 toastText(t toast) 区分：后者渲染样式文本。）
+func activeToastText(m Model) string {
+	if m.toast == nil {
+		return ""
+	}
+	return m.toast.text
+}
+
 // runProgram 运行一个真实 tea.Program：先启动 Run 再顺序 Send 消息
 // （Send 会阻塞直到事件循环消费，天然同步），最后 Send(tea.Quit)，
 // 返回最终 Model。bubbletea 对输入 EOF 不会自动退出，可安全使用。
@@ -738,15 +747,21 @@ func TestStaleAsyncResultsIgnored(t *testing.T) {
 }
 
 func TestPlayFailureShowsError(t *testing.T) {
+	toastErrorDuration = time.Millisecond // 快进 toast 定时器（失败提示 cmd 是 tea.Tick）
+	defer func() { toastErrorDuration = 5 * time.Second }()
 	fp := newFakePlayer()
 	fp.playErr = true
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
-	if cmd != nil {
-		t.Error("播放失败后不应再发异步 cmd（歌词/封面/历史）")
+	// 失败路径仅返回 toast 消失定时器 cmd：执行后不得产生歌词/封面/历史结果
+	for _, msg := range execCmds(cmd) {
+		switch msg.(type) {
+		case lyricsResultMsg, coverResultMsg, historyResultMsg:
+			t.Errorf("播放失败后不应再发歌词/封面/历史异步 cmd: %#v", msg)
+		}
 	}
-	if !strings.Contains(m.lastError, "播放失败") {
-		t.Errorf("lastError = %q, want 含“播放失败”", m.lastError)
+	if !strings.Contains(activeToastText(m), "播放失败") {
+		t.Errorf("toast = %q, want 含“播放失败”", activeToastText(m))
 	}
 	if m.state.Playing {
 		t.Error("播放失败后 Playing 应为 false")
@@ -803,8 +818,8 @@ func TestErrorEventSetsEndedAndSpaceReplays(t *testing.T) {
 	}
 
 	m, _ = update(m, playerEventMsg{ev: player.ErrorEvent{Err: errors.New("mpv 崩溃")}})
-	if !strings.Contains(m.lastError, "mpv 崩溃") {
-		t.Errorf("lastError = %q, want 含 mpv 崩溃", m.lastError)
+	if !strings.Contains(activeToastText(m), "mpv 崩溃") {
+		t.Errorf("toast = %q, want 含 mpv 崩溃", activeToastText(m))
 	}
 	if m.state.Playing {
 		t.Error("ErrorEvent 后 Playing 应为 false")
@@ -1013,7 +1028,7 @@ func TestBeginPlaySetsLoopPerMode(t *testing.T) {
 	}
 }
 
-// SetLoop 失败仅记 lastError，不阻断播放（异步 cmd 照常、状态照常）。
+// SetLoop 失败仅记 toast，不阻断播放（异步 cmd 照常、状态照常）。
 func TestSetLoopFailureDoesNotBlockPlayback(t *testing.T) {
 	fp := newFakePlayer()
 	fp.loopErr = true
@@ -1026,8 +1041,8 @@ func TestSetLoopFailureDoesNotBlockPlayback(t *testing.T) {
 	if fp.playCount() != 1 || fp.lastPlayed() != testTrack("t1").URL {
 		t.Fatalf("SetLoop 失败不应影响播放: playCount=%d", fp.playCount())
 	}
-	if !strings.Contains(m.lastError, "循环") {
-		t.Errorf("lastError = %q, want 含循环失败信息", m.lastError)
+	if !strings.Contains(activeToastText(m), "循环") {
+		t.Errorf("toast = %q, want 含循环失败信息", activeToastText(m))
 	}
 	if !m.state.Playing || m.state.Track == nil {
 		t.Errorf("SetLoop 失败后应保持播放态: %+v", m.state)
@@ -1139,8 +1154,8 @@ func TestLoadFailRetriesThenSucceeds(t *testing.T) {
 	if m.state.Playing {
 		t.Error("重试等待期间 Playing 应为 false")
 	}
-	if !strings.Contains(m.lastError, "正在自动重试（1/2）") {
-		t.Errorf("lastError = %q, want 含“正在自动重试（1/2）”", m.lastError)
+	if !strings.Contains(activeToastText(m), "正在自动重试（1/2）") {
+		t.Errorf("toast = %q, want 含“正在自动重试（1/2）”", activeToastText(m))
 	}
 
 	// 重试触发：重新 loadfile（playCount=2），恢复播放态
@@ -1199,8 +1214,8 @@ func TestLoadFailRetriesExhaustedSkipsInQueue(t *testing.T) {
 	if !m.state.Playing {
 		t.Error("跳过并播放下一首后 Playing 应为 true")
 	}
-	if !strings.Contains(m.lastError, "跳过") || !strings.Contains(m.lastError, "测试歌曲 t1") {
-		t.Errorf("lastError = %q, want 含“跳过”与第 1 首标题", m.lastError)
+	if !strings.Contains(activeToastText(m), "跳过") || !strings.Contains(activeToastText(m), "测试歌曲 t1") {
+		t.Errorf("toast = %q, want 含“跳过”与第 1 首标题", activeToastText(m))
 	}
 }
 
@@ -1235,8 +1250,8 @@ func TestLoadFailRetriesExhaustedStopsSingle(t *testing.T) {
 	if !m.ended {
 		t.Error("重试耗尽停止后 ended 应为 true")
 	}
-	if !strings.Contains(m.lastError, "已重试 2 次") || !strings.Contains(m.lastError, "请稍后重试或更换歌曲") {
-		t.Errorf("lastError = %q, want 含“已重试 2 次”与“请稍后重试或更换歌曲”", m.lastError)
+	if !strings.Contains(activeToastText(m), "已重试 2 次") || !strings.Contains(activeToastText(m), "请稍后重试或更换歌曲") {
+		t.Errorf("toast = %q, want 含“已重试 2 次”与“请稍后重试或更换歌曲”", activeToastText(m))
 	}
 }
 
@@ -1372,8 +1387,8 @@ func TestLoadFailAllTracksFailStopsLoop(t *testing.T) {
 	if m.state.Playing {
 		t.Error("全部取流失败后 Playing 应为 false")
 	}
-	if !strings.Contains(m.lastError, "已重试 2 次") {
-		t.Errorf("lastError = %q, want 含“已重试 2 次”", m.lastError)
+	if !strings.Contains(activeToastText(m), "已重试 2 次") {
+		t.Errorf("toast = %q, want 含“已重试 2 次”", activeToastText(m))
 	}
 }
 
@@ -1421,8 +1436,8 @@ func TestLoadFailExhaustedSkipRespectsQueueSkip(t *testing.T) {
 	if m.state.Track == nil || m.state.Track.ID != "t2" || !m.state.Playing {
 		t.Errorf("state = %+v, want t2 播放中", m.state)
 	}
-	if !strings.Contains(m.lastError, "跳过") || !strings.Contains(m.lastError, "测试歌曲 t1") {
-		t.Errorf("lastError = %q, want 含“跳过”与 t1 标题", m.lastError)
+	if !strings.Contains(activeToastText(m), "跳过") || !strings.Contains(activeToastText(m), "测试歌曲 t1") {
+		t.Errorf("toast = %q, want 含“跳过”与 t1 标题", activeToastText(m))
 	}
 }
 
@@ -1450,8 +1465,8 @@ func TestRetryOnClearedQueueStops(t *testing.T) {
 	if fp.playCount() != 1 {
 		t.Errorf("队列清空后重试不应播放: playCount = %d, want 1", fp.playCount())
 	}
-	if !strings.Contains(m.lastError, "队列已清空") {
-		t.Errorf("lastError = %q, want 含队列已清空", m.lastError)
+	if !strings.Contains(activeToastText(m), "队列已清空") {
+		t.Errorf("toast = %q, want 含队列已清空", activeToastText(m))
 	}
 	if m.state.Playing {
 		t.Error("停止后 Playing 应为 false")
@@ -1488,8 +1503,8 @@ func TestResumeLoadFailNoAutoRetry(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("恢复加载失败后事件监听链应存活（cmd 应为 waitForPlayerEvents，非 nil）")
 	}
-	if !strings.Contains(m.lastError, "恢复播放失败") || !strings.Contains(m.lastError, "风控") {
-		t.Errorf("lastError = %q, want 含“恢复播放失败”与 hint 诊断（风控）", m.lastError)
+	if !strings.Contains(activeToastText(m), "恢复播放失败") || !strings.Contains(activeToastText(m), "风控") {
+		t.Errorf("toast = %q, want 含“恢复播放失败”与 hint 诊断（风控）", activeToastText(m))
 	}
 	if m.queue.Len() != 3 {
 		t.Errorf("失败后队列应保留展示: Len = %d, want 3", m.queue.Len())
@@ -1511,8 +1526,8 @@ func TestResumeLoadFailNoAutoRetry(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("正常播放取流失败应调度自动重试 cmd")
 	}
-	if !strings.Contains(m.lastError, "正在自动重试（1/2）") {
-		t.Errorf("lastError = %q, want 含“正在自动重试（1/2）”", m.lastError)
+	if !strings.Contains(activeToastText(m), "正在自动重试（1/2）") {
+		t.Errorf("toast = %q, want 含“正在自动重试（1/2）”", activeToastText(m))
 	}
 }
 
@@ -1536,66 +1551,99 @@ func TestLoadFailHint(t *testing.T) {
 	}
 }
 
-// TestRootViewBannerStaysWithinHeight 回归：错误/成功横幅必须替换 body 末尾行
-// 而非追加——全屏撑满约束下追加会让 root.View 超出终端高度，终端滚动把
-// Tab 栏滚出屏幕（曾导致 Tab 栏消失 + 帧残影）。
-func TestRootViewBannerStaysWithinHeight(t *testing.T) {
+// TestRootViewToastLayoutStable 回归：toast 与状态栏不得改变 View 行数、不得替换
+// 或挤压页面内容——错误提示出现/消失排版零跳动（旧横幅替换中间区末行曾致内容跳动）。
+func TestRootViewToastLayoutStable(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	m.lastError = "恢复播放失败: 测试错误"
-	out := m.View()
-	if got := len(strings.Split(out, "\n")); got != 24 {
-		t.Errorf("有错误横幅时 View 行数 = %d, want 24（不超屏）", got)
+	plain := m.View()
+	if got := len(strings.Split(plain, "\n")); got != 24 {
+		t.Fatalf("空态无 toast View 行数 = %d, want 24", got)
 	}
-	if !strings.Contains(out, "⚠") {
-		t.Error("View 应包含错误横幅")
-	}
-
-	m.lastError = ""
-	m.notice = "已添加到「收藏」"
-	out = m.View()
-	if got := len(strings.Split(out, "\n")); got != 24 {
-		t.Errorf("有成功横幅时 View 行数 = %d, want 24", got)
-	}
-	if !strings.Contains(out, "✔") {
-		t.Error("View 应包含成功横幅")
+	if last := strings.Split(plain, "\n")[23]; !strings.Contains(last, "未在播放") {
+		t.Errorf("空态状态栏应在末行, got %q", last)
 	}
 
-	// 两者同时存在：行数仍不超屏；横幅替换中间区末行（倒数第 3/4 行），
-	// 进度条行（倒数第 2）与按钮行（倒数第 1）保持可见可点。
-	m.lastError = "播放失败"
-	out = m.View()
-	if got := len(strings.Split(out, "\n")); got != 24 {
-		t.Errorf("双横幅时 View 行数 = %d, want 24", got)
+	m, _ = m.showToast("恢复播放失败: 测试错误", toastError)
+	withToast := m.View()
+	if got := len(strings.Split(withToast, "\n")); got != 24 {
+		t.Errorf("有 toast 时 View 行数 = %d, want 24", got)
 	}
-	lines := strings.Split(out, "\n")
-	if !strings.Contains(lines[21], "⚠") {
-		t.Errorf("错误横幅应在中间区末行（倒数第 3 行）, got %q", lines[21])
+	if !strings.Contains(withToast, "⚠") || !strings.Contains(withToast, "恢复播放失败") {
+		t.Error("View 应包含错误 toast")
 	}
-	if !strings.Contains(lines[20], "✔") {
-		t.Errorf("成功横幅应在错误横幅上方, got %q", lines[20])
+	// 除状态栏上方一行（toast 覆盖区）外，其余行与无 toast 时逐行相同
+	p, wt := strings.Split(plain, "\n"), strings.Split(withToast, "\n")
+	for i := range p {
+		if i == 22 { // 覆盖区
+			continue
+		}
+		if p[i] != wt[i] {
+			t.Errorf("第 %d 行被 toast 改变:\n无 toast: %q\n有 toast: %q", i, p[i], wt[i])
+		}
 	}
-	// 空态无按钮行：最后一行保持空（横幅未覆盖到底部控件区）
-	if strings.TrimSpace(lines[23]) != "" {
-		t.Errorf("空态最后一行应为空（横幅不覆盖底部）, got %q", lines[23])
+	if !strings.Contains(wt[22], "恢复播放失败") {
+		t.Errorf("toast 应覆盖在状态栏上方一行（倒数第 2 行）, got %q", wt[22])
 	}
-	// 播放态：横幅不覆盖按钮行（有曲目场景）
+
+	// 播放态
 	fp := newFakePlayer()
 	m2 := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m2, cmd := m2.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	m2, _ = update(m2, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m2.lastError = "播放失败"
-	out2 := m2.View()
-	if got := len(strings.Split(out2, "\n")); got != 24 {
-		t.Errorf("播放态双横幅 View 行数 = %d, want 24", got)
+	if got := len(strings.Split(m2.View(), "\n")); got != 24 {
+		t.Errorf("播放态 View 行数 = %d, want 24", got)
 	}
-	l2 := strings.Split(out2, "\n")
-	if !strings.Contains(l2[21], "⚠") {
-		t.Errorf("播放态错误横幅应在倒数第 3 行, got %q", l2[21])
+	m2, _ = m2.showToast("播放失败: 测试错误", toastError)
+	l2 := strings.Split(m2.View(), "\n")
+	if !strings.Contains(l2[22], "播放失败") {
+		t.Errorf("播放态 toast 应覆盖在状态栏上方一行, got %q", l2[22])
 	}
-	if !strings.Contains(l2[23], "|<") {
-		t.Errorf("播放态按钮行不应被横幅覆盖, got %q", l2[23])
+	if !strings.Contains(l2[23], "顺序") {
+		t.Errorf("播放态状态栏应含模式信息, got %q", l2[23])
+	}
+}
+
+// TestToastLifecycle 集成：showToast 覆盖语义 + 过期消息 id 匹配/不匹配。
+func TestToastLifecycle(t *testing.T) {
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, _ = m.showToast("错误 A", toastError)
+	if m.toast == nil || m.toast.text != "错误 A" || m.toast.kind != toastError {
+		t.Fatalf("showToast 后应显示 toast A, got %+v", m.toast)
+	}
+	m, _ = m.showToast("错误 B", toastWarning)
+	if m.toast == nil || m.toast.text != "错误 B" || m.toast.kind != toastWarning {
+		t.Fatalf("覆盖后应显示 toast B, got %+v", m.toast)
+	}
+	// 旧 toast 的过期消息（id=1）不应清掉新 toast
+	m, _ = update(m, toastExpireMsg{id: 1})
+	if m.toast == nil || m.toast.text != "错误 B" {
+		t.Fatalf("过期消息 id 不匹配不应清除新 toast, got %+v", m.toast)
+	}
+	// 当前 toast 的过期消息应清除
+	m, _ = update(m, toastExpireMsg{id: m.toast.id})
+	if m.toast != nil {
+		t.Fatalf("过期消息 id 匹配应清除 toast, got %+v", m.toast)
+	}
+}
+
+// TestShowToastTickCmd 校验 showToast 返回的 cmd 产生匹配 id 的过期消息
+//（用 execCmds 执行；时长调小避免测试等待）。
+func TestShowToastTickCmd(t *testing.T) {
+	toastErrorDuration = time.Millisecond
+	defer func() { toastErrorDuration = 5 * time.Second }()
+	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m, cmd := m.showToast("播放失败: 测试", toastError)
+	msgs := execCmds(cmd)
+	found := false
+	for _, msg := range msgs {
+		if em, ok := msg.(toastExpireMsg); ok && em.id == m.toast.id {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("showToast 的 cmd 应产生匹配当前 toast id 的过期消息, got %#v", msgs)
 	}
 }
