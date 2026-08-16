@@ -47,6 +47,12 @@ func (s *Server) Close() error { return nil }
 // SetTrack no-op。
 func (s *Server) SetTrack(t *model.Track) {}
 
+// SetCoverCacheDir no-op（注入封面缓存目录）。
+func (s *Server) SetCoverCacheDir(dir string) {}
+
+// RefreshMetadata no-op（重发当前曲目 Metadata）。
+func (s *Server) RefreshMetadata() {}
+
 // SetController no-op（注入队列控制器）。
 func (s *Server) SetController(ctrl controller) {}
 

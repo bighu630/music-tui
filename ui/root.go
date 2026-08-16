@@ -381,18 +381,25 @@ type Model struct {
 
 	onTrack func(*model.Track) // 外部消费者（MPRIS）感知当前曲目；nil 安全
 
+	// onCoverReady 封面异步下载完成回调（nil 安全）：曲目封面下载成功时触发，
+	// 用于 MPRIS 重发带 file:// 缓存路径的 Metadata（首帧广播时缓存可能尚未
+	// 就绪，见 mpris.Server.RefreshMetadata）。
+	onCoverReady func()
+
 	mprisCtrl *MprisController // MPRIS 控制器桥（NewModel 创建，main 注入 mpris 服务）
 }
 
 // NewModel 组装 UI。p/s 为接口（可注入 fake 测试），l/c/h/sess/pl/cm/yt 为具体服务，
 // cm 为音频缓存管理器（nil = 未集成），yt 为 YT Music 同步客户端（nil = 未集成），
 // onTrack 在播放状态变化时同步回调当前曲目（nil 表示无曲目；可为 nil）。
+// onCoverReady 在封面异步下载完成后回调（nil 安全）：用于 MPRIS 重发带
+// file:// 缓存路径的 Metadata（首帧广播时缓存可能尚未就绪）。
 // ytdlpConfigured 表示已配置 yt-dlp cookie/headers（未配置且取流风控类失败时，
 // 失败提示附加 YT Music 登录 cookie 配置引导）。
 // 若 sess 存在已保存会话(队列 + 进度),同步恢复队列与播放状态(暂停态),
 // mpv 的静默加载由 Init 返回的 resumeCmd 完成。
 // lyricFile 为歌词行实时写入器(nil = 不启用,如测试环境)。
-func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, cm *cache.Manager, yt *ytm.Client, onTrack func(*model.Track), ytdlpConfigured bool, lyricFile *lyricshm.Writer) Model {
+func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cover.Fetcher, h *history.Store, sess *session.Store, pl *playlists.Store, cm *cache.Manager, yt *ytm.Client, onTrack func(*model.Track), onCoverReady func(), ytdlpConfigured bool, lyricFile *lyricshm.Writer) Model {
 
 	m := Model{
 		player:          p,
@@ -405,6 +412,7 @@ func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cove
 		cache:           cm,
 		yt:              yt,
 		onTrack:         onTrack,
+		onCoverReady:    onCoverReady,
 		ytdlpConfigured: ytdlpConfigured,
 		current:         pageHome,
 		hoverTab:        -1,
@@ -1091,6 +1099,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case coverResultMsg:
 		if m.state.Track != nil && msg.trackID == m.state.Track.ID {
 			m.home = m.home.setCover(msg.trackID, msg.path, msg.err)
+			// 封面异步下载完成且成功：通知 MPRIS 重发 Metadata（首帧广播时
+			// 缓存可能尚未就绪，此处补发带 file:// 缓存路径的 artUrl）。
+			if msg.err == nil && m.onCoverReady != nil {
+				m.onCoverReady()
+			}
 		}
 		return m, nil
 

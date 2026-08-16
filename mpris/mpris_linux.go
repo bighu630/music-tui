@@ -10,12 +10,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
+	"reflect"
 	"sync"
 	"sync/atomic"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/prop"
 
+	"music-tui/cover"
 	"music-tui/model"
 	"music-tui/player"
 	"music-tui/queue"
@@ -113,6 +116,14 @@ type Server struct {
 	mu    sync.Mutex
 	track *model.Track // 当前/最后曲目（ui 通过 SetTrack 回调写入）
 
+	// coversDir 封面缓存目录（main 经 SetCoverCacheDir 注入，与
+	// cover.NewFetcher 同一路径）。仅影响 mpris:artUrl：命中缓存时用
+	// file:// 本地路径（本地歌曲 CoverURL 恒空、YouTube 原始 URL 常 404），
+	// 未注入/未命中时行为与旧版一致（回退 CoverURL）。s.mu 保护：
+	// SetCoverCacheDir（main goroutine，Start 前后均可）与 metadataFor
+	//（pump/ui goroutine）并发读写。
+	coversDir string
+
 	lastPos float64 // 上次 ProgressEvent 位置（秒），仅 pump goroutine 访问
 
 	// canNext/canPrev 上次广播的 CanGoNext/CanGoPrevious 值（原子：refreshNav
@@ -209,6 +220,14 @@ func (s *Server) Close() error {
 		_ = s.conn.Close()
 	}
 	return nil
+}
+
+// SetCoverCacheDir 注入封面缓存目录（与 cover.NewFetcher 同一路径）。
+// 幂等，Start 前后均可调用；未注入时行为 = 现状（artUrl 仅用 CoverURL）。
+func (s *Server) SetCoverCacheDir(dir string) {
+	s.mu.Lock()
+	s.coversDir = dir
+	s.mu.Unlock()
 }
 
 // SetTrack 由 ui 在开始播放新曲目时回调（nil 表示当前无曲目，用于播放
@@ -316,7 +335,7 @@ func (s *Server) handleEvent(ev player.Event) {
 		s.mu.Lock()
 		t := s.track
 		s.mu.Unlock()
-		s.props.SetMust(ifacePlayer, "Metadata", metadataFor(t))
+		s.props.SetMust(ifacePlayer, "Metadata", s.metadataFor(t))
 	case player.TrackEndedEvent:
 		// 按 MPRIS 惯例保留最后曲目的 Metadata，仅状态置 Stopped。
 		s.props.SetMust(ifacePlayer, "PlaybackStatus", "Stopped")
@@ -594,8 +613,14 @@ func shouldEmitSeeked(last, current float64) bool {
 	return d > seekedThreshold || d < -seekedThreshold
 }
 
-// metadataFor 构建 MPRIS Metadata 字典；nil 曲目返回空字典。
-func metadataFor(t *model.Track) map[string]dbus.Variant {
+// metadataFor 构建 MPRIS Metadata 字典；nil 曲目返回空字典。artUrl 取值：
+// 1. coversDir 已注入且 cover.CachedPath 命中缓存 → 规范 file:// URI
+//（url.URL 构造，自动转义空格等特殊字符）；
+// 2. 否则 t.CoverURL 非空 → 原 HTTP URL（回退，保持现状）；
+// 3. 否则不设 artUrl。
+// 线程安全：coversDir 经 s.mu 读取（SetCoverCacheDir 并发写）。
+// 注意：仅在未持有 s.mu 时调用（handleEvent/RefreshMetadata 均锁外调用）。
+func (s *Server) metadataFor(t *model.Track) map[string]dbus.Variant {
 	if t == nil {
 		return map[string]dbus.Variant{}
 	}
@@ -605,10 +630,44 @@ func metadataFor(t *model.Track) map[string]dbus.Variant {
 		"xesam:title":   dbus.MakeVariant(t.Title),
 		"xesam:artist":  dbus.MakeVariant(artistList(t.Artist)),
 	}
+	s.mu.Lock()
+	dir := s.coversDir
+	s.mu.Unlock()
+	if dir != "" {
+		if p, ok := cover.CachedPath(dir, *t); ok {
+			m["mpris:artUrl"] = dbus.MakeVariant((&url.URL{Scheme: "file", Path: p}).String())
+			return m
+		}
+	}
 	if t.CoverURL != "" {
 		m["mpris:artUrl"] = dbus.MakeVariant(t.CoverURL)
 	}
 	return m
+}
+
+// RefreshMetadata 重新广播当前曲目的 MPRIS Metadata。封面异步下载完成后由
+// ui 调用（首帧广播时缓存可能尚未就绪——本地歌曲 CoverURL 恒空，下载完成
+// 前 artUrl 缺失；YouTube 原始 URL 常 404，缓存命中后应补发 file:// 路径）。
+// 约束：s.track 为 nil 或 props 为 nil 时直接返回；用 reflect.DeepEqual 比较
+// 新 Metadata 与 props.GetMust(ifacePlayer, "Metadata")，值未变跳过 SetMust
+//（EmitTrue 属性每次 SetMust 都广播 PropertiesChanged，防刷屏；无封面且无
+// 缓存的本地歌曲下载失败后调用应零广播）。线程安全：s.mu 锁内取 track 指针
+// 副本，锁外 SetMust（与 handleEvent 同模式）。
+func (s *Server) RefreshMetadata() {
+	if s.props == nil {
+		return
+	}
+	s.mu.Lock()
+	t := s.track
+	s.mu.Unlock()
+	if t == nil {
+		return
+	}
+	md := s.metadataFor(t)
+	if reflect.DeepEqual(md, s.props.GetMust(ifacePlayer, "Metadata")) {
+		return
+	}
+	s.props.SetMust(ifacePlayer, "Metadata", md)
 }
 
 // artistList 把单歌手字段转为 MPRIS 艺术家数组（空值给空数组）。

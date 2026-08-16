@@ -5,7 +5,9 @@ package mpris
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -245,7 +247,7 @@ func TestRefreshNav(t *testing.T) {
 
 func TestMetadataFor(t *testing.T) {
 	tr := &model.Track{ID: "abc123", Title: "标题", Artist: "歌手", Duration: 217.5, CoverURL: "http://x/y.jpg"}
-	m := metadataFor(tr)
+	m := newTestServer().metadataFor(tr)
 	if m["mpris:trackid"] != dbus.MakeVariant(trackIDPath("abc123")) {
 		t.Errorf("trackid 错误: %v", m["mpris:trackid"])
 	}
@@ -265,21 +267,21 @@ func TestMetadataFor(t *testing.T) {
 }
 
 func TestMetadataForNoCover(t *testing.T) {
-	m := metadataFor(&model.Track{ID: "x", Title: "t", Artist: "a", Duration: 10})
+	m := newTestServer().metadataFor(&model.Track{ID: "x", Title: "t", Artist: "a", Duration: 10})
 	if _, ok := m["mpris:artUrl"]; ok {
 		t.Error("无封面时不应有 artUrl")
 	}
 }
 
 func TestMetadataForEmptyArtist(t *testing.T) {
-	m := metadataFor(&model.Track{ID: "x", Title: "t", Duration: 10})
+	m := newTestServer().metadataFor(&model.Track{ID: "x", Title: "t", Duration: 10})
 	if !reflect.DeepEqual(m["xesam:artist"], dbus.MakeVariant([]string{})) {
 		t.Errorf("空歌手应给空数组: %v", m["xesam:artist"])
 	}
 }
 
 func TestMetadataForNil(t *testing.T) {
-	m := metadataFor(nil)
+	m := newTestServer().metadataFor(nil)
 	if len(m) != 0 {
 		t.Errorf("nil 曲目应返回空字典: %v", m)
 	}
@@ -290,7 +292,7 @@ func TestMetadataForNil(t *testing.T) {
 // 会把整个应用带崩（真实播放中实测复现）。
 func TestMetadataForTrackIDWithDashIsValidObjectPath(t *testing.T) {
 	tr := &model.Track{ID: "sF80I-TQiW0", Title: "t", Duration: 10}
-	m := metadataFor(tr)
+	m := newTestServer().metadataFor(tr)
 	tid, ok := m["mpris:trackid"].Value().(dbus.ObjectPath)
 	if !ok {
 		t.Fatalf("trackid 类型错误: %T", m["mpris:trackid"].Value())
@@ -304,6 +306,133 @@ func TestMetadataForTrackIDWithDashIsValidObjectPath(t *testing.T) {
 	s.SetTrack(tr)
 	if got := s.currentTrackID(); got != tid {
 		t.Errorf("currentTrackID = %v, want %v（SetPosition 校验会不一致）", got, tid)
+	}
+}
+
+// TestMetadataForLocalCachedArt coversDir 注入 + 本地曲目（CoverURL 空）缓存
+// 命中 → artUrl 为规范 file:// URI（本地歌曲封面可见）。
+func TestMetadataForLocalCachedArt(t *testing.T) {
+	// 预置缓存文件（命名与 cover.cacheFileName 一致：local-<id>.jpg；
+	// ID 用无需转义的简单值，测试不重复实现转义规则）
+	dest := filepath.Join(t.TempDir(), "local-song1.jpg")
+	if err := os.WriteFile(dest, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestServer()
+	s.SetCoverCacheDir(filepath.Dir(dest))
+	tr := &model.Track{ID: "song1", Source: model.SourceLocal, Title: "t", Artist: "a", Duration: 10}
+	m := s.metadataFor(tr)
+	if m["mpris:artUrl"] != dbus.MakeVariant("file://"+dest) {
+		t.Errorf("artUrl = %v, want %q", m["mpris:artUrl"], "file://"+dest)
+	}
+}
+
+// TestMetadataForCachePreferredOverURL 缓存命中优先于 CoverURL：YouTube 曲目
+// 传原始 maxresdefault HTTP URL（常 404），缓存存在时必须用 file:// 路径。
+func TestMetadataForCachePreferredOverURL(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "youtube-abc123.jpg")
+	if err := os.WriteFile(dest, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestServer()
+	s.SetCoverCacheDir(filepath.Dir(dest))
+	tr := &model.Track{ID: "abc123", Source: "youtube", Title: "t", Artist: "a", Duration: 10, CoverURL: "http://x/y.jpg"}
+	m := s.metadataFor(tr)
+	if m["mpris:artUrl"] != dbus.MakeVariant("file://"+dest) {
+		t.Errorf("缓存存在时 artUrl 应优先 file:// 路径: %v", m["mpris:artUrl"])
+	}
+}
+
+// TestMetadataForFallbackURL 无缓存 + CoverURL 非空 → 回退原始 HTTP URL
+// （保持现状，不删除）。
+func TestMetadataForFallbackURL(t *testing.T) {
+	s := newTestServer()
+	s.SetCoverCacheDir(t.TempDir()) // 空缓存目录
+	tr := &model.Track{ID: "abc", Source: "youtube", Title: "t", Artist: "a", Duration: 10, CoverURL: "http://x/y.jpg"}
+	m := s.metadataFor(tr)
+	if m["mpris:artUrl"] != dbus.MakeVariant("http://x/y.jpg") {
+		t.Errorf("无缓存时应回退 CoverURL: %v", m["mpris:artUrl"])
+	}
+}
+
+// TestMetadataForNoCoverNoCache CoverURL 空 + 无缓存 → 不设 artUrl 键
+// （本地歌曲无内嵌封面/下载失败时 artUrl 缺失）。
+func TestMetadataForNoCoverNoCache(t *testing.T) {
+	s := newTestServer()
+	s.SetCoverCacheDir(t.TempDir())
+	tr := &model.Track{ID: "x", Source: model.SourceLocal, Title: "t", Artist: "a", Duration: 10}
+	if _, ok := s.metadataFor(tr)["mpris:artUrl"]; ok {
+		t.Error("无缓存且 CoverURL 空时不应有 artUrl")
+	}
+}
+
+// TestMetadataForPathEscaping 缓存路径含空格等特殊字符 → artUrl 为转义后的
+// 规范 file:// URI（%20），不得原样拼接（否则 D-Bus 客户端无法解析）。
+func TestMetadataForPathEscaping(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cover cache") // 目录名含空格
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, "local-song1.jpg")
+	if err := os.WriteFile(dest, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestServer()
+	s.SetCoverCacheDir(dir)
+	tr := &model.Track{ID: "song1", Source: model.SourceLocal, Title: "t", Artist: "a", Duration: 10}
+	m := s.metadataFor(tr)
+	art, _ := m["mpris:artUrl"].Value().(string)
+	if !strings.HasPrefix(art, "file://") {
+		t.Fatalf("artUrl 应以 file:// 开头: %q", art)
+	}
+	if !strings.Contains(art, "%20") {
+		t.Errorf("空格应转义为 %%20: %q", art)
+	}
+	if strings.Contains(art, " ") {
+		t.Errorf("artUrl 不应含未转义空格: %q", art)
+	}
+}
+
+// TestRefreshMetadata 重新广播当前曲目 Metadata（封面异步下载完成后调用）：
+// 值变化才 SetMust（EmitTrue 属性每次 SetMust 都广播 PropertiesChanged）；
+// track 为 nil、props 为 nil、值未变（无封面无缓存曲目重复刷新）→ 零广播。
+func TestRefreshMetadata(t *testing.T) {
+	cp := &countingProps{fakeProps: newFakeProps()}
+	s := &Server{p: newFakePlayer(), conn: &fakeBus{}, props: cp}
+
+	// props 为 nil：直接返回（不 panic）
+	(&Server{p: newFakePlayer(), conn: &fakeBus{}}).RefreshMetadata()
+
+	// track 为 nil：零广播
+	s.RefreshMetadata()
+	if cp.calls != 0 {
+		t.Fatalf("track 为 nil 时不应广播: calls=%d", cp.calls)
+	}
+
+	// 无封面无缓存的曲目：首次广播（Metadata 从空字典变为曲目信息）；
+	// 重复刷新值未变 → 零额外广播（下载失败后的刷新不得刷屏）
+	tr := &model.Track{ID: "x", Source: model.SourceLocal, Title: "t", Artist: "a", Duration: 10}
+	s.SetTrack(tr)
+	s.RefreshMetadata()
+	first := cp.calls
+	if first == 0 {
+		t.Fatal("首次 RefreshMetadata 应 SetMust 广播 Metadata")
+	}
+	s.RefreshMetadata()
+	s.RefreshMetadata()
+	if got := cp.calls; got != first {
+		t.Fatalf("值未变时不应再广播: %d → %d", first, got)
+	}
+
+	// 封面缓存就绪（异步下载完成）→ artUrl 出现 → 值变化 → 重新广播
+	dest := filepath.Join(t.TempDir(), "local-x.jpg")
+	if err := os.WriteFile(dest, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.SetCoverCacheDir(filepath.Dir(dest))
+	s.RefreshMetadata()
+	if got := cp.calls; got != first+1 {
+		t.Fatalf("缓存就绪后应重新广播 Metadata: calls=%d, want %d", got, first+1)
 	}
 }
 
