@@ -153,7 +153,7 @@ type plTrackItem struct {
 
 func (i plTrackItem) Title() string {
 	return fmt.Sprintf("%2d. %s", i.idx+1,
-		formatTrackLine(i.track.Title, i.track.Artist, formatDuration(i.track.Duration)))
+		formatTrackLine(i.track.Title, i.track.Artist, formatTrackDuration(i.track.Duration)))
 }
 func (i plTrackItem) Description() string { return "" }
 func (i plTrackItem) FilterValue() string { return i.track.Title + " " + i.track.Artist }

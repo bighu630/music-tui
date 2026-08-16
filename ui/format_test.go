@@ -23,6 +23,28 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
+func TestFormatTrackDuration(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       float64
+		want     string
+		wantNote string
+	}{
+		{"未知时长归零", 0, "", "时长未知（Duration<=0）时不显示"},
+		{"负值归零", -5, "", "负值同样视为未知"},
+		{"不足一分钟", 59.4, "00:59", "四舍五入"},
+		{"多分钟", 269, "04:29", "常规时长"},
+		{"超一小时", 3661, "01:01:01", "小时格式"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := formatTrackDuration(c.in); got != c.want {
+				t.Errorf("formatTrackDuration(%v) = %q, want %q（%s）", c.in, got, c.want, c.wantNote)
+			}
+		})
+	}
+}
+
 func TestFormatPlayedAt(t *testing.T) {
 	now := time.Date(2026, 8, 13, 20, 0, 0, 0, time.Local)
 	cases := []struct {

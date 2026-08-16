@@ -49,7 +49,7 @@ func (i queueItem) Title() string {
 		prefix = "▶ "
 	}
 	line := fmt.Sprintf("%s%2d. %s", prefix, i.idx+1,
-		formatTrackLine(i.track.Title, i.track.Artist, formatDuration(i.track.Duration)))
+		formatTrackLine(i.track.Title, i.track.Artist, formatTrackDuration(i.track.Duration)))
 	if i.current {
 		line = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")).Render(line)
 	}
