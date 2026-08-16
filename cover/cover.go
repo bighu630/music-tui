@@ -102,7 +102,9 @@ func thumbURL(base, size string) (string, error) {
 // dest 变成子目录路径导致写入失败甚至逃逸缓存目录。此处按 cache.SafeName
 // 的思路保留 [A-Za-z0-9._-]、其余字符（含路径分隔符、Windows 非法字符、
 // Unicode 非 ASCII）统一替换为 '_'；但 cover 不依赖 cache 包，独立实现。
-// 与 SafeName 不同，不截断——转义是一一映射（不同 ID 不会串名），长度由
+// 转义并非单射：分隔符与转义字符同位时不同路径会撞名（如 /a/b.mp3 与
+// /a_b.mp3 映射到同一缓存文件名），后果仅限封面串显/互相覆盖（装饰性，
+// 无数据损失），与 cache.SafeName 惯例一致，属接受的设计取舍。长度由
 // 操作系统路径上限约束。YouTube ID（[A-Za-z0-9_-]）不受影响。
 func cacheFileName(source, id string) string {
 	out := make([]byte, 0, len(source)+1+len(id))
@@ -128,6 +130,9 @@ func (f *Fetcher) fetchLocalCover(ctx context.Context, track model.Track, dest s
 	if err != nil {
 		if errors.Is(err, local.ErrNoPicture) {
 			return "", errors.New("本地文件无内嵌封面")
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return "", errors.New("本地文件不存在")
 		}
 		return "", fmt.Errorf("读取封面失败: %v", err)
 	}

@@ -80,7 +80,8 @@ func writeMP3WithAPIC(t *testing.T, path string, picData []byte) {
 }
 
 // TestFetchLocalCover 本地歌曲：从标签提取内嵌封面写入缓存（路径可读、内容
-// 与内嵌一致、image.Decode 可解）；二次 Fetch 命中磁盘缓存（返回值一致）。
+// 与内嵌一致、image.Decode 可解）；二次 Fetch 命中磁盘缓存（删除源文件后
+// 仍成功且返回同一 dest，证明未重读源文件）。
 func TestFetchLocalCover(t *testing.T) {
 	f, err := NewFetcher(t.TempDir())
 	if err != nil {
@@ -109,10 +110,15 @@ func TestFetchLocalCover(t *testing.T) {
 		t.Errorf("缓存内容与内嵌封面不一致")
 	}
 
-	// 二次 Fetch：命中磁盘缓存（返回值一致、不重新提取）
+	// 二次 Fetch：删除源文件后仍命中磁盘缓存（dest 由 ID 确定性计算，仅
+	// 比较返回值无法区分命中与重提取；删源后若缓存逻辑被移除，二次 Fetch
+	// 会因源文件缺失失败——此断言才能捕获回归）。
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
 	again, err := f.Fetch(context.Background(), tr)
 	if err != nil {
-		t.Fatalf("二次 Fetch: %v", err)
+		t.Fatalf("二次 Fetch（源文件已删除）: %v", err)
 	}
 	if again != got {
 		t.Errorf("二次 Fetch 返回 %q，期望命中缓存 %q", again, got)
@@ -141,10 +147,41 @@ func TestFetchLocalCoverNoPicture(t *testing.T) {
 		t.Errorf("Fetch(无 APIC) err = %v，期望含 \"内嵌封面\"", err)
 	}
 
-	// 文件不存在 → "读取封面失败" 错误
+	// 文件不存在 → "本地文件不存在" 错误（os.IsNotExist 特判，避免暴露底层
+	// 打开文件错误）
 	missing := filepath.Join(t.TempDir(), "no-such.mp3")
-	if _, err := f.Fetch(context.Background(), model.Track{ID: missing, URL: missing, Source: model.SourceLocal}); err == nil || !strings.Contains(err.Error(), "读取封面失败") {
-		t.Errorf("Fetch(文件不存在) err = %v，期望含 \"读取封面失败\"", err)
+	if _, err := f.Fetch(context.Background(), model.Track{ID: missing, URL: missing, Source: model.SourceLocal}); err == nil || !strings.Contains(err.Error(), "本地文件不存在") {
+		t.Errorf("Fetch(文件不存在) err = %v，期望含 \"本地文件不存在\"", err)
+	}
+}
+
+// TestFetchLocalCoverOversized APIC 图片数据超过 maxCoverBytes（16 MiB）
+// → 报错（防解压炸弹，与 download 的大小上限一致）。
+func TestFetchLocalCoverOversized(t *testing.T) {
+	f, err := NewFetcher(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "big.mp3")
+	writeMP3WithAPIC(t, p, bytes.Repeat([]byte{1}, 16<<20+1)) // maxCoverBytes+1
+	tr := model.Track{ID: p, URL: p, Source: model.SourceLocal}
+	if _, err := f.Fetch(context.Background(), tr); err == nil || !strings.Contains(err.Error(), "超过") {
+		t.Errorf("Fetch(超大封面) err = %v，期望含 \"超过\"", err)
+	}
+}
+
+// TestFetchLocalCoverBadImage APIC 图片数据非图片 → 报错
+// （image.Decode 校验不通过，与 download 的非图片语义一致）。
+func TestFetchLocalCoverBadImage(t *testing.T) {
+	f, err := NewFetcher(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "bad.mp3")
+	writeMP3WithAPIC(t, p, []byte("this is not an image"))
+	tr := model.Track{ID: p, URL: p, Source: model.SourceLocal}
+	if _, err := f.Fetch(context.Background(), tr); err == nil || !strings.Contains(err.Error(), "不是有效图片") {
+		t.Errorf("Fetch(坏图) err = %v，期望含 \"不是有效图片\"", err)
 	}
 }
 
