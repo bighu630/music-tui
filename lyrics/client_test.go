@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +83,144 @@ func TestFetchGet404FallsBackToSearch(t *testing.T) {
 	}
 	if len(ly.Lines) != 1 || ly.Lines[0].Text != "正确歌词" {
 		t.Errorf("未选中时长最接近的匹配: %+v", ly.Lines)
+	}
+}
+
+// TestFetchUnknownDurationSkipsGet 时长未知（Duration<1，如本地文件快照
+// 未持久化时长）时跳过 /api/get（lrclib 对 duration<1 返回 400 会中断整条
+// 候选链）直接走 /api/search，命中即返回歌词。
+func TestFetchUnknownDurationSkipsGet(t *testing.T) {
+	for _, d := range []float64{0, 0.5} {
+		t.Run(fmt.Sprintf("duration=%g", d), func(t *testing.T) {
+			var getCalls, searchCalls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/get":
+					getCalls++
+					t.Error("时长未知不应请求 /api/get（lrclib 对 duration<1 返回 400）")
+				case "/api/search":
+					searchCalls++
+					_ = json.NewEncoder(w).Encode([]lrclibSong{
+						{TrackName: "晴天", ArtistName: "周杰倫", Duration: 10, SyncedLyrics: "[00:01.00]search 命中"},
+					})
+				}
+			}))
+			defer server.Close()
+
+			c := NewClientWithBaseURL(server.URL, testUA)
+			res, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: d})
+			ly := res.Lyrics
+			if err != nil {
+				t.Fatalf("Fetch: %v", err)
+			}
+			if getCalls != 0 || searchCalls != 1 {
+				t.Errorf("calls = get:%d search:%d, want 0/1", getCalls, searchCalls)
+			}
+			if len(ly.Lines) != 1 || ly.Lines[0].Text != "search 命中" {
+				t.Errorf("Lines = %+v, want [search 命中]", ly.Lines)
+			}
+		})
+	}
+}
+
+// TestFetchGet400FallsBackToSearch /api/get 返回 400（duration 非法等）：
+// 视为可降级（同 ErrNotFound 语义），记录 Warn 后走 /api/search，命中即返回。
+func TestFetchGet400FallsBackToSearch(t *testing.T) {
+	var getCalls, searchCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/get":
+			getCalls++
+			w.WriteHeader(http.StatusBadRequest)
+		case "/api/search":
+			searchCalls++
+			_ = json.NewEncoder(w).Encode([]lrclibSong{
+				{TrackName: "晴天", ArtistName: "周杰倫", Duration: 269, SyncedLyrics: "[00:01.00]降级命中"},
+			})
+		}
+	}))
+	defer server.Close()
+
+	c := NewClientWithBaseURL(server.URL, testUA)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269})
+	ly := res.Lyrics
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if getCalls != 1 || searchCalls != 1 {
+		t.Errorf("calls = get:%d search:%d, want 1/1", getCalls, searchCalls)
+	}
+	if len(ly.Lines) != 1 || ly.Lines[0].Text != "降级命中" {
+		t.Errorf("Lines = %+v, want [降级命中]", ly.Lines)
+	}
+}
+
+// TestDoErrorIncludesURL do() 的非 2xx/404/429 错误（如 400）必须携带
+// 完整请求 URL（含 duration 参数），便于日志定位。
+func TestDoErrorIncludesURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	q := url.Values{}
+	q.Set("track_name", "晴天")
+	q.Set("artist_name", "周杰倫")
+	q.Set("duration", "0.00")
+	u := server.URL + "/api/get?" + q.Encode()
+
+	c := NewClient(testUA)
+	c.baseURL = server.URL
+	var out lrclibSong
+	err := c.do(context.Background(), u, &out)
+	if err == nil || !strings.Contains(err.Error(), u) {
+		t.Errorf("err = %v, want 含完整 URL %q", err, u)
+	}
+}
+
+// TestDoRetriesOn503 5xx 服务端错误：短退避（Retry-After 或 1s）后重试
+// 一次；第一次 503 第二次 200 即成功；连续 503 重试耗尽后硬失败
+// （错误带状态码与完整 URL）。
+func TestDoRetriesOn503(t *testing.T) {
+	// 第一次 503、第二次 200 → 成功，请求共 2 次
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(lrclibSong{TrackName: "t", SyncedLyrics: "[00:01.00]ok"})
+	}))
+	c := NewClientWithBaseURL(server.URL, testUA)
+	var song lrclibSong
+	if err := c.do(context.Background(), server.URL+"/api/get?x=1", &song); err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2（503 后退避重试一次）", calls)
+	}
+	server.Close()
+
+	// 连续 503 → 重试耗尽硬失败，错误带状态码与完整 URL
+	calls = 0
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	c = NewClientWithBaseURL(server.URL, testUA)
+	err := c.do(context.Background(), server.URL+"/api/get?y=2", &song)
+	if err == nil || !strings.Contains(err.Error(), "503") || !strings.Contains(err.Error(), server.URL+"/api/get?y=2") {
+		t.Errorf("err = %v, want 含 503 与完整 URL", err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2（503 重试一次后放弃）", calls)
 	}
 }
 
@@ -240,6 +380,7 @@ func TestFetchStopsOnNonNotFoundError(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 		case "/api/search":
 			searchCalls++
+			w.Header().Set("Retry-After", "0")
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 	}))
@@ -251,8 +392,8 @@ func TestFetchStopsOnNonNotFoundError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Errorf("err = %v, want 500 服务端错误", err)
 	}
-	if searchCalls != 1 {
-		t.Errorf("searchCalls = %d, want 1（非 ErrNotFound 应立即中断，不再尝试后续候选）", searchCalls)
+	if searchCalls != 2 {
+		t.Errorf("searchCalls = %d, want 2（500 仅同 URL 退避重试一次；非 ErrNotFound 应立即中断，不再尝试后续候选）", searchCalls)
 	}
 }
 
