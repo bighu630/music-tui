@@ -114,6 +114,15 @@ type Server struct {
 	track *model.Track // 当前/最后曲目（ui 通过 SetTrack 回调写入）
 
 	lastPos float64 // 上次 ProgressEvent 位置（秒），仅 pump goroutine 访问
+
+	// canNext/canPrev 上次广播的 CanGoNext/CanGoPrevious 值（原子：refreshNav
+	// 被 pump/SetController/D-Bus 回调并发调用）。CanGoNext/CanGoPrevious 是
+	// EmitTrue 属性且 godbus set() 不做值比较——值未变时跳过 SetMust，防止
+	// handleEvent 每事件调 refreshNav（播放中 20fps）造成 ~40 次广播/秒。
+	// navSet 区分"从未广播过"（首次 must 广播，含初始 false 值）。
+	navSet atomic.Bool
+	canNext atomic.Bool
+	canPrev atomic.Bool
 }
 
 // NewServer 创建 MPRIS 服务端（未连接总线，需调用 Start）。
@@ -253,6 +262,16 @@ func (s *Server) refreshNav() {
 		return
 	}
 	can := r.c.Len() > 1
+	// 值未变跳过 SetMust：EmitTrue 属性每次 SetMust 都广播 PropertiesChanged
+	//（godbus set() 不比较新旧值）。handleEvent 每事件调用本函数（播放中
+	// 20fps 进度事件），无守卫 = 40 次 dbus 广播/秒（CPU 热点，实测 ~3%）。
+	// navSet 保证首次调用（含初始 false 值）必广播。
+	if s.navSet.Load() && s.canNext.Load() == can && s.canPrev.Load() == can {
+		return
+	}
+	s.navSet.Store(true)
+	s.canNext.Store(can)
+	s.canPrev.Store(can)
 	s.props.SetMust(ifacePlayer, "CanGoNext", can)
 	s.props.SetMust(ifacePlayer, "CanGoPrevious", can)
 }

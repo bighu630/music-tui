@@ -307,6 +307,51 @@ func TestMetadataForTrackIDWithDashIsValidObjectPath(t *testing.T) {
 	}
 }
 
+// countingProps 包装 fakeProps 并计数 SetMust 调用（观测广播行为：真实
+// godbus prop.set 对 EmitTrue 属性每次 SetMust 都广播 PropertiesChanged）。
+type countingProps struct {
+	*fakeProps
+	calls int
+}
+
+func (p *countingProps) SetMust(iface, name string, v interface{}) {
+	p.calls++
+	p.fakeProps.SetMust(iface, name, v)
+}
+
+// TestRefreshNavSkipsUnchangedEmit CanGoNext/CanGoPrevious 是 EmitTrue 属性，
+// godbus set() 不做值比较、每次 SetMust 都广播 PropertiesChanged；refreshNav
+// 在每次播放器事件后调用（播放中 20fps 进度事件），值未变必须跳过 SetMust
+// ——否则播放中 ~40 次 dbus 广播/秒（实测占播放中 CPU ~3%，CPU 优化热点）。
+func TestRefreshNavSkipsUnchangedEmit(t *testing.T) {
+	cp := &countingProps{fakeProps: newFakeProps()}
+	s := &Server{p: newFakePlayer(), conn: &fakeBus{}, props: cp}
+	fc := newFakeController()
+	s.SetController(fc)
+
+	fc.mu.Lock()
+	fc.len = 2
+	fc.mu.Unlock()
+	s.refreshNav()
+	first := cp.calls
+	if first == 0 {
+		t.Fatal("首次 refreshNav 应 SetMust（广播 CanGoNext/CanGoPrevious）")
+	}
+	// 值未变：不得重复 SetMust/广播
+	s.refreshNav()
+	if got := cp.calls; got != first {
+		t.Fatalf("值未变时 refreshNav 不应再 SetMust: %d → %d", first, got)
+	}
+	// 值变化（2→1：can true→false）：重新广播
+	fc.mu.Lock()
+	fc.len = 1
+	fc.mu.Unlock()
+	s.refreshNav()
+	if got := cp.calls; got != first+2 {
+		t.Fatalf("队列长度变化后应重新 SetMust CanGoNext/CanGoPrevious: calls=%d, want %d", got, first+2)
+	}
+}
+
 func TestShouldEmitSeeked(t *testing.T) {
 	cases := []struct {
 		last, cur float64
