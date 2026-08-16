@@ -1,4 +1,4 @@
-//go:build unix
+//go:build linux || darwin || freebsd || openbsd || netbsd || dragonfly || illumos
 
 package singleinstance
 
@@ -21,6 +21,11 @@ func TestAcquireSuccess(t *testing.T) {
 	}
 	if err := l.Close(); err != nil {
 		t.Errorf("Close 应无错: %v", err)
+	}
+	// unix 设计行为：Close 不删除锁文件（避免解锁-删除窗口期 inode
+	// 竞态），残留文件由下次启动 O_CREATE 复用。
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("Close 后锁文件应保留: %v", err)
 	}
 }
 

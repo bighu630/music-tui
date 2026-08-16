@@ -27,6 +27,8 @@ func (l *Lock) Close() error {
 	if l == nil || l.f == nil {
 		return nil
 	}
-	releaseLock(l) // 平台实现
-	return l.f.Close()
+	releaseLock(l) // 平台实现；使用 l.f/l.path/l.pid，必须在置 nil 前调用
+	err := l.f.Close()
+	l.f = nil // 无论 Close 成败都置 nil，保证二次调用安全 no-op
+	return err
 }

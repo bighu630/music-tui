@@ -1,4 +1,4 @@
-//go:build unix
+//go:build linux || darwin || freebsd || openbsd || netbsd || dragonfly || illumos
 
 package singleinstance
 
@@ -12,7 +12,9 @@ import (
 // Acquire 获取单实例锁。Unix 实现：flock 独占非阻塞锁，
 // 进程退出（含崩溃）时内核自动释放，无需清理锁文件。
 func Acquire(lockPath string) (*Lock, error) {
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	// O_RDONLY：flock 的 LOCK_EX 对只读 fd 同样合法；只读打开保证他人
+	// 0444 权限的锁文件也能打开并检查互斥（O_RDWR 会被权限拒绝）。
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDONLY, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("打开锁文件失败: %w", err)
 	}

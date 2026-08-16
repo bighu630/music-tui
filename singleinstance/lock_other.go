@@ -1,9 +1,9 @@
-//go:build !unix
+//go:build !linux && !darwin && !freebsd && !openbsd && !netbsd && !dragonfly && !illumos
 
 package singleinstance
 
-// Acquire 获取单实例锁。非 Unix 平台用 pid 文件方案：
-// 崩溃残留的锁文件由下次启动的陈旧检测清理。
+// Acquire 获取单实例锁。非 flock 平台（windows、solaris、aix、plan9
+// 等）用 pid 文件方案：崩溃残留的锁文件由下次启动的陈旧检测清理。
 func Acquire(lockPath string) (*Lock, error) {
 	return acquirePidLock(lockPath)
 }

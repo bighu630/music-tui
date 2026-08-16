@@ -1,4 +1,4 @@
-//go:build !unix && !windows
+//go:build !windows && !linux && !darwin && !freebsd && !openbsd && !netbsd && !dragonfly && !illumos
 
 package singleinstance
 
