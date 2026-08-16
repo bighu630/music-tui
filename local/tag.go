@@ -100,17 +100,34 @@ func parseMPEGHeader(b []byte) (frameLen, samples, bitrate, samplerate int, ok b
 	}
 	padding := int(b[2]>>1) & 0x01
 
-	// 比特率表（kbps，index 0=free、15=无效，与上述校验对应）
-	var bitrates [16]int
+	// 比特率表（kbps，index 0=free、15=无效，与上述校验对应）。
+	// 版本维度：MPEG1（version==3）与 MPEG2/2.5（version==2/0）各一套规范表
+	// （ISO 11172-3 / 13818-3，与 LAME bitrate_table 一致）；MPEG2/2.5 的
+	// Layer2/Layer3 共用一张表。注意 MPEG2/2.5 Layer3 index 8 = 64kbps，
+	// 而 MPEG1 Layer3 同 index = 128kbps——不分版本会帧长算错。
+	vidx := 0 // 0=MPEG2/2.5，1=MPEG1
+	if version == 3 {
+		vidx = 1
+	}
+	var bitrates [2][16]int
 	switch layer {
 	case 3: // Layer1
-		bitrates = [...]int{0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0}
+		bitrates = [2][16]int{
+			{0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 0},    // MPEG2/2.5
+			{0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0}, // MPEG1
+		}
 	case 2: // Layer2
-		bitrates = [...]int{0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0}
+		bitrates = [2][16]int{
+			{0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0},      // MPEG2/2.5
+			{0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0}, // MPEG1
+		}
 	default: // Layer3
-		bitrates = [...]int{0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0}
+		bitrates = [2][16]int{
+			{0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0},     // MPEG2/2.5
+			{0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0}, // MPEG1
+		}
 	}
-	bitrate = bitrates[bi] * 1000
+	bitrate = bitrates[vidx][bi] * 1000
 
 	// 采样率表（Hz）
 	var srs [3]int

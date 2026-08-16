@@ -47,20 +47,38 @@ func id3TextFrame(id, text string) []byte {
 }
 
 // mpegFrame 构造一帧 MPEG 音频帧（版本/层/比特率 index/采样率 index 参数化，
-// 无 padding、无 CRC、立体声模式）。帧长按规范公式独立计算——表与
-// parseMPEGHeader 镜像，避免测试与实现互为依赖。
+// 无 padding、无 CRC、立体声模式）。帧长按规范公式独立计算——比特率表按
+// 版本维度分派，与 parseMPEGHeader 镜像但独立书写规范值，避免测试与实现
+// 互为依赖。
 func mpegFrame(version, layer byte, bitrateIndex, srIndex int) []byte {
 	// byte1 = 111 VV LL P：sync(111) + version + layer + protection（1 = 无 CRC）
 	h := []byte{0xFF, 0xE0 | version<<3 | layer<<1 | 0x01, byte(bitrateIndex<<4 | srIndex<<2), 0x00}
-	// 比特率表（kbps，index 0 = free、15 = 无效）
-	var bitrates [16]int
+	// 比特率表（kbps，index 0 = free、15 = 无效）。版本维度：MPEG1 与
+	// MPEG2/2.5 各一套规范表（ISO 11172-3 / 13818-3），MPEG2/2.5 的
+	// Layer2/Layer3 共用一张表。注意：MPEG2/2.5 Layer3 index 8 = 64kbps，
+	// 而 MPEG1 Layer3 同 index = 128kbps（旧注释称两表一致，实为镜像了
+	// 实现的表 bug，故本注释必须按规范值独立书写）。
+	vidx := 0 // 0=MPEG2/2.5，1=MPEG1
+	if version == 3 {
+		vidx = 1
+	}
+	var bitrates [2][16]int
 	switch layer {
 	case 3: // Layer1
-		bitrates = [...]int{0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0}
+		bitrates = [2][16]int{
+			{0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 0},    // MPEG2/2.5
+			{0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0}, // MPEG1
+		}
 	case 2: // Layer2
-		bitrates = [...]int{0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0}
-	default: // Layer3（64kbps 的 index 8 在 MPEG1/MPEG2 表中一致，测试仅用到该点）
-		bitrates = [...]int{0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0}
+		bitrates = [2][16]int{
+			{0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0},      // MPEG2/2.5
+			{0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0}, // MPEG1
+		}
+	default: // Layer3
+		bitrates = [2][16]int{
+			{0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0},     // MPEG2/2.5
+			{0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0}, // MPEG1
+		}
 	}
 	// 采样率表（Hz）
 	var srs [3]int
@@ -83,9 +101,9 @@ func mpegFrame(version, layer byte, bitrateIndex, srIndex int) []byte {
 	// 帧长（字节）
 	var frameLen int
 	if layer == 3 { // Layer1
-		frameLen = (12 * bitrates[bitrateIndex] * 1000 / srs[srIndex]) * 4
+		frameLen = (12 * bitrates[vidx][bitrateIndex] * 1000 / srs[srIndex]) * 4
 	} else { // Layer2/3
-		frameLen = samples / 8 * bitrates[bitrateIndex] * 1000 / srs[srIndex]
+		frameLen = samples / 8 * bitrates[vidx][bitrateIndex] * 1000 / srs[srIndex]
 	}
 	f := make([]byte, frameLen)
 	copy(f, h)
@@ -356,8 +374,10 @@ func TestReadDurationMP3XingNoFramesFlag(t *testing.T) {
 
 func TestReadDurationMPEG2Layer3CBR(t *testing.T) {
 	// MPEG2 Layer3（576 样本/帧）CBR：500 帧 64kbps/22050Hz → 500*576/22050 s。
-	// 帧长 = 72*64000/22050 = 208 字节；若按 MPEG1 的 144 公式（417 字节）算，
-	// CBR 取模失配 → VBR 扫描错位 → 时长错误。
+	// 帧头 0xFF 0xF3 0x88 0x00——bitrate index 8 在 MPEG2 表 = 64kbps，帧长
+	// 72*64000/22050 = 208 字节。若实现误用 MPEG1 表（同 index 8 = 128kbps，
+	// 帧长 417 字节），CBR 取模失配 → VBR 扫描在 208 字节帧边界帧头失配 →
+	// 时长只剩 ≈1 帧（0.026s）→ 本用例失败。
 	p := filepath.Join(t.TempDir(), "mpeg2.mp3")
 	var b []byte
 	for i := 0; i < 500; i++ {
@@ -373,10 +393,48 @@ func TestReadDurationMPEG2Layer3CBR(t *testing.T) {
 	}
 }
 
+func TestReadDurationMPEG2Layer3LowBitrate(t *testing.T) {
+	// MPEG2 Layer3 index 5 = 40kbps（MPEG1 同 index = 64kbps）→ 帧长
+	// 72*40000/22050 = 130 字节，500 帧 → 500*576/22050 s。误用 MPEG1 表时
+	// 按 64kbps（208 字节）算帧长，扫描失配 → 时长错误（本用例即失败）。
+	p := filepath.Join(t.TempDir(), "mpeg2-low.mp3")
+	var b []byte
+	for i := 0; i < 500; i++ {
+		b = append(b, mpegFrame(2, 1, 5, 0)...) // MPEG2 Layer3 40kbps 22050Hz
+	}
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := readDuration(p)
+	want := 500.0 * 576 / 22050 // ≈ 13.061
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("readDuration(MPEG2 Layer3 40kbps CBR) = %v，期望 ≈ %v", got, want)
+	}
+}
+
+func TestReadDurationMPEG25Layer3CBR(t *testing.T) {
+	// MPEG2.5 Layer3（version bits = 00）11025Hz：index 5 = 40kbps → 帧长
+	// 72*40000/11025 = 261 字节，500 帧 → 500*576/11025 s。误用 MPEG1 表时
+	// 按 64kbps（417 字节）算帧长，扫描失配 → 时长错误（本用例即失败）。
+	p := filepath.Join(t.TempDir(), "mpeg25.mp3")
+	var b []byte
+	for i := 0; i < 500; i++ {
+		b = append(b, mpegFrame(0, 1, 5, 0)...) // MPEG2.5 Layer3 40kbps 11025Hz
+	}
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := readDuration(p)
+	want := 500.0 * 576 / 11025 // ≈ 26.122
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("readDuration(MPEG2.5 Layer3 CBR) = %v，期望 ≈ %v", got, want)
+	}
+}
+
 func TestReadDurationMPEG2Xing(t *testing.T) {
 	// MPEG2 Layer3 + Xing（立体声 side info 17 字节，flags 仅 frames 位）→ 快路径
 	p := filepath.Join(t.TempDir(), "mpeg2-xing.mp3")
-	frame := mpegFrame(2, 1, 8, 0)                      // 208 字节：4 头 + 204 payload
+	frame := mpegFrame(2, 1, 8, 0)                      // MPEG2 表 index 8 = 64kbps → 208 字节：4 头 + 204 payload
 	xing := append([]byte("Xing"), be32(0x00000001)...) // flags: frames
 	xing = append(xing, be32(400)...)
 	copy(frame[17+4:], xing) // side info 17 字节后
