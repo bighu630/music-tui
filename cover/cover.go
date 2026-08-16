@@ -45,6 +45,26 @@ func NewFetcher(cacheDir string) (*Fetcher, error) {
 	}, nil
 }
 
+// CachedPath 只查缓存不下载：track 的缓存封面文件存在时返回其绝对路径与 true。
+// 本地歌曲（SourceLocal，ID 为绝对路径）与 YouTube（ID 为 video id）共用同一
+// 缓存命名（local-*.jpg / youtube-*.jpg），此处按 cacheFileName 计算路径后
+// os.Stat 判断存在性。ID 为空返回 false。不触发任何网络请求或标签读取。
+func CachedPath(dir string, track model.Track) (string, bool) {
+	if track.ID == "" {
+		return "", false
+	}
+	dest := filepath.Join(dir, cacheFileName(track.Source, track.ID)+".jpg")
+	if _, err := os.Stat(dest); err == nil {
+		return dest, true
+	}
+	return "", false
+}
+
+// CachedPath 只查缓存不下载（同包级 CachedPath，dir 用 f.dir）。
+func (f *Fetcher) CachedPath(track model.Track) (string, bool) {
+	return CachedPath(f.dir, track)
+}
+
 // Fetch 返回封面本地路径：磁盘缓存命中则直接返回；
 // 否则本地歌曲从文件标签提取内嵌封面（ID3v2 APIC / FLAC PICTURE / MP4 covr），
 // 其余来源沿降级链（maxresdefault→sddefault→hqdefault→mqdefault）下载；

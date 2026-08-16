@@ -79,6 +79,84 @@ func writeMP3WithAPIC(t *testing.T, path string, picData []byte) {
 	}
 }
 
+// TestCachedPath 只查缓存不下载：缓存文件存在返回 (绝对路径, true) 且文件名
+// 含正确来源前缀（local- / youtube-）；不存在返回 ("", false)；空 ID 返回
+// false；本地源与 YouTube 源同名 ID 互不串（不同缓存文件名）；无缓存且无
+// CoverURL 的曲目直接 false——不触发任何下载/联网（CachedPath 仅 os.Stat）。
+func TestCachedPath(t *testing.T) {
+	f, err := NewFetcher(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 预置缓存文件（命名与 cacheFileName 一致）：本地（ID 为绝对路径，含空格
+	// 与分隔符，须转义）与 YouTube（video id 无需转义）。
+	localID := filepath.Join(t.TempDir(), "a b", "song.mp3")
+	ytID := "dQw4w9WgXcQ"
+	localDest := filepath.Join(f.dir, cacheFileName(model.SourceLocal, localID)+".jpg")
+	ytDest := filepath.Join(f.dir, cacheFileName("youtube", ytID)+".jpg")
+	if err := os.WriteFile(localDest, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ytDest, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// (a) 缓存存在 → (绝对路径, true)，且路径含正确来源前缀
+	localTrack := model.Track{ID: localID, Source: model.SourceLocal, CoverURL: ""}
+	p, ok := f.CachedPath(localTrack)
+	if !ok || p != localDest {
+		t.Errorf("本地缓存命中: got (%q, %v), want (%q, true)", p, ok, localDest)
+	}
+	if !strings.Contains(filepath.Base(p), "local-") {
+		t.Errorf("本地缓存文件名应含 local- 前缀: %q", filepath.Base(p))
+	}
+	ytTrack := model.Track{ID: ytID, Source: "youtube", CoverURL: "http://x/y.jpg"}
+	p, ok = f.CachedPath(ytTrack)
+	if !ok || p != ytDest {
+		t.Errorf("YouTube 缓存命中: got (%q, %v), want (%q, true)", p, ok, ytDest)
+	}
+	if !strings.HasPrefix(filepath.Base(p), "youtube-") {
+		t.Errorf("YouTube 缓存文件名应含 youtube- 前缀: %q", filepath.Base(p))
+	}
+
+	// (b) 不存在 → ("", false)
+	if p, ok := f.CachedPath(model.Track{ID: "no-such-id", Source: "youtube"}); ok || p != "" {
+		t.Errorf("未命中应返回 (\"\", false): got (%q, %v)", p, ok)
+	}
+
+	// (c) 空 ID → false
+	if _, ok := f.CachedPath(model.Track{ID: "", Source: model.SourceLocal}); ok {
+		t.Error("空 ID 不应命中缓存")
+	}
+
+	// (d) 本地源与 YouTube 源同名 ID 互不串：只写 local- 文件，youtube 源不命中
+	shared := "same-id"
+	localShared := filepath.Join(f.dir, cacheFileName(model.SourceLocal, shared)+".jpg")
+	if err := os.WriteFile(localShared, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.CachedPath(model.Track{ID: shared, Source: "youtube"}); ok {
+		t.Error("同名 ID 的 YouTube 源不应命中 local- 缓存文件")
+	}
+	if _, ok := f.CachedPath(model.Track{ID: shared, Source: model.SourceLocal}); !ok {
+		t.Error("同名 ID 的本地源应命中 local- 缓存文件")
+	}
+
+	// (e) 无缓存且无 CoverURL → false（CachedPath 不触发下载，无网络路径）
+	if _, ok := f.CachedPath(model.Track{ID: "no-download", Source: "youtube", CoverURL: ""}); ok {
+		t.Error("无缓存且无 CoverURL 应返回 false（不触发下载）")
+	}
+
+	// 包级 CachedPath 与 Fetcher 方法一致（dir 显式传入）
+	p, ok = CachedPath(f.dir, localTrack)
+	if !ok || p != localDest {
+		t.Errorf("包级 CachedPath: got (%q, %v), want (%q, true)", p, ok, localDest)
+	}
+	if p, ok := CachedPath(f.dir, model.Track{ID: "", Source: "youtube"}); ok || p != "" {
+		t.Errorf("包级 CachedPath 空 ID: got (%q, %v), want (\"\", false)", p, ok)
+	}
+}
+
 // TestFetchLocalCover 本地歌曲：从标签提取内嵌封面写入缓存（路径可读、内容
 // 与内嵌一致、image.Decode 可解）；二次 Fetch 命中磁盘缓存（删除源文件后
 // 仍成功且返回同一 dest，证明未重读源文件）。

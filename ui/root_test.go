@@ -279,7 +279,7 @@ func newTestModelBaseWithCache(t *testing.T, fp *fakePlayer, fa *fakeSearchAdapt
 	}
 	return NewModel(fp, fa,
 		lyrics.NewClientWithBaseURL(lyricServer.URL, "music-tui test (https://example.com)"),
-		cf, hist, sess, pls, cm, yt, onTrack, false, nil)
+		cf, hist, sess, pls, cm, yt, onTrack, nil, false, nil)
 }
 
 // refreshYTStatus 把 store 的登录状态同步进模型与页面（直接 seed store 后调用）。
@@ -846,6 +846,38 @@ func TestStaleAsyncResultsIgnored(t *testing.T) {
 	if m.home.coverRenderCache != "" {
 		t.Error("过期封面结果不应被应用")
 	}
+}
+
+// TestCoverReadyCallback coverResultMsg 匹配当前曲目且成功时触发 onCoverReady
+//（MPRIS 重发 Metadata 回调）；失败或过期 trackID 不触发；nil 安全。
+func TestCoverReadyCallback(t *testing.T) {
+	fp := newFakePlayer()
+	calls := 0
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m.onCoverReady = func() { calls++ }
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	// 成功 + 匹配当前曲目 → 触发
+	m, _ = update(m, coverResultMsg{trackID: "t1", path: "/tmp/x.jpg"})
+	if calls != 1 {
+		t.Fatalf("匹配当前曲目且成功时应触发 onCoverReady: calls=%d", calls)
+	}
+	// 失败（err 非 nil）→ 不触发
+	m, _ = update(m, coverResultMsg{trackID: "t1", err: errors.New("boom")})
+	if calls != 1 {
+		t.Fatalf("失败不应触发 onCoverReady: calls=%d", calls)
+	}
+	// 过期 trackID（非当前曲目）→ 不触发
+	m, _ = update(m, coverResultMsg{trackID: "stale", path: "/tmp/y.jpg"})
+	if calls != 1 {
+		t.Fatalf("过期 trackID 不应触发 onCoverReady: calls=%d", calls)
+	}
+	// onCoverReady 为 nil（默认）→ 不 panic
+	m2 := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
+	m2, cmd = m2.startPlay(testTrack("t2"))
+	_ = execCmds(cmd)
+	_, _ = update(m2, coverResultMsg{trackID: "t2", path: "/tmp/z.jpg"})
 }
 
 func TestPlayFailureShowsError(t *testing.T) {

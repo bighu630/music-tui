@@ -107,6 +107,10 @@ func run() error {
 	// 3.5 MPRIS 服务（仅 Linux 有效；非 Linux 为 no-op 桩）。
 	// 连接/注册失败仅警告，绝不影响播放器主功能。
 	mprisSrv := mpris.NewServer(mpv)
+	// 封面缓存目录注入：metadataFor 命中缓存时 artUrl 用 file:// 本地路径
+	//（本地歌曲 CoverURL 恒空、YouTube 原始 URL 常 404）；与 cover.NewFetcher
+	// 同一路径表达式。
+	mprisSrv.SetCoverCacheDir(filepath.Join(cacheRoot, "music-tui", "covers"))
 	if err := mprisSrv.Start(); err != nil {
 		logger.Warn("MPRIS 服务不可用（不影响播放器）: %v", err)
 	} else {
@@ -150,6 +154,7 @@ func run() error {
 		cm,
 		ytm.NewClient(ytStore, searchAdapter),
 		mprisSrv.SetTrack,
+		mprisSrv.RefreshMetadata, // 封面下载完成 → 重发带 file:// 缓存路径的 Metadata
 		cookieFile != "" || len(ytdlpHeaders) > 0,
 		lyricFile,
 	)
