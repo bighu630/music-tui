@@ -177,6 +177,14 @@ type homeModel struct {
 
 	coverRenderCache string // 封面渲染缓存：setCover 时渲染一次（固定 30×17 字符画，不依赖终端尺寸）
 	coverFallback    bool   // 封面加载失败 → 占位框
+
+	// 中间区渲染缓存（P1-2）：中间区内容仅随封面/歌词/尺寸变化，播放中进度
+	// 推进每帧直接复用（省去 3 个全屏 lipgloss.Place + 逐行宽度计算，渲染 CPU
+	// 热点）。在内容变化点（setCover/setLyrics/syncState 行切换/setSize/滚轮）
+	// 重建；歌词加载中 spinner 每帧动画，读取时跳过缓存。
+	middleCache  string
+	middleCacheW int
+	middleCacheH int
 }
 
 func newHomeModel(p player.Player) homeModel {
@@ -251,6 +259,7 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 					} else if msg.Button == tea.MouseButtonWheelDown {
 						m.lyricView.SetYOffset(m.lyricView.YOffset + 3)
 					}
+					m = m.rebuildMiddleCache() // 滚动改变视口输出：中间区缓存重建
 				}
 			}
 			return m, nil
@@ -304,6 +313,7 @@ func (m homeModel) resetForTrack(track *model.Track) homeModel {
 	m.lyricView.SetContent("")
 	m.coverRenderCache = ""
 	m.coverFallback = false
+	m.middleCache = "" // 内容全部作废：中间区缓存失效（loading 态读取时也跳过）
 	m.aiTitle, m.aiArtist = "", ""
 	// 切歌:文件写入新曲目歌名(歌词加载中/无歌词期间 OBS 等展示歌名)。
 	// 注意 trackLabel 在 aiTitle 清空后取原始标题+歌手。
@@ -370,6 +380,9 @@ func (m homeModel) syncState(state model.PlaybackState) homeModel {
 			if idx >= 0 {
 				m.scrollLyricsTo(idx)
 			}
+			// 行切换：歌词内容/滚动位置变化，中间区缓存重建
+			//（注意必须在 scrollLyricsTo 之后：滚动改变视口输出）。
+			return m.rebuildMiddleCache()
 		}
 	}
 	return m
@@ -390,7 +403,7 @@ func (m homeModel) setLyrics(err error, ly *lyrics.Lyrics) homeModel {
 	}
 	if err != nil || ly == nil {
 		m.lyricsState = lyricsNone
-		return m
+		return m.rebuildMiddleCache()
 	}
 	if len(ly.Lines) > 0 {
 		m.lyrics = ly
@@ -402,7 +415,7 @@ func (m homeModel) setLyrics(err error, ly *lyrics.Lyrics) homeModel {
 	} else {
 		m.lyricsState = lyricsNone
 	}
-	return m
+	return m.rebuildMiddleCache()
 }
 
 // currentLyricText 返回当前高亮歌词行文本（同步歌词态且有高亮行时）；
@@ -424,7 +437,7 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 	}
 	if err != nil {
 		m.coverFallback = true
-		return m
+		return m.rebuildMiddleCache()
 	}
 	// 自绘像素封面：图片 → 缩放 → 固定 coverW×coverH 半块字符画。
 	// 弃用 go-termimg（mosaic 尺寸单位是像素需 ×2 折算、tmux 下渲染输出
@@ -433,22 +446,22 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 	f, err := os.Open(path)
 	if err != nil {
 		m.coverFallback = true
-		return m
+		return m.rebuildMiddleCache()
 	}
 	defer f.Close()
 	img, _, err := image.Decode(f)
 	if err != nil {
 		m.coverFallback = true
-		return m
+		return m.rebuildMiddleCache()
 	}
 	s := renderCoverArt(img, coverW, coverH)
 	if s == "" {
 		m.coverFallback = true
-		return m
+		return m.rebuildMiddleCache()
 	}
 	m.coverRenderCache = s
 	m.coverFallback = false
-	return m
+	return m.rebuildMiddleCache()
 }
 
 // setSize 响应窗口尺寸变化。
@@ -469,7 +482,8 @@ func (m homeModel) setSize(width, height int) homeModel {
 			m.scrollLyricsTo(m.currentLine)
 		}
 	}
-	return m
+	// 尺寸变化：中间区几何/裁剪全部随之变化，缓存必须重建
+	return m.rebuildMiddleCache()
 }
 
 // lyricsHeight 歌词视口高度：动态行数 min(21, 中间区高−上下各 2 行留白)，
@@ -548,13 +562,38 @@ func (m homeModel) lyricsColumnWidth() int {
 
 // middleView 中间区（占 height-2 行）：封面列与歌词列水平并排（gap 2），
 // 整体在页面宽度内水平居中；封面与歌词内容各自在列内垂直居中。
+// 读取渲染缓存：中间区内容仅随封面/歌词/尺寸变化，播放中进度推进（5fps）
+// 每帧直接复用缓存（省去 3 个全屏 Place + 逐行宽度计算）；缓存缺失时现场
+// 渲染兜底（不应发生：所有内容变化点都会重建）。
 func (m homeModel) middleView() string {
+	if m.middleCache != "" && m.middleCacheW == m.width && m.middleCacheH == m.middleHeight() &&
+		m.lyricsState != lyricsLoading { // 加载中 spinner 每帧动画，不缓存
+		return m.middleCache
+	}
+	return m.renderMiddleView()
+}
+
+// renderMiddleView 渲染中间区（封面列 + 歌词列 + 整体居中）。
+func (m homeModel) renderMiddleView() string {
 	midH := m.middleHeight()
 	lyricsW := m.lyricsColumnWidth()
 	coverCol := lipgloss.Place(coverW, midH, lipgloss.Center, lipgloss.Center, m.coverView())
 	lyricsCol := lipgloss.Place(lyricsW, midH, lipgloss.Center, lipgloss.Center, m.lyricsColumnView())
 	block := lipgloss.JoinHorizontal(lipgloss.Top, coverCol, "  ", lyricsCol)
 	return lipgloss.Place(m.width, midH, lipgloss.Center, lipgloss.Center, block)
+}
+
+// rebuildMiddleCache 在中间区内容变化点重建渲染缓存（返回携带新缓存的模型）。
+// 尺寸未初始化（width/height<=0）时清空缓存（渲染无意义）。
+func (m homeModel) rebuildMiddleCache() homeModel {
+	if m.width <= 0 || m.height <= 0 {
+		m.middleCache = ""
+		return m
+	}
+	m.middleCache = m.renderMiddleView()
+	m.middleCacheW = m.width
+	m.middleCacheH = m.middleHeight()
+	return m
 }
 
 // lyricsColumnView 按三种歌词态渲染歌词列内容（居中由外层 Place 处理；
