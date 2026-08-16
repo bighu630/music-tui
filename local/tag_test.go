@@ -4,7 +4,10 @@ package local
 // 覆盖 readTags（ID3 标签优先语义）与 readDuration（mp3/flac/m4a/wav 解析）。
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
+	"image/png"
 	"math"
 	"os"
 	"path/filepath"
@@ -141,6 +144,55 @@ func writeID3v2MP3(t *testing.T, path, title, artist string, frames int) {
 	}
 }
 
+// minimalPNG 是最小合法 1×1 透明 PNG（67 字节标准序列，png.Decode 可解），
+// 用作内嵌封面 fixture（字节级构造，不依赖 image/png 编码器）。
+var minimalPNG = []byte{
+	0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG 签名
+	0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR（13 字节）
+	0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1×1
+	0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, // bit depth 8 / RGBA + CRC
+	0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, // IDAT（10 字节）
+	0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, // zlib 数据
+	0x0D, 0x0A, 0x2D, 0xB4, // IDAT CRC
+	0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82, // IEND
+}
+
+// writeID3v2MP3WithAPIC 写一个带内嵌封面的 ID3v2.3 mp3：在 writeID3v2MP3 的
+// TIT2/TPE1 基础上追加 APIC 帧（encoding 0x00 + MIME "image/png\x00" +
+// picture type 0x03 + 空描述 "\x00" + 图片数据）。title/artist 为空时对应帧省略。
+func writeID3v2MP3WithAPIC(t *testing.T, path, title, artist string, picData []byte) {
+	t.Helper()
+	var tagBody []byte
+	if title != "" {
+		tagBody = append(tagBody, id3TextFrame("TIT2", title)...)
+	}
+	if artist != "" {
+		tagBody = append(tagBody, id3TextFrame("TPE1", artist)...)
+	}
+	content := []byte{0x00} // encoding：latin-1
+	content = append(content, "image/png"...)
+	content = append(content, 0x00) // MIME 结束
+	content = append(content, 0x03) // picture type：front cover
+	content = append(content, 0x00) // 空描述（latin-1 以 $00 结束）
+	content = append(content, picData...)
+	apic := append([]byte("APIC"), be32(uint32(len(content)))...)
+	apic = append(apic, 0x00, 0x00) // frame flags
+	apic = append(apic, content...)
+	tagBody = append(tagBody, apic...)
+
+	var b []byte
+	b = append(b, "ID3"...)
+	b = append(b, 0x03, 0x00, 0x00) // v2.3，revision 0，无 flags
+	b = append(b, syncsafe(len(tagBody))...)
+	b = append(b, tagBody...)
+	for i := 0; i < 3; i++ {
+		b = append(b, mp3Frame(9)...) // 128kbps
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // writeFLAC 写一个最小 FLAC：fLaC + STREAMINFO（sample rate 44100、双声道 16bit、
 // total samples 参数）+ 收尾块。
 func writeFLAC(t *testing.T, path string, totalSamples uint64) {
@@ -244,6 +296,49 @@ func writeM4Av1(t *testing.T, path string, durationMillis uint64) {
 	b = append(b, moov...)
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ---- Picture（内嵌封面提取）----
+
+func TestPictureExtract(t *testing.T) {
+	// fixture 本身必须是合法 PNG（cover 层提取后还会 image.Decode 校验）
+	if _, err := png.Decode(bytes.NewReader(minimalPNG)); err != nil {
+		t.Fatalf("fixture PNG 无效: %v", err)
+	}
+
+	p := filepath.Join(t.TempDir(), "cover.mp3")
+	writeID3v2MP3WithAPIC(t, p, "晴天", "周杰伦", minimalPNG)
+
+	data, err := Picture(p)
+	if err != nil {
+		t.Fatalf("Picture(%q): %v", p, err)
+	}
+	if !bytes.Equal(data, minimalPNG) {
+		t.Errorf("Picture 返回数据与内嵌 APIC 不一致（%d vs %d 字节）", len(data), len(minimalPNG))
+	}
+}
+
+func TestPictureNoEmbedded(t *testing.T) {
+	dir := t.TempDir()
+
+	// 有标签但无 APIC → ErrNoPicture
+	noPic := filepath.Join(dir, "nopic.mp3")
+	writeID3v2MP3(t, noPic, "晴天", "周杰伦", 3)
+	if _, err := Picture(noPic); !errors.Is(err, ErrNoPicture) {
+		t.Errorf("Picture(无 APIC) err = %v，期望 ErrNoPicture", err)
+	}
+
+	// 无标签纯帧 → 错误
+	plain := filepath.Join(dir, "plain.mp3")
+	writeID3v2MP3(t, plain, "", "", 3)
+	if _, err := Picture(plain); err == nil {
+		t.Error("Picture(无标签) 应报错")
+	}
+
+	// 不存在的文件 → 错误
+	if _, err := Picture(filepath.Join(dir, "no-such.mp3")); err == nil {
+		t.Error("Picture(不存在文件) 应报错")
 	}
 }
 
