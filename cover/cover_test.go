@@ -3,6 +3,7 @@ package cover
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"image"
 	"image/png"
 	"net/http"
@@ -36,6 +37,173 @@ func writePNG(t *testing.T, w http.ResponseWriter) {
 		return
 	}
 	_, _ = w.Write(data)
+}
+
+// ---- 本地内嵌封面（fixture 构造）----
+
+func be32(n uint32) []byte {
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, n)
+	return b
+}
+
+func syncsafe(n int) []byte {
+	return []byte{
+		byte(n >> 21 & 0x7F), byte(n >> 14 & 0x7F), byte(n >> 7 & 0x7F), byte(n & 0x7F),
+	}
+}
+
+// writeMP3WithAPIC 写一个带 ID3v2.3 APIC 帧（image/png）的最小 mp3 fixture。
+// 与 local 包测试的 writeID3v2MP3WithAPIC 各自独立构造（cover 是独立包，
+// 不借道 local 的未导出 helper）；dhowden/tag 只需文件以 "ID3" 开头即可
+// 解析，无需真实音频帧。
+func writeMP3WithAPIC(t *testing.T, path string, picData []byte) {
+	t.Helper()
+	content := []byte{0x00} // encoding：latin-1
+	content = append(content, "image/png"...)
+	content = append(content, 0x00) // MIME 结束
+	content = append(content, 0x03) // picture type：front cover
+	content = append(content, 0x00) // 空描述（latin-1 以 $00 结束）
+	content = append(content, picData...)
+	frame := append([]byte("APIC"), be32(uint32(len(content)))...)
+	frame = append(frame, 0x00, 0x00) // frame flags
+	frame = append(frame, content...)
+
+	var b []byte
+	b = append(b, "ID3"...)
+	b = append(b, 0x03, 0x00, 0x00) // v2.3，revision 0，无 flags
+	b = append(b, syncsafe(len(frame))...)
+	b = append(b, frame...)
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFetchLocalCover 本地歌曲：从标签提取内嵌封面写入缓存（路径可读、内容
+// 与内嵌一致、image.Decode 可解）；二次 Fetch 命中磁盘缓存（返回值一致）。
+func TestFetchLocalCover(t *testing.T) {
+	f, err := NewFetcher(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pic, err := pngBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "cover.mp3")
+	writeMP3WithAPIC(t, p, pic)
+	tr := model.Track{ID: p, URL: p, Source: model.SourceLocal}
+
+	got, err := f.Fetch(context.Background(), tr)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	data, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatalf("读取缓存: %v", err)
+	}
+	if _, _, err := image.Decode(bytes.NewReader(data)); err != nil {
+		t.Errorf("缓存文件不是有效图片: %v", err)
+	}
+	if !bytes.Equal(data, pic) {
+		t.Errorf("缓存内容与内嵌封面不一致")
+	}
+
+	// 二次 Fetch：命中磁盘缓存（返回值一致、不重新提取）
+	again, err := f.Fetch(context.Background(), tr)
+	if err != nil {
+		t.Fatalf("二次 Fetch: %v", err)
+	}
+	if again != got {
+		t.Errorf("二次 Fetch 返回 %q，期望命中缓存 %q", again, got)
+	}
+}
+
+// TestFetchLocalCoverNoPicture 本地文件无内嵌封面/读取失败 → 报错
+// （调用方显示占位框，与 YouTube 无封面一致）。
+func TestFetchLocalCoverNoPicture(t *testing.T) {
+	f, err := NewFetcher(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 无 APIC 的 mp3（ID3v2.3 空标签 + padding 补齐）→ "内嵌封面" 错误
+	noPic := filepath.Join(t.TempDir(), "nopic.mp3")
+	var b []byte
+	b = append(b, "ID3"...)
+	b = append(b, 0x03, 0x00, 0x00)
+	b = append(b, syncsafe(0)...)
+	b = append(b, make([]byte, 32)...) // padding（tag.ReadFrom 需读足 11 字节探测格式）
+	if err := os.WriteFile(noPic, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Fetch(context.Background(), model.Track{ID: noPic, URL: noPic, Source: model.SourceLocal}); err == nil || !strings.Contains(err.Error(), "内嵌封面") {
+		t.Errorf("Fetch(无 APIC) err = %v，期望含 \"内嵌封面\"", err)
+	}
+
+	// 文件不存在 → "读取封面失败" 错误
+	missing := filepath.Join(t.TempDir(), "no-such.mp3")
+	if _, err := f.Fetch(context.Background(), model.Track{ID: missing, URL: missing, Source: model.SourceLocal}); err == nil || !strings.Contains(err.Error(), "读取封面失败") {
+		t.Errorf("Fetch(文件不存在) err = %v，期望含 \"读取封面失败\"", err)
+	}
+}
+
+// TestFetchLocalCoverCacheName 本地 ID（绝对路径，含 /）转义为缓存文件名：
+// dest 在缓存目录内（无子目录创建）、文件可读。
+func TestFetchLocalCoverCacheName(t *testing.T) {
+	f, err := NewFetcher(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pic, err := pngBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "sub", "dir", "song.mp3")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeMP3WithAPIC(t, p, pic)
+	tr := model.Track{ID: p, URL: p, Source: model.SourceLocal}
+
+	got, err := f.Fetch(context.Background(), tr)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if filepath.Dir(got) != f.dir {
+		t.Errorf("dest 目录 = %q，期望缓存目录 %q（ID 含 / 必须转义）", filepath.Dir(got), f.dir)
+	}
+	// 缓存目录下不得创建子目录（路径分隔符已替换为 _）
+	entries, err := os.ReadDir(f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			t.Errorf("缓存目录下创建了子目录 %q（应转义为文件名）", e.Name())
+		}
+	}
+	if _, err := os.ReadFile(got); err != nil {
+		t.Errorf("缓存文件不可读: %v", err)
+	}
+}
+
+// TestCacheFileNameEscapesPath 路径分隔符/非法字符转义为 '_'，YouTube ID 不受影响。
+func TestCacheFileNameEscapesPath(t *testing.T) {
+	cases := []struct {
+		source, id, want string
+	}{
+		{"youtube", "abc", "youtube-abc"},                         // YouTube ID（[A-Za-z0-9_-]）不受影响
+		{"local", `/a/b/c.mp3`, "local-_a_b_c.mp3"},               // 路径分隔符 → _
+		{"local", `C:\music\song.mp3`, "local-C__music_song.mp3"}, // Windows 分隔符/冒号 → _
+		{"local", "a b?.mp3", "local-a_b_.mp3"},                   // 空格与非法字符 → _
+		{"local", "中文.mp3", "local-__.mp3"},                       // Unicode 非 ASCII → _
+	}
+	for _, c := range cases {
+		if got := cacheFileName(c.source, c.id); got != c.want {
+			t.Errorf("cacheFileName(%q, %q) = %q, want %q", c.source, c.id, got, c.want)
+		}
+	}
 }
 
 func TestFetchMaxresSuccess(t *testing.T) {

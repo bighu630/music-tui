@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"music-tui/local"
 	"music-tui/model"
 )
 
@@ -45,16 +46,21 @@ func NewFetcher(cacheDir string) (*Fetcher, error) {
 }
 
 // Fetch 返回封面本地路径：磁盘缓存命中则直接返回；
-// 否则沿降级链（maxresdefault→sddefault→hqdefault→mqdefault）下载，
-// 校验图片有效性后原子写入缓存。全部失败返回聚合错误（调用方显示占位框）。
+// 否则本地歌曲从文件标签提取内嵌封面（ID3v2 APIC / FLAC PICTURE / MP4 covr），
+// 其余来源沿降级链（maxresdefault→sddefault→hqdefault→mqdefault）下载；
+// 校验图片有效性后原子写入缓存。全部失败返回错误（调用方显示占位框）。
 func (f *Fetcher) Fetch(ctx context.Context, track model.Track) (string, error) {
 	if track.ID == "" {
 		return "", errors.New("track ID 为空")
 	}
-	dest := filepath.Join(f.dir, track.Source+"-"+track.ID+".jpg")
-	// 缓存按 ID+Source 键控，命中时无需 CoverURL。
+	dest := filepath.Join(f.dir, cacheFileName(track.Source, track.ID)+".jpg")
+	// 缓存按 ID+Source 键控，命中时无需 CoverURL、无需重新提取。
 	if _, err := os.Stat(dest); err == nil {
 		return dest, nil
+	}
+	// 本地歌曲无 CoverURL：从文件标签提取内嵌封面。
+	if track.Source == model.SourceLocal {
+		return f.fetchLocalCover(ctx, track, dest)
 	}
 	if track.CoverURL == "" {
 		return "", errors.New("封面 URL 为空")
@@ -90,9 +96,54 @@ func thumbURL(base, size string) (string, error) {
 	return u.String(), nil
 }
 
-// download 下载并校验图片，写入唯一临时文件后原子重命名到 dest。
-// 并发安全：每次调用使用独立的 CreateTemp 临时文件（并发下不会互相覆盖或
-// ENOENT）；Rename 失败但 dest 已存在时视为成功（并发下对方已完成写入）。
+// cacheFileName 把 (source, id) 安全化为缓存文件名（不含扩展名）。
+//
+// 本地曲目的 ID 是文件绝对路径（含 /、\ 等分隔符与空格），直接拼接会让
+// dest 变成子目录路径导致写入失败甚至逃逸缓存目录。此处按 cache.SafeName
+// 的思路保留 [A-Za-z0-9._-]、其余字符（含路径分隔符、Windows 非法字符、
+// Unicode 非 ASCII）统一替换为 '_'；但 cover 不依赖 cache 包，独立实现。
+// 与 SafeName 不同，不截断——转义是一一映射（不同 ID 不会串名），长度由
+// 操作系统路径上限约束。YouTube ID（[A-Za-z0-9_-]）不受影响。
+func cacheFileName(source, id string) string {
+	out := make([]byte, 0, len(source)+1+len(id))
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-':
+		default:
+			r = '_'
+		}
+		out = append(out, byte(r)) // 非 ASCII rune 已在 default 分支转 '_'（直接截断 byte(r) 会漏网）
+	}
+	return source + "-" + string(out)
+}
+
+// fetchLocalCover 从本地音频文件标签提取内嵌封面（local.Picture），校验
+// 图片有效性后原子写入缓存。无内嵌封面/提取失败返回错误（调用方显示占位
+// 框，与 YouTube 无封面一致）。
+func (f *Fetcher) fetchLocalCover(ctx context.Context, track model.Track, dest string) (string, error) {
+	data, err := local.Picture(track.URL)
+	if err != nil {
+		if errors.Is(err, local.ErrNoPicture) {
+			return "", errors.New("本地文件无内嵌封面")
+		}
+		return "", fmt.Errorf("读取封面失败: %v", err)
+	}
+	if len(data) >= maxCoverBytes {
+		return "", fmt.Errorf("封面超过大小上限 %d 字节", maxCoverBytes)
+	}
+	if _, _, err := image.Decode(bytes.NewReader(data)); err != nil {
+		return "", fmt.Errorf("封面不是有效图片: %w", err)
+	}
+	if err := f.saveCache(data, dest); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
+// download 下载并校验图片，随后 saveCache 原子写入 dest。
 func (f *Fetcher) download(ctx context.Context, u, dest string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -116,6 +167,14 @@ func (f *Fetcher) download(ctx context.Context, u, dest string) error {
 	if _, _, err := image.Decode(bytes.NewReader(data)); err != nil {
 		return fmt.Errorf("封面不是有效图片: %w", err)
 	}
+	return f.saveCache(data, dest)
+}
+
+// saveCache 把封面数据原子写入 dest：先写唯一临时文件再重命名。
+// 并发安全：每次调用使用独立的 CreateTemp 临时文件（并发下不会互相覆盖或
+// ENOENT）；Rename 失败但 dest 已存在时视为成功（并发下对方已完成写入）。
+// 由 download 与 fetchLocalCover 共用。
+func (f *Fetcher) saveCache(data []byte, dest string) error {
 	tmp, err := os.CreateTemp(f.dir, "*.tmp")
 	if err != nil {
 		return err
