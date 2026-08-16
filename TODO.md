@@ -191,6 +191,8 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] P0-1 ProgressEvent 200ms 合并节流（progressThrottle，20fps→5fps 渲染）
 - [x] P0-2 spinner tick 按需续发（spinnerTickCmd 工厂修复一次性 timer 死锁 + tickLive 防双链 + loading 显式复位）
 - [x] P1-1 鼠标事件降级 WithMouseCellMotion（点击/滚轮/跨格移动保留）
-- [x] P1-2 跳过（5fps 下收益边际，评估见会话记录）
-- [x] 测试：节流窗口单测 6 项 + spinner 状态机 6 项 + 既有套件全绿（ui 114s、-race 关键组通过）
-- [x] 待办：真实播放 CPU 实测（pidstat 优化前后对比）、用户验收
+- [x] P1-2 评估后实施：实测发现渲染成本仍高（ansistringWidth 26%+GC），实现中间区渲染缓存（middleCache，5 个失效点+命中路径测试）；lineProgressBar 缓存跳过（~20µs/帧可忽略）
+- [x] 实测追加热点：MPRIS refreshNav 每事件 2 次 EmitTrue 广播（~3% CPU），值守卫修复（mpris 包，测试观测 SetMust 次数）
+- [x] 测试：节流窗口单测 6 项 + spinner 状态机 7 项 + 中间区缓存 6 项 + 既有套件全绿（ui 114s、-race 关键组通过）
+- [x] CPU 实测（同曲同协议 pidstat）：优化前播放中 10.40% → 优化后 3.33%；暂停 0.90-1.10%
+- [x] 待办：用户实测确认（歌词/进度同步、鼠标点击、悬停高亮取舍）
