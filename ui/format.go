@@ -20,6 +20,14 @@ func formatDuration(sec float64) string {
 	return fmt.Sprintf("%02d:%02d", m, s)
 }
 
+// formatTrackDuration 格式化曲目时长：sec<=0（时长未知，本地音乐解析失败为 0）时不显示，返回空串。
+func formatTrackDuration(sec float64) string {
+	if sec <= 0 {
+		return ""
+	}
+	return formatDuration(sec)
+}
+
 // formatPlayedAt 把播放时间格式化为"今天 15:04 / 昨天 15:04 / 2006-01-02 15:04"。
 // now 参数注入便于测试。
 func formatPlayedAt(t time.Time, now time.Time) string {

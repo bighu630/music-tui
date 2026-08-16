@@ -36,7 +36,7 @@ type trackItem struct {
 }
 
 func (i trackItem) Title() string {
-	return formatTrackLine(i.track.Title, i.track.Artist, formatDuration(i.track.Duration))
+	return formatTrackLine(i.track.Title, i.track.Artist, formatTrackDuration(i.track.Duration))
 }
 func (i trackItem) Description() string { return "" }
 func (i trackItem) FilterValue() string { return i.track.Title + " " + i.track.Artist }
