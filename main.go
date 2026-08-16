@@ -24,6 +24,7 @@ import (
 	"music-tui/playlists"
 	"music-tui/search"
 	"music-tui/session"
+	"music-tui/singleinstance"
 	"music-tui/ui"
 	"music-tui/ytm"
 )
@@ -55,6 +56,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+
+	// 1.5 单实例检测：已有实例在运行则报错退出（Unix: flock，内核自动释放；
+	// 非 Unix: pid 文件 + 陈旧检测）。锁持有至 run 返回。
+	lock, err := singleinstance.Acquire(filepath.Join(os.TempDir(), "music-tui.lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 
 	// 2. 数据目录准备
 	cfgRoot, err := os.UserConfigDir()
