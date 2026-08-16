@@ -384,21 +384,28 @@ func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cove
 		m.queue.Restore(st.Queue)
 		if cur, ok := m.queue.Current(); ok {
 			pos := st.Position
-			if pos < 0 {
-				pos = 0
-			}
-			// 上界 clamp：损坏但可解析的超大进度按曲目时长收口
-			if cur.Duration > 0 && pos > cur.Duration {
-				pos = cur.Duration
-			}
 			if st.Ended {
 				// 退出时已播完：有下一首则从下一首开头（暂停），否则当前曲从头
 				if next, ok := m.queue.Next(); ok {
 					cur = next
-					pos = 0
-				} else {
-					pos = 0
 				}
+				pos = 0
+			}
+			if pos < 0 {
+				pos = 0
+			}
+			// 本地曲目元数据刷新：会话快照可能带陈旧 Duration=0（时长解析上线
+			// 前扫描固化）。恢复走 PlayPaused 不经过 beginPlay，必须在此单独
+			// 刷新——且必须放在 Ended 分支之后：Ended 且有下一首时 cur 被
+			// queue.Next() 的陈旧快照覆盖（Next 返回队列内副本，Duration 仍为
+			// 0），提前刷新会被丢弃，恢复的曲目仍 Duration=0——客户端守卫虽
+			// 防住 lrclib /api/get 400，但 search 兜底按 30s 阈值过滤会把真实
+			// 歌曲全部超限，静默无歌词。对最终 cur 统一刷新一次后，下方 pos
+			// clamp 与恢复后的歌词请求均使用真实时长。失败沿用原值不阻断恢复。
+			cur = refreshLocalMetadata(cur)
+			// 上界 clamp：损坏但可解析的超大进度按曲目时长收口
+			if cur.Duration > 0 && pos > cur.Duration {
+				pos = cur.Duration
 			}
 			m.state = model.PlaybackState{Track: &cur, Position: pos, Duration: cur.Duration, Playing: false}
 			m.home = m.home.resetForTrack(&cur)
@@ -1717,6 +1724,30 @@ func (m Model) playQueueTrack() (Model, tea.Cmd) {
 	return m.beginPlay(tr)
 }
 
+// refreshLocalMetadata 对本地曲目重新读取标签元数据（Duration/Title/Artist
+// 全量刷新，标签优先语义与 local.FromPath 一致）：播放列表/会话 JSON 快照
+// 可能携带时长解析功能上线前扫描固化的陈旧 Duration=0——播放/恢复前刷新，
+// 歌词请求（fetchLyricsCmd 的 /api/get）才携带真实时长，防 lrclib 因
+// duration<1 拒绝请求（400）导致精确匹配链路中断。
+// 刷新失败（文件被删等）沿用原 track 并记 Debug 日志，不阻断播放。
+//
+// 门控：仅 Duration<1（陈旧时长签名，即 400 问题的实际触发条件）时执行
+// FromPath 同步文件 I/O；时长正确的曲目零开销跳过——本地每次切歌/恢复都
+// 刷新会阻塞 UI 消息循环（最坏 VBR MP3 无 Xing 头逐帧扫描 100-300ms+）。
+// 陈旧 Title/Artist 一并跳过：两者不参与歌词链破坏（lrclib 400 根因是
+// duration<1，标题/歌手陈旧仅影响匹配精度，不中断请求）。
+func refreshLocalMetadata(track model.Track) model.Track {
+	if track.Source != model.SourceLocal || track.Duration >= 1 {
+		return track
+	}
+	fresh, err := local.FromPath(track.URL)
+	if err != nil {
+		logger.Debug("本地曲目元数据刷新失败，沿用快照值: %s: %v", track.URL, err)
+		return track
+	}
+	return fresh
+}
+
 // beginPlay 核心播放流程：置播放状态、同步调用 player.Play（
 // root_test 的 TestPlayFlow 在 update 返回后立即断言 playCount，故必须同步）、
 // 刷新队列展示；成功时并行触发 歌词/封面/历史 三个异步 cmd，
@@ -1729,6 +1760,10 @@ func (m Model) playQueueTrack() (Model, tea.Cmd) {
 // 永不耗尽（回归：TestLoadFailRetriesExhaustedSkipsInQueue/StopsSingle）；
 // 预算在 TrackStarted/TrackEnded/手动播放入口重置。
 func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
+	// 本地曲目元数据刷新：持久化快照可能带陈旧 Duration=0（时长解析上线前
+	// 扫描），刷新后后续 fetchLyricsCmd 携带真实时长，防 lrclib /api/get 400。
+	// 失败沿用原 track 不阻断播放。
+	track = refreshLocalMetadata(track)
 	m.resuming = false // 任何 beginPlay = 用户新意图或重试：恢复上下文作废
 	// （重试路径不会在 resuming=true 时发生——恢复中取流失败走恢复失败分支，不调度重试）
 	m.playGen++ // 播放代际递增：使在途重试消息过期（用户换曲后不再重试旧曲）

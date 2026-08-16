@@ -23,12 +23,20 @@ import (
 )
 
 // newResumeTestModel 组装带指定会话状态的测试 model（会话文件已写入 st）。
+// 歌词服务器固定 404；需要断言歌词请求时用 newResumeTestModelWithLyricsHandler。
 func newResumeTestModel(t *testing.T, st *session.State, onTrack func(*model.Track)) (Model, *fakePlayer) {
 	t.Helper()
-	fp := newFakePlayer()
-	lyricServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newResumeTestModelWithLyricsHandler(t, st, onTrack, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
+}
+
+// newResumeTestModelWithLyricsHandler 同 newResumeTestModel，但歌词服务器
+// 处理器由调用方指定（如记录请求参数的 server，供端到端断言）。
+func newResumeTestModelWithLyricsHandler(t *testing.T, st *session.State, onTrack func(*model.Track), lyricHandler http.Handler) (Model, *fakePlayer) {
+	t.Helper()
+	fp := newFakePlayer()
+	lyricServer := httptest.NewServer(lyricHandler)
 	t.Cleanup(lyricServer.Close)
 
 	hist, err := history.NewStore(filepath.Join(t.TempDir(), "history.json"))

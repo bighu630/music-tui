@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"music-tui/logger"
 	"music-tui/model"
 )
 
@@ -99,15 +100,17 @@ func (c *Client) FetchForQuery(ctx context.Context, title, artist string, durati
 	return c.fetchOne(ctx, track, title, artist != "", maxAIDurationDelta)
 }
 
-// fetchOne 对单个候选标题查询：withArtist=true 时先 /api/get
+// fetchOne 对单个候选标题查询：withArtist=true 且时长已知时先 /api/get
 // 精确命中，404 或歌词为空时降级 /api/search 并选择时长最接近的匹配
 // （阈值 maxDelta）；withArtist=false 时跳过 get 直接 search（不带
 // artist 参数）。未命中返回 ErrNotFound，由 Fetch 决定是否尝试下一候选。
 func (c *Client) fetchOne(ctx context.Context, track model.Track, cand string, withArtist bool, maxDelta float64) (*Lyrics, error) {
 	base := strings.TrimSuffix(c.baseURL, "/")
-	if withArtist && track.Artist != "" {
+	if withArtist && track.Artist != "" && track.Duration >= 1 {
 		// /api/get 必须带 artist_name，否则 lrclib 返回 400 中断整条链；
-		// artist 为空时跳过 get 直接走 search。
+		// artist 为空时跳过 get 直接走 search。时长未知（Duration<1，如
+		// 本地文件快照未持久化时长）同理：lrclib 对 duration<1 返回 400，
+		// 同样跳过 get 直接走 search。
 		var song lrclibSong
 		q := url.Values{}
 		q.Set("track_name", cand)
@@ -123,7 +126,13 @@ func (c *Client) fetchOne(ctx context.Context, track model.Track, cand string, w
 			}
 			err = ErrNotFound // 200 但歌词为空或时长超限：视同未命中，降级 search
 		}
-		if !errors.Is(err, ErrNotFound) {
+		var httpErr *httpStatusError
+		if errors.As(err, &httpErr) && httpErr.code == http.StatusBadRequest {
+			// lrclib /api/get 对 duration<1 等非法参数返回 400（本地文件
+			// 快照 Duration=0 即此类，实证中断整条链）：视为可降级，记录
+			// Warn 后继续走 search。其他状态码（含 5xx 重试耗尽）仍硬失败。
+			logger.Warn("lrclib /api/get 400（时长无效或请求被拒），降级 search: %s", u)
+		} else if !errors.Is(err, ErrNotFound) {
 			return nil, err
 		}
 	}
@@ -144,8 +153,22 @@ func (c *Client) fetchOne(ctx context.Context, track model.Track, cand string, w
 	return nil, ErrNotFound
 }
 
-// do 发起 GET 并解码 JSON 到 out；404 → ErrNotFound；
-// 429 按 Retry-After 等待后重试一次（最多两次请求）。
+// httpStatusError 是 lrclib 返回非 2xx/404/429 状态码（含 5xx 重试耗尽）
+// 时的错误，携带状态码与请求 URL：调用方可用 errors.As 按 code 决定
+// 降级策略（如 /api/get 400 → 降级 search）。
+type httpStatusError struct {
+	code   int
+	status string
+	url    string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("lrclib 请求失败: %s (url=%s)", e.status, e.url)
+}
+
+// do 发起 GET 并解码 JSON 到 out；404 → ErrNotFound；429 按 Retry-After
+// 等待后重试一次（最多两次请求）；5xx 短退避重试一次，重试耗尽与其他
+// 状态码（如 400）返回 httpStatusError（带完整请求 URL）。
 func (c *Client) do(ctx context.Context, u string, out interface{}) error {
 	for attempt := 0; attempt < 2; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -171,21 +194,40 @@ func (c *Client) do(ctx context.Context, u string, out interface{}) error {
 		case http.StatusTooManyRequests:
 			wait := retryAfter(resp)
 			resp.Body.Close()
-			timer := time.NewTimer(wait)
-			select {
-			case <-timer.C:
-				continue
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
+			if err := waitAndRetry(ctx, wait); err != nil {
+				return err
 			}
+			continue
 		default:
 			status := resp.Status
+			code := resp.StatusCode
 			resp.Body.Close()
-			return fmt.Errorf("lrclib 请求失败: %s", status)
+			if code >= 500 && code <= 599 && attempt == 0 {
+				// 5xx 服务端错误：短退避（Retry-After 或缺省 1s）后重试一次，
+				// attempt 上限 2 自然限制最多两次请求。
+				if err := waitAndRetry(ctx, retryAfter(resp)); err != nil {
+					return err
+				}
+				continue
+			}
+			// 重试耗尽（5xx）或其他状态码（如 400）：硬失败，错误带 URL。
+			return &httpStatusError{code: code, status: status, url: u}
 		}
 	}
 	return fmt.Errorf("lrclib 限流，重试后仍失败")
+}
+
+// waitAndRetry 等待退避时长，返回 nil 表示继续重试；ctx 取消时返回错误。
+// 429 与 5xx 分支共用。
+func waitAndRetry(ctx context.Context, wait time.Duration) error {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // retryAfter 解析 Retry-After 响应头（秒数或 HTTP 日期），缺省 1 秒，

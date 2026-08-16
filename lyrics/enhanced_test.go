@@ -291,10 +291,12 @@ func TestEnhancedAIFailureFallsBackToDeterministic(t *testing.T) {
 	}
 }
 
-// TestEnhancedStrictErrorPassthrough AI 严格重查遇到服务端错误：原样
-// 透传（不再兜底——服务端故障兜底只会再撞一次）。
+// TestEnhancedStrictErrorPassthrough AI 严格重查遇到服务端错误：5xx
+// 仅同 URL 退避重试一次后原样透传（不兜底其他源——服务端故障兜底只会
+// 再撞一次）。
 func TestEnhancedStrictErrorPassthrough(t *testing.T) {
 	c, aiCalls, lrclibCalls := newEnhancedTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "0") // 免缺省 1s 退避，加速测试
 		w.WriteHeader(http.StatusInternalServerError)
 	}, aiOK)
 	_, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})
@@ -304,8 +306,8 @@ func TestEnhancedStrictErrorPassthrough(t *testing.T) {
 	if *aiCalls != 1 {
 		t.Errorf("AI 调用 %d 次, want 1", *aiCalls)
 	}
-	if *lrclibCalls != 1 {
-		t.Errorf("lrclib 请求 %d 次, want 1（严格查询错误不兜底）", *lrclibCalls)
+	if *lrclibCalls != 2 {
+		t.Errorf("lrclib 请求 %d 次, want 2（500 仅同 URL 退避重试一次；严格查询错误不兜底）", *lrclibCalls)
 	}
 }
 
