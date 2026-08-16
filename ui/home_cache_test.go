@@ -57,27 +57,47 @@ func TestMiddleViewCacheInvalidatedByWheel(t *testing.T) {
 }
 
 // 窗口尺寸变化（setSize）必须使缓存失效（中间区尺寸/裁剪逻辑随尺寸变化）。
+// 注意：须在 synced 态观测——loading 态 middleView 读取跳过缓存，输出断言
+// 测不到失效点（假绿）。
 func TestMiddleViewCacheInvalidatedByResize(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 120, Height: 24})
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
-	before := m.home.middleView()
+	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12}})
+	if m.home.middleCache == "" {
+		t.Fatal("前提：synced 态中间区缓存应已填充")
+	}
+	before := m.home.middleCache
 	m, _ = update(m, tea.WindowSizeMsg{Width: 100, Height: 24})
-	after := m.home.middleView()
-	if before == after {
-		t.Fatal("窗口尺寸变化后中间区应变化（缓存未失效）")
+	if m.home.middleCacheW != 100 {
+		t.Fatalf("resize 后缓存应重建（宽度标记）: middleCacheW = %d, want 100", m.home.middleCacheW)
+	}
+	if m.home.middleCache == before {
+		t.Fatal("resize 后中间区缓存内容应变化（缓存未失效）")
 	}
 }
 
 // 封面结果到达（setCover）必须使缓存失效：占位框 → 像素封面。
+// 注意：须在 synced 态观测——loading 态 middleView 读取跳过缓存，输出断言
+// 测不到失效点（假绿）。
 func TestMiddleViewCacheInvalidatedByCover(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 120, Height: 24})
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
-	placeholder := m.home.middleView()
+	// 先回灌歌词使缓存激活（synced 态）
+	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n"))
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12}})
+	if m.home.middleCache == "" {
+		t.Fatal("前提：synced 态中间区缓存应已填充")
+	}
+	placeholder := m.home.middleCache
 	// 写入 8x8 PNG 临时文件并回灌封面结果
 	pngPath := filepath.Join(t.TempDir(), "cover.png")
 	f, err := os.Create(pngPath)
@@ -89,14 +109,11 @@ func TestMiddleViewCacheInvalidatedByCover(t *testing.T) {
 	}
 	f.Close()
 	m, _ = update(m, coverResultMsg{trackID: "t1", path: pngPath})
-	if !m.home.coverFallback && m.home.coverRenderCache != "" {
-		// 前提：封面已渲染（非占位框）
-	} else {
-		t.Fatal("前提：封面结果应成功渲染")
+	if m.home.coverRenderCache == "" {
+		t.Fatal("前提：封面应成功渲染（coverRenderCache 非空）")
 	}
-	covered := m.home.middleView()
-	if placeholder == covered {
-		t.Fatal("封面到达后中间区应变化（缓存未失效）")
+	if m.home.middleCache == placeholder {
+		t.Fatal("封面到达后中间区缓存应重建（缓存未失效）")
 	}
 }
 
