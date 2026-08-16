@@ -134,6 +134,12 @@ func (s searchModel) Update(msg tea.Msg) (searchModel, tea.Cmd) {
 			return s, nil
 		case "esc":
 			if !s.typing() {
+				// 从结果/空结果态退回输入框：清空结果列表，回到干净的未搜索态
+				// （输入框文字保留，可直接 Enter 重新搜索）。
+				s.state = searchIdle
+				s.err = ""
+				s.results = nil
+				s.list.SetItems(nil)
 				return s, s.input.Focus()
 			}
 			return s, nil

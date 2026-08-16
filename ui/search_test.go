@@ -133,3 +133,50 @@ func TestSearchEnterPlaysSelected(t *testing.T) {
 		t.Fatalf("selected = %s, want t2", sel.track.ID)
 	}
 }
+
+func TestSearchEscClearsResults(t *testing.T) {
+	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1"), testTrack("t2")}}
+	m := newTestModel(t, newFakePlayer(), fa, nil)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 数字键直达搜索页
+	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")})
+	_ = execCmds(cmd)
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	msgs := execSearchCmds(cmd)
+	var res searchResultsMsg
+	for _, msg := range msgs {
+		if sm, ok := msg.(searchResultsMsg); ok {
+			res = sm
+		}
+	}
+	m, _ = update(m, res)
+	if m.searchPage.state != searchDone || len(m.searchPage.results) != 2 {
+		t.Fatalf("前置: state = %v, results = %d, want searchDone/2", m.searchPage.state, len(m.searchPage.results))
+	}
+
+	// Esc 返回输入框：结果清空、文字保留、状态复位
+	// 注：bubbles v1 的 input.Focus() 返回 cursor blink cmd（纯 UI 副作用），
+	// 与既有测试惯例（root_test.go 中忽略 esc cmd）一致，此处忽略。
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.searchPage.state != searchIdle {
+		t.Fatalf("state = %v, want searchIdle", m.searchPage.state)
+	}
+	if len(m.searchPage.results) != 0 {
+		t.Fatalf("results = %d, want 0", len(m.searchPage.results))
+	}
+	if n := len(m.searchPage.list.Items()); n != 0 {
+		t.Fatalf("list items = %d, want 0", n)
+	}
+	if !m.searchPage.input.Focused() {
+		t.Error("Esc 后输入框应聚焦")
+	}
+	if got := m.searchPage.input.Value(); got != "晴天" {
+		t.Fatalf("input = %q, want 保留 晴天", got)
+	}
+
+	// 子用例：清空后 Enter 可立即重新搜索（adapter 再次被调用）
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	_ = execSearchCmds(cmd)
+	if fa.calls != 2 {
+		t.Fatalf("adapter calls = %d, want 2（清空后可重新搜索）", fa.calls)
+	}
+}
