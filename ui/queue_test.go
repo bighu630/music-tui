@@ -21,7 +21,7 @@ func searchAndPick(t *testing.T, m Model, fa *fakeSearchAdapter) Model {
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
 	var res searchResultsMsg
-	for _, msg := range execCmds(cmd) {
+	for _, msg := range execSearchCmds(cmd) {
 		if sm, ok := msg.(searchResultsMsg); ok {
 			res = sm
 		}

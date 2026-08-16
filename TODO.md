@@ -183,3 +183,14 @@ position 1.47s→3.50s 递增；play-pause Paused⇄Playing 生效；position 10
 - [x] 用法：tail -f /tmp/music-tui.log（排查问题临时把 config.json 的 log.level 改 "debug"）
 - [x] 状态栏中间段显示当前歌词行（用户反馈）：三段式 左名称 + 中歌词行（居中，无歌词留空）+ 右播放顺序；首页留空 ✅（commit 64e183f/595338b，已合并 master 7660640）
 - [x] 状态栏歌词行高亮与首页歌词区一致（用户反馈）：提取共享 lyricActiveStyle（加粗 + 粉色 212），rebuildLyrics 与状态栏中间段共用 ✅（commit 092cde9，已合并 master）
+
+---
+
+## CPU 占用优化（2026-08-16，bugfix 会话）
+
+- [x] P0-1 ProgressEvent 200ms 合并节流（progressThrottle，20fps→5fps 渲染）
+- [x] P0-2 spinner tick 按需续发（spinnerTickCmd 工厂修复一次性 timer 死锁 + tickLive 防双链 + loading 显式复位）
+- [x] P1-1 鼠标事件降级 WithMouseCellMotion（点击/滚轮/跨格移动保留）
+- [x] P1-2 跳过（5fps 下收益边际，评估见会话记录）
+- [x] 测试：节流窗口单测 6 项 + spinner 状态机 6 项 + 既有套件全绿（ui 114s、-race 关键组通过）
+- [x] 待办：真实播放 CPU 实测（pidstat 优化前后对比）、用户验收

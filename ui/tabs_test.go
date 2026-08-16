@@ -200,7 +200,10 @@ func TestTabBarCentered(t *testing.T) {
 	}
 }
 
-// ---- 鼠标交互（点击切换 + hover 高亮） ----
+// ---- 鼠标交互（点击切换 + 拖拽 hover 高亮） ----
+// 注：CellMotion 下无按键的悬停移动不上报（生产 hover 已下线，见 main.go
+// WithMouseCellMotion 注释）；Motion 分支契约仍有效——拖拽（按下移动）时
+// 高亮、移出清除，以下单测直接注入 MouseMsg 验证该契约。
 
 // 固定状态下的标签文本（无曲目 + 队列 3 首），与 tabBar 分隔约定（2 空格）一致。
 // 用 ansi.StringWidth 独立计算各标签 0-based 起始列，避免与实现共享内部函数。
@@ -337,6 +340,32 @@ func TestMouseHoverHighlightsTab(t *testing.T) {
 	}
 	if strings.Contains(m3.View(), tabHoverStyle.Render("队列")) {
 		t.Error("移出后不应再有下划线高亮")
+	}
+}
+
+// 拖拽结束（Release）清除残留高亮：CellMotion 下悬停高亮仅拖拽时出现，
+// 若释放不清理会残留到最后拖拽位置（回归：hover 下线后残留仍可见）。
+func TestMouseReleaseClearsHoverOnTabBar(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	for _, id := range []string{"q1", "q2", "q3"} {
+		m, _ = update(m, trackAppendMsg{track: testTrack(id)})
+	}
+	seps := mouseTabCols()
+	x := seps[1].col + 1
+	// 拖拽（按下移动）到"队列"标签 → 高亮
+	m2, _ := update(m, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: seps[0].col + 1, Y: 1})
+	m2, _ = update(m2, tea.MouseMsg{Action: tea.MouseActionMotion, X: x, Y: 1})
+	if m2.hoverTab != int(pageQueue) {
+		t.Fatalf("前提：拖拽悬停 hoverTab = %d, want %d", m2.hoverTab, int(pageQueue))
+	}
+	// 释放 → 清除残留
+	m3, _ := update(m2, tea.MouseMsg{Action: tea.MouseActionRelease, X: x, Y: 1})
+	if m3.hoverTab != -1 {
+		t.Errorf("Release 后 hoverTab = %d, want -1（残留高亮）", m3.hoverTab)
+	}
+	if strings.Contains(m3.View(), tabHoverStyle.Render("队列")) {
+		t.Error("Release 后不应再有下划线高亮")
 	}
 }
 

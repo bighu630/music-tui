@@ -45,12 +45,47 @@ const (
 
 // ---- 消息类型 ----
 
-// spinnerTick 是全局 spinner 节拍命令（100ms，与 spinner.Dot 的 10FPS 对齐）。
-// 消息不带 ID/tag，两个页面（ID 路由会拒绝陌生 ID）都能消费。
-// （bubbles v1.0.0 包级 spinner.Tick 无延时，直接用会形成忙循环。）
-var spinnerTick tea.Cmd = tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
-	return spinner.TickMsg{Time: time.Now()}
-})
+// spinnerTickCmd 创建一次全局 spinner 节拍命令（100ms，与 spinner.Dot 的
+// 10FPS 对齐）。消息不带 ID/tag，两个页面（ID 路由会拒绝陌生 ID）都能消费。
+//
+// 注意：tea.Tick 的 timer 是一次性的，同一 cmd 实例第二次执行会永久阻塞
+// （回归：曾用包级 var 缓存实例——首次执行消费 timer 后，后续续发全部死锁，
+// spinner 冻结在首帧、加载中派生停止；bubbles v1.0.0 包级 spinner.Tick 则
+// 无延时直接形成忙循环）。每次续发必须新建实例。
+func spinnerTickCmd() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+		return spinner.TickMsg{Time: time.Now()}
+	})
+}
+
+// spinnerNeeded 是否存在活跃 spinner（首页歌词加载中 / 搜索 loading）。
+// Track 为 nil 时不视为需要：播放失败后 lyricsState 可能残留 lyricsLoading，
+// 但空态视图不渲染它（回归守卫，防 tick 空转）。
+func (m Model) spinnerNeeded() bool {
+	if m.searchPage.state == searchLoading {
+		return true
+	}
+	return m.state.Track != nil && m.home.lyricsState == lyricsLoading
+}
+
+// armSpinnerTick 按需启动全局 spinner tick 链：链已存活（tickLive）时不重复
+// 启动（100ms 窗口内多次加载起点会并发出多条链，渲染翻倍）；无活跃 spinner
+// 且无加载进行中时不启动。返回更新后的模型与启动命令（无需启动时 nil）。
+func (m Model) armSpinnerTick() (Model, tea.Cmd) {
+	if m.tickLive || (!m.spinnerNeeded() && m.loadingSince.IsZero()) {
+		return m, nil
+	}
+	m.tickLive = true
+	return m, spinnerTickCmd()
+}
+
+// clearLoading 结束加载态：清空加载计时并复位首页"加载中…"提示。两字段必须
+// 同步——tick 链停止后 loading 不再由 tick 派生，漏复位会永久显示加载中。
+func (m Model) clearLoading() Model {
+	m.loadingSince = time.Time{}
+	m.home.loading = false
+	return m
+}
 
 // playerEventMsg 由 waitForPlayerEvents cmd 从 Player 事件流注入。
 type playerEventMsg struct {
@@ -298,6 +333,11 @@ type Model struct {
 	// 提示（回归：连播未缓存下一首取流悬挂卡住时用户可感知）。
 	loadingSince time.Time
 
+	// tickLive 全局 spinner tick 链存活标记：tick 按需续发（无活跃 spinner/无
+	// 加载进行中时停止 10fps 空转，CPU 热点 2）；armSpinnerTick 只在链死亡时
+	// 重新启动，防止 100ms 窗口内多次加载起点（beginPlay 等）并发出多条 tick 链。
+	tickLive bool
+
 	// YT Music 同步状态（登录配置 + 同步中 + 验证失败标记；页面经 setYTSyncStatus 推入）
 	ytLogin   ytm.LoginConfig
 	ytSyncing bool
@@ -472,10 +512,12 @@ func (m Model) refreshPreload() {
 // 存在已保存会话时追加续播恢复 cmd（PlayPaused 静默加载并定位）。
 // （不用包级 spinner.Tick：bubbles v1.0.0 的包级 Tick 无延时，会形成忙循环。）
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{waitForPlayerEvents(m.player), spinnerTick, subscribeMprisReqs(m.mprisCtrl.reqs)}
+	cmds := []tea.Cmd{waitForPlayerEvents(m.player), subscribeMprisReqs(m.mprisCtrl.reqs)}
 	if m.resume != nil {
 		cmds = append(cmds, resumeCmd(m))
 	}
+	// spinner 链不随 Init 启动：初始无 spinner/无加载，启动即空转浪费；
+	// 加载起点（beginPlay/恢复成功/搜索 Enter）经 armSpinnerTick 按需启动。
 	return tea.Batch(cmds...)
 }
 
@@ -977,8 +1019,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 失败）只代表命令未被 mpv 接受（连接/参数瞬态问题），与缓存文件损坏
 			// 无关（坏文件 mpv 会接受 loadfile 后异步报 end-file error）；删除健康
 			// 缓存有害，真实损坏由异步 LoadFailedError 路径处理。
-			m.resuming = false           // 恢复上下文作废
-			m.loadingSince = time.Time{} // 恢复失败：无加载中提示
+			m.resuming = false // 恢复上下文作废
+			m = m.clearLoading() // 恢复失败：无加载中提示
 			m, cmd := m.showToast("恢复播放失败: "+msg.err.Error(), toastError)
 			m.state = model.PlaybackState{}
 			m.home = m.home.syncState(m.state)
@@ -1009,10 +1051,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := m.player.SetLoop(m.queue.Mode() == queue.RepeatOne); err != nil {
 			m, loopCmd = m.showToast("设置循环失败: "+err.Error(), toastError)
 		}
+		m, tcmd := m.armSpinnerTick() // 恢复加载进行中：启动 tick 链（加载中派生 + 歌词 spinner）
 		return m, tea.Batch(
 			loopCmd,
 			fetchLyricsCmd(m.lyrics, *m.state.Track),
 			fetchCoverCmd(m.cover, *m.state.Track),
+			tcmd,
 		)
 
 	case searchResultsMsg:
@@ -1099,7 +1143,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 加载中派生状态：切歌 2s 未收到 TrackStarted → 首页显示"加载中…"提示
 		//（msg.Time 是 tick 发送时刻：测试可注入任意时间，无需真实等待 2s）。
 		m.home.loading = !m.loadingSince.IsZero() && msg.Time.Sub(m.loadingSince) >= 2*time.Second
-		return m, spinnerTick
+		// 按需续发：无活跃 spinner 且无加载进行中 → 停止 tick 链（播放中不再
+		// 10fps 空转渲染）；否则继续保持（spinner 动画 + 加载中派生都需要 tick）。
+		if !m.spinnerNeeded() && m.loadingSince.IsZero() {
+			m.tickLive = false
+			return m, nil
+		}
+		return m, spinnerTickCmd()
 
 	case tea.WindowSizeMsg:
 		// 顶部空行 + Tab 栏 + 分隔线占 3 行、底部状态栏占 1 行，页面高度相应减 4
@@ -1378,7 +1428,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.resuming = false                 // 恢复加载成功：进入正常播放态，恢复上下文作废
 		m.playStarted = true               // mpv 已开始播放（缓存兜底据此不再切本地）
 		m.ended = false
-		m.loadingSince = time.Time{} // 加载成功：加载中提示结束
+		m = m.clearLoading() // 加载成功：加载中提示结束
 		// mpv 已开始播放：缓存兜底状态作废（active 复位——否则悬挂恢复后 90s 超时
 		// 消息会对正在播放的曲目伪重试，回归：TestCacheFallbackTrackStartedResetsActive）；
 		// canceled/hint 一并清空，与 beginPlay 对称（Track 非 nil 才重置：兜底激活
@@ -1412,7 +1462,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 	case player.TrackEndedEvent:
 		m.retryCount = 0 // 下一首开始，重试预算重置
 		// 本曲加载/播放已有结论：加载中提示结束（连播下一首时由 beginPlay 重新设置）
-		m.loadingSince = time.Time{}
+		m = m.clearLoading()
 		// 自动连播。解耦标记（删除当前曲）存在时：播放顺延曲目（当前位），
 		// 无当前位则从头，队列为空则停止；否则正常推进到下一首。
 		// 两种情况均不切换当前页面。
@@ -1447,7 +1497,7 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 	case player.ErrorEvent:
 		// 加载/播放有结论（失败、断开、超时）：加载中提示结束。重试/跳过路径
 		// 会经 beginPlay 重新设置（下一轮加载重新计时）。
-		m.loadingSince = time.Time{}
+		m = m.clearLoading()
 		// 取流失败（LoadFailedError）与加载超时（LoadTimeoutError，看门狗
 		// 主动报错，取流悬挂）多为瞬态错误（如 YouTube 403 风控）：
 		// 预算内自动重试；耗尽后队列有下一首则跳过继续连播，否则停止。
@@ -1603,14 +1653,33 @@ func (m Model) retryOrSkipLoadFailure(hint string, isLoadTimeout bool, cmds []te
 	return m, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
 }
 
+// progressWindow 是 ProgressEvent 渲染节流窗口：mpv 播放中 ~20fps 推送
+// time-pos，每帧触发全量 View 渲染（组装 3-4 个全屏字符串，CPU 热点 1）。
+// 窗口内连续进度事件合并，只放行窗口内最新的一个（渲染 20fps → 5fps）。
+const progressWindow = 200 * time.Millisecond
+
 // waitForPlayerEvents 阻塞监听播放器事件流；通道关闭时返回 nil（循环终止）。
+// ProgressEvent 经 progressThrottle 200ms 合并窗口：窗口内只放行最后一个，
+// 其余丢弃（进度展示最多滞后 200ms，进度条/歌词可接受；歌词行切换由窗口内
+// 最后一次事件驱动，不会漏行）；StateEvent/TrackStarted/TrackEnded/Error
+// 等其他事件类型不经窗口，立即放行不被吞。
 func waitForPlayerEvents(p player.Player) tea.Cmd {
 	return func() tea.Msg {
-		ev, ok := <-p.Events()
-		if !ok {
-			return nil
+		th := newProgressThrottle(progressWindow)
+		for {
+			select {
+			case ev, ok := <-p.Events():
+				if !ok {
+					return nil
+				}
+				if th.Push(ev) {
+					return playerEventMsg{ev: ev}
+				}
+			case <-th.Fired():
+				pe, _ := th.Take()
+				return playerEventMsg{ev: pe}
+			}
 		}
-		return playerEventMsg{ev: ev}
 	}
 }
 
@@ -1695,7 +1764,7 @@ func (m Model) skipFailedTrack(tr model.Track, hint string) (Model, tea.Cmd) {
 func (m Model) stopAfterEnd() (Model, tea.Cmd) {
 	m.ended = true
 	m.refreshPreload()           // 播放停止：清空预加载目标（ended 下无下一首可预载）
-	m.loadingSince = time.Time{} // 已停止：无加载中提示
+	m = m.clearLoading() // 已停止：无加载中提示
 	m.state.Playing = false
 	m.home = m.home.syncState(m.state)
 	return m.syncQueueViews(), nil
@@ -1809,7 +1878,7 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 	}
 	if err := m.player.Play(target); err != nil {
 		logger.Error("播放命令失败: %s - %s (id=%s): %v", track.Title, track.Artist, track.ID, err)
-		m.loadingSince = time.Time{} // 加载未开始即失败：无加载中提示
+		m = m.clearLoading() // 加载未开始即失败：无加载中提示
 		m, cmd := m.showToast("播放失败: "+err.Error(), toastError)
 		m.state = model.PlaybackState{}
 		m.home = m.home.syncState(m.state)
@@ -1827,12 +1896,14 @@ func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
 	if err := m.player.SetLoop(m.queue.Mode() == queue.RepeatOne); err != nil {
 		m, loopCmd = m.showToast("设置循环失败: "+err.Error(), toastError)
 	}
+	m, tcmd := m.armSpinnerTick() // 加载开始（loadingSince + 歌词加载中）：启动 tick 链
 	return m.syncQueueViews(), tea.Batch(
 		loopCmd,
 		cacheDoneCmd,
 		fetchLyricsCmd(m.lyrics, track),
 		fetchCoverCmd(m.cover, track),
 		addHistoryCmd(m.history, track),
+		tcmd,
 	)
 }
 
@@ -2048,7 +2119,7 @@ func (m Model) togglePlay() (Model, tea.Cmd) {
 			m.fallback.canceled = true
 			m.ended = true
 			m.refreshPreload() // ended 门控：清空预加载目标（与其他停止路径一致，审查 P2）
-			m.loadingSince = time.Time{}
+			m = m.clearLoading() // 用户暂停取消兜底：无加载中提示
 			m.state.Playing = false
 			m.home = m.home.syncState(m.state)
 			m, cmd := m.showToast("已取消缓存兜底："+m.fallback.hint, toastError)
@@ -2123,10 +2194,12 @@ func emitClearHistory() tea.Cmd {
 }
 
 // onMouse 处理鼠标事件：Tab 栏（屏幕第 2 行 Y==1，bubbletea X/Y 为 0-based）——
-// 点击标签（左键按下）切换页面，移动更新悬停高亮；Y==0 为顶部空行、Y==2 为
-// 分隔线行（点击/移动与页面区行为一致：清除悬停并委托页面，无特殊处理）；
-// 页面区（Y>=3）事件不拦截，交给当前页面（歌词区 viewport 原生支持滚轮；
-// bubbles v1.0.0 的列表/输入框暂无鼠标处理）。
+// 点击标签（左键按下）切换页面；Y==0 为顶部空行、Y==2 为分隔线行（点击/移动
+// 与页面区行为一致：清除悬停并委托页面，无特殊处理）；页面区（Y>=3）事件不
+// 拦截，交给当前页面（歌词区 viewport 原生支持滚轮；bubbles v1.0.0 的列表/
+// 输入框暂无鼠标处理）。
+// 悬停高亮（hoverTab）：CellMotion 下无按键移动不上报任何事件，悬停高亮仅在
+// 拖拽（按下移动）时短暂出现；拖拽结束（释放）必须清除，否则残留高亮。
 func (m Model) onMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	// 选择器打开时忽略一切鼠标事件（与“选择器打开时所有输入交给选择器”的语义一致）：
 	// 点击 Tab 栏/页面区域不得穿透改 m.current 或落到页面。
@@ -2155,8 +2228,11 @@ func (m Model) onMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 			m.current = p
 		}
 		return m, nil
+	case tea.MouseActionRelease:
+		m.hoverTab = -1 // 拖拽结束清除残留高亮（CellMotion 下无按键移动不上报）
+		return m, nil
 	}
-	return m, nil // 其余（释放/滚轮等）在 Tab 栏上不处理
+	return m, nil // 其余（滚轮等）在 Tab 栏上不处理
 }
 
 // switchPage 处理切页按键：Tab/Ctrl+Right 正向循环
@@ -2200,7 +2276,16 @@ func (m Model) delegate(msg tea.Msg) (Model, tea.Cmd) {
 	case pageSearch:
 		var cmd tea.Cmd
 		m.searchPage, cmd = m.searchPage.Update(msg)
-		return m, cmd
+		if cmd == nil {
+			return m, nil
+		}
+		// 搜索 Enter 等可能置 searchLoading：按需启动 tick 链（搜索 spinner 动画）。
+		// 无需启动时保持单 cmd 形态（测试 execCmds 直接取结果）。
+		m, tcmd := m.armSpinnerTick()
+		if tcmd == nil {
+			return m, cmd
+		}
+		return m, tea.Batch(cmd, tcmd)
 	case pageHistory:
 		var cmd tea.Cmd
 		m.historyPage, cmd = m.historyPage.Update(msg)

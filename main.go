@@ -157,7 +157,10 @@ func run() error {
 	// 模式变更经 sink 同步回 MPRIS 属性（LoopStatus/Shuffle 投影 + PropertiesChanged）。
 	mprisSrv.SetController(model.MprisController())
 	model.MprisController().SetModeSink(mprisSrv.SyncMode)
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
+	// CellMotion：点击/滚轮/拖拽（按下移动）必报，但无按键的悬停移动不再上报
+	// ——Tab 悬停高亮随之下线（AllMotion 下鼠标任何移动都产生 MouseMsg → 全量
+	// View 渲染，CPU 热点 3；悬停高亮与 CPU 目标不可兼得，取舍以 CPU 为准）。
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI 运行失败: %w", err)
 	}

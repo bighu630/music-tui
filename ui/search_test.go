@@ -27,7 +27,7 @@ func TestSearchTypingAndEnter(t *testing.T) {
 	if m.searchPage.state != searchLoading {
 		t.Fatalf("state = %v, want searchLoading", m.searchPage.state)
 	}
-	msgs := execCmds(cmd)
+	msgs := execSearchCmds(cmd)
 	if fa.calls != 1 {
 		t.Fatalf("adapter calls = %d, want 1", fa.calls)
 	}
@@ -68,7 +68,7 @@ func TestSearchErrorState(t *testing.T) {
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 数字键直达搜索页
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
-	msgs := execCmds(cmd)
+	msgs := execSearchCmds(cmd)
 	var res searchResultsMsg
 	for _, msg := range msgs {
 		if sm, ok := msg.(searchResultsMsg); ok {
@@ -90,7 +90,7 @@ func TestSearchEmptyResults(t *testing.T) {
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 数字键直达搜索页
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("zzz")})
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
-	msgs := execCmds(cmd)
+	msgs := execSearchCmds(cmd)
 	var res searchResultsMsg
 	for _, msg := range msgs {
 		if sm, ok := msg.(searchResultsMsg); ok {
@@ -110,7 +110,7 @@ func TestSearchEnterPlaysSelected(t *testing.T) {
 	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")})
 	_ = execCmds(cmd)
 	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyEnter})
-	msgs := execCmds(cmd)
+	msgs := execSearchCmds(cmd)
 	var res searchResultsMsg
 	for _, msg := range msgs {
 		if sm, ok := msg.(searchResultsMsg); ok {

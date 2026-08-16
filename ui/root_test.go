@@ -407,6 +407,21 @@ func execCmds(cmds ...tea.Cmd) []tea.Msg {
 	return msgs
 }
 
+// execSearchCmds 执行搜索 Enter 返回的 cmd 并展开 Batch（Enter 委托按需附加
+// spinnerTick 启动命令，Batch 在真实 bubbletea 中由事件循环展开）：返回全部
+// 子命令产出的非 nil 消息（与 Update 的 tea.BatchMsg 分支同款模式）。
+func execSearchCmds(cmd tea.Cmd) []tea.Msg {
+	var msgs []tea.Msg
+	for _, c := range execCmds(cmd) {
+		if bm, ok := c.(tea.BatchMsg); ok {
+			msgs = append(msgs, execCmds(bm...)...)
+			continue
+		}
+		msgs = append(msgs, c)
+	}
+	return msgs
+}
+
 // update 调用 root Update 并把返回的 tea.Model 断言回 Model
 // （Model.Update 的签名必须是 (tea.Model, tea.Cmd)，测试需要类型断言）。
 func update(m Model, msg tea.Msg) (Model, tea.Cmd) {
@@ -660,7 +675,7 @@ func TestPlayFlow(t *testing.T) {
 	if m.searchPage.state != searchLoading {
 		t.Fatalf("state = %v, want searchLoading", m.searchPage.state)
 	}
-	msgs := execCmds(cmd)
+	msgs := execSearchCmds(cmd)
 	var res searchResultsMsg
 	for _, msg := range msgs {
 		if sm, ok := msg.(searchResultsMsg); ok {
