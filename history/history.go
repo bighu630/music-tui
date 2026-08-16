@@ -13,7 +13,7 @@ import (
 )
 
 // MaxEntries 是历史记录条数上限，超出时裁剪最旧记录。
-const MaxEntries = 100
+const MaxEntries = 500
 
 // Entry 是一条播放记录，完整嵌入 Track，重播无需重新搜索。
 type Entry struct {

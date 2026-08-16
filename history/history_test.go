@@ -80,8 +80,8 @@ func TestAddTrimsToLimit(t *testing.T) {
 	if entries[0].Track.ID != fmt.Sprintf("%03d", total-1) {
 		t.Errorf("最新 = %s, want %03d", entries[0].Track.ID, total-1)
 	}
-	if entries[MaxEntries-1].Track.ID != "020" {
-		t.Errorf("最旧 = %s, want 020", entries[MaxEntries-1].Track.ID)
+	if entries[MaxEntries-1].Track.ID != fmt.Sprintf("%03d", total-MaxEntries) {
+		t.Errorf("最旧 = %s, want %03d", entries[MaxEntries-1].Track.ID, total-MaxEntries)
 	}
 }
 
@@ -124,7 +124,8 @@ func TestClear(t *testing.T) {
 func TestConcurrentAccess(t *testing.T) {
 	s := newTestStore(t)
 	const workers = 4
-	const perWorker = 30
+	// 4×130=520 > MaxEntries，确保并发下触发裁剪路径
+	const perWorker = 130
 	var wg sync.WaitGroup
 	errCh := make(chan error, workers*2)
 	for w := 0; w < workers; w++ {
