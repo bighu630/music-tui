@@ -296,6 +296,7 @@ func TestEnhancedAIFailureFallsBackToDeterministic(t *testing.T) {
 // 再撞一次）。
 func TestEnhancedStrictErrorPassthrough(t *testing.T) {
 	c, aiCalls, lrclibCalls := newEnhancedTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "0") // 免缺省 1s 退避，加速测试
 		w.WriteHeader(http.StatusInternalServerError)
 	}, aiOK)
 	_, err := c.Fetch(context.Background(), model.Track{Title: "晴天", Artist: "周杰倫", Duration: 269.0})

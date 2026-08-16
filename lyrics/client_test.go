@@ -171,8 +171,7 @@ func TestDoErrorIncludesURL(t *testing.T) {
 	q.Set("duration", "0.00")
 	u := server.URL + "/api/get?" + q.Encode()
 
-	c := NewClient(testUA)
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL(server.URL, testUA)
 	var out lrclibSong
 	err := c.do(context.Background(), u, &out)
 	if err == nil || !strings.Contains(err.Error(), u) {
