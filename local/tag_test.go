@@ -374,7 +374,7 @@ func TestReadDurationMP3XingNoFramesFlag(t *testing.T) {
 
 func TestReadDurationMPEG2Layer3CBR(t *testing.T) {
 	// MPEG2 Layer3（576 样本/帧）CBR：500 帧 64kbps/22050Hz → 500*576/22050 s。
-	// 帧头 0xFF 0xF3 0x88 0x00——bitrate index 8 在 MPEG2 表 = 64kbps，帧长
+	// 帧头 0xFF 0xF3 0x80 0x00——bitrate index 8 在 MPEG2 表 = 64kbps，帧长
 	// 72*64000/22050 = 208 字节。若实现误用 MPEG1 表（同 index 8 = 128kbps，
 	// 帧长 417 字节），CBR 取模失配 → VBR 扫描在 208 字节帧边界帧头失配 →
 	// 时长只剩 ≈1 帧（0.026s）→ 本用例失败。
