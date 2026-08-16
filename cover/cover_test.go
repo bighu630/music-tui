@@ -147,6 +147,15 @@ func TestCachedPath(t *testing.T) {
 		t.Error("无缓存且无 CoverURL 应返回 false（不触发下载）")
 	}
 
+	// (f) 同名目录（非文件）→ false：os.Stat 命中但 IsDir 拒绝，不产生坏 artUrl
+	dirDest := filepath.Join(f.dir, cacheFileName("youtube", "is-dir")+".jpg")
+	if err := os.MkdirAll(dirDest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.CachedPath(model.Track{ID: "is-dir", Source: "youtube"}); ok {
+		t.Error("同名目录不应命中缓存（非文件）")
+	}
+
 	// 包级 CachedPath 与 Fetcher 方法一致（dir 显式传入）
 	p, ok = CachedPath(f.dir, localTrack)
 	if !ok || p != localDest {

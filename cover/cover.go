@@ -54,7 +54,7 @@ func CachedPath(dir string, track model.Track) (string, bool) {
 		return "", false
 	}
 	dest := filepath.Join(dir, cacheFileName(track.Source, track.ID)+".jpg")
-	if _, err := os.Stat(dest); err == nil {
+	if info, err := os.Stat(dest); err == nil && !info.IsDir() {
 		return dest, true
 	}
 	return "", false
