@@ -1001,9 +1001,13 @@ func TestEnhancedCNClosestLyricErrorFallsToNext(t *testing.T) {
 	}
 }
 
-// TestEnhancedCNExactBoundaryAccepted 边界：Δ=3.0s 恰好在阈值内采用、
-// Δ=3.01s 弃用（与 lrclib 严格路径同阈值同语义）。
+// TestEnhancedCNExactBoundaryAccepted 边界：Δ=3.0s 恰好在阈值内、Δ=3.01s
+// 弃用（与 lrclib 严格路径同阈值同语义）。判别设计：唯一过滤内候选
+// 3002（Δ=3.0）取词 500 → 应继续试 3001（Δ=3.01）吗？不应——3001 已被
+// 时长过滤弃用，永不请求 → 中文源全 miss → ErrNotFound；同时 3002 被尝试
+// 证明 Δ=3.0 通过过滤（若边界误判则不会请求 3002，或放宽后会请求 3001）。
 func TestEnhancedCNExactBoundaryAccepted(t *testing.T) {
+	var lyricCalls []string
 	netease := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -1012,9 +1016,12 @@ func TestEnhancedCNExactBoundaryAccepted(t *testing.T) {
 				{"id":3001,"name":"病态","artists":[{"name":"薛之谦"}],"duration":283010},
 				{"id":3002,"name":"病态","artists":[{"name":"薛之谦"}],"duration":283000}]}}`)) // Δ=3.01s / Δ=3.0s
 		case "/api/song/lyric":
+			lyricCalls = append(lyricCalls, r.URL.Query().Get("id"))
 			switch r.URL.Query().Get("id") {
-			case "3002":
-				_, _ = w.Write([]byte(`{"code":200,"lrc":{"lyric":"[00:01.00]边界候选\n"}}`))
+			case "3002": // Δ=3.0 在阈值内被采用（被尝试），但取词失败
+				w.WriteHeader(http.StatusInternalServerError)
+			case "3001": // Δ=3.01 被过滤弃用，不应被请求；若被请求说明阈值放宽
+				_, _ = w.Write([]byte(`{"code":200,"lrc":{"lyric":"[00:01.00]超界候选\n"}}`))
 			default:
 				w.WriteHeader(http.StatusNotFound)
 			}
@@ -1023,11 +1030,11 @@ func TestEnhancedCNExactBoundaryAccepted(t *testing.T) {
 		}
 	}
 	c, _ := newCNEnv(t, netease, nil)
-	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙", Duration: 280.0})
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
+	_, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙", Duration: 280.0})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound（Δ=3.0 取词失败且 Δ=3.01 被过滤 → 中文源全 miss）", err)
 	}
-	if len(res.Lyrics.Lines) != 1 || res.Lyrics.Lines[0].Text != "边界候选" {
-		t.Errorf("Δ=3.0s 应在阈值内采用（Δ=3.01s 弃用）: got %+v", res.Lyrics.Lines)
+	if len(lyricCalls) != 1 || lyricCalls[0] != "3002" {
+		t.Errorf("应只尝试过滤内的 3002（Δ=3.0 采用、Δ=3.01 弃用不请求）: got %v", lyricCalls)
 	}
 }
