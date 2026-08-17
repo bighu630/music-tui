@@ -8,8 +8,36 @@ permissions:
   contents: write
 
 jobs:
-  build-linux-amd64:
-    runs-on: ubuntu-latest
+  build:
+    name: build-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            ext: ''
+          - name: darwin-amd64
+            os: macos-15-intel # Intel x64 macOS（macos-13 已退役，官方迁移标签）
+            goos: darwin
+            goarch: amd64
+            ext: ''
+          - name: darwin-arm64
+            os: macos-15 # Apple Silicon macOS
+            goos: darwin
+            goarch: arm64
+            ext: ''
+          - name: windows-amd64
+            os: windows-latest
+            goos: windows
+            goarch: amd64
+            ext: .exe
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,26 +52,39 @@ jobs:
         run: go vet ./...
 
       - name: go test
+        # 各平台在各自 runner 上原生运行测试（linux 跑 linux 测试、mac 跑 mac 测试）
         run: go test ./...
 
-      - name: Build linux amd64
-        run: go build -trimpath -ldflags "-s -w" -o music-tui .
+      - name: Build ${{ matrix.name }}
+        # 命名区分架构：music-tui-<goos>-<goarch>[.exe]
+        run: go build -trimpath -ldflags "-s -w" -o music-tui-${{ matrix.name }}${{ matrix.ext }} .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: music-tui-linux-amd64
-          path: music-tui
+          name: music-tui-${{ matrix.name }}
+          path: music-tui-${{ matrix.name }}${{ matrix.ext }}
           if-no-files-found: error
 
-      # tag 触发（v*）时创建 Release 并上传二进制
-      - name: Prepare release asset name
-        if: startsWith(github.ref, 'refs/tags/')
-        run: cp music-tui music-tui-linux-amd64
+  release:
+    # tag 触发（v*）时汇总全部平台 artifact 创建 Release 并上传
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: music-tui-linux-amd64
+          files: dist/*
           generate_release_notes: true
