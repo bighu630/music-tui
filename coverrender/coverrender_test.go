@@ -108,12 +108,12 @@ func TestDetectModeHints(t *testing.T) {
 			t.Errorf("TERM=foot → %v, want half（sixel 不自动）", m)
 		}
 	})
-	t.Run("tmux 优先回退", func(t *testing.T) {
+	t.Run("tmux + KITTY_WINDOW_ID → kitty（外层确证）", func(t *testing.T) {
 		t.Setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
 		t.Setenv("KITTY_WINDOW_ID", "1")
 		ResetModeCacheForTests()
-		if m := DetectMode(); m != ModeHalf {
-			t.Errorf("TMUX 内应 half（即使 KITTY_WINDOW_ID 存在）→ %v", m)
+		if m := DetectMode(); m != ModeKitty {
+			t.Errorf("TMUX 内 KITTY_WINDOW_ID=1（外层确证 kitty）→ %v, want kitty", m)
 		}
 	})
 	t.Run("screen TERM 回退", func(t *testing.T) {
