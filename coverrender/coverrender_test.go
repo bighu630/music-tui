@@ -461,9 +461,9 @@ func containsStr(s, sub string) bool {
 }
 
 // TestSixelPassAlignment 回归：颜色分离 pass 方案——每个 pass 恰好输出 boxW 个
-// 像素字符（列位对齐）。早期实现把同列多色掩码连续输出导致列位膨胀 k 倍、花屏。
-// 解析输出：以 '$'（pass 分隔/回行首）与 '-'（band 分隔）切分，像素字符段
-// （'?'..'~'）长度必须恒 == boxW。
+// 像素字符（列位对齐，RLE 展开后计）。早期实现把同列多色掩码连续输出导致列位
+// 膨胀 k 倍、花屏。解析输出：以 '$'（pass 分隔/回行首）与 '-'（band 分隔）切分，
+// 像素字符段（'?'..'~'，含 '!'N 重复前缀展开）长度必须恒 == boxW。
 func TestSixelPassAlignment(t *testing.T) {
 	// 红蓝各半的竖条图：每列同色、列间两色——强制每 band 出现多色多 pass
 	img := image.NewRGBA(image.Rect(0, 0, 16, 8))
@@ -481,7 +481,8 @@ func TestSixelPassAlignment(t *testing.T) {
 	// 去掉 DCS 外壳（\x1bPq / \x1b\），避免头尾转义字节被误计为像素字符
 	out = out[len("\x1bPq") : len(out)-len("\x1b\\")]
 
-	// 解析：逐字符扫描，像素字符段按 '$' 与 '-' 分隔，段长必须恒 == boxW
+	// 解析：逐字符扫描，像素字符段按 '$' 与 '-' 分隔；'!' 重复前缀展开为 N 个
+	// 像素字符。段长（展开后）必须恒 == boxW。
 	boxW := w * 8
 	segLen := 0
 	segs := map[int]int{}
@@ -491,12 +492,29 @@ func TestSixelPassAlignment(t *testing.T) {
 			segLen = 0
 		}
 	}
-	for _, r := range out {
+	b := []byte(out)
+	for i := 0; i < len(b); {
 		switch {
-		case r >= '?' && r <= '~':
+		case b[i] == '!':
+			// !N<chr>：重复 N 次
+			j := i + 1
+			n := 0
+			for j < len(b) && b[j] >= '0' && b[j] <= '9' {
+				n = n*10 + int(b[j]-'0')
+				j++
+			}
+			if j < len(b) && n > 0 {
+				segLen += n
+			}
+			i = j + 1
+		case b[i] >= '?' && b[i] <= '~':
 			segLen++
-		case r == '$' || r == '-':
+			i++
+		case b[i] == '$' || b[i] == '-':
 			flush()
+			i++
+		default:
+			i++
 		}
 	}
 	flush()
@@ -508,4 +526,16 @@ func TestSixelPassAlignment(t *testing.T) {
 	if len(segs) == 0 {
 		t.Error("应有像素字符段")
 	}
+}
+
+
+// TestSixelPayloadSize 回归：照片类彩色封面（渐变图）载荷必须被量化上限+RLE
+// 压住（早期 216 色全 pass 编码实测 488KB，超长 DCS 与 bubbletea 帧 flush 并发
+// 写 stdout 时字节交错损坏 → 终端丢弃 → 无图）。
+func TestSixelPayloadSize(t *testing.T) {
+	out := Sixel(gradientImg(512, 512), 30, 17, 15, 16) // 对应 450×272 画布
+	if len(out) > 200*1024 {
+		t.Errorf("sixel 载荷 = %d 字节, want < 200KB（量化上限+RLE 未生效？）", len(out))
+	}
+	t.Logf("sixel 载荷 = %d 字节", len(out))
 }

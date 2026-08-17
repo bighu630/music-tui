@@ -14,15 +14,21 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"music-tui/coverrender"
 	"music-tui/logger"
 )
 
 // overlayOut 覆盖层输出目标（包级可替换，测试捕获用）。真实运行 = os.Stdout。
-// 与 bubbletea 渲染器在同一 goroutine 依次执行（View 内同步写出，先于帧 flush），
-// 无并发写竞争。
-var overlayOut io.Writer = os.Stdout
+// 写出与 bubbletea 渲染器的帧 flush（ticker goroutine，60fps）并发写同一 fd——
+// overlayMu 保证覆盖层自身的写出原子性；载荷本身已做尺寸压缩（sixel 量化上限
+// + RLE，实测 4KB 级），交错窗口极小。DCS 一旦损坏终端整体丢弃，下次 token
+// 变化（换歌/resize）重写自愈。
+var (
+	overlayMu sync.Mutex
+	overlayOut io.Writer = os.Stdout
+)
 
 type sixelState struct {
 	token  string // 已写出位置标识（track|mode|row|col）
@@ -76,6 +82,8 @@ func writeSixel(row, col int, payload string) {
 	if payload == "" || overlayOut == nil {
 		return
 	}
+	overlayMu.Lock()
+	defer overlayMu.Unlock()
 	var sb string
 	sb = "\x1b[s\x1b[" + fmt.Sprintf("%d;%dH", row+1, col+1) + payload + "\x1b[u"
 	_, _ = io.WriteString(overlayOut, sb)
