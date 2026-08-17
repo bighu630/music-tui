@@ -1,3 +1,8 @@
+//go:build !windows
+
+// 本文件全部用例经由 writeFakeYtDlp 假 yt-dlp 脚本（POSIX sh）驱动真实
+// exec 流程，Windows 无法执行该脚本，整文件跳过（见 cache_test.go 头部
+// 注释）。
 package cache
 
 import (

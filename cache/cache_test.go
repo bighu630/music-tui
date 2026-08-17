@@ -1,3 +1,9 @@
+//go:build !windows
+
+// 本文件多数用例经由 writeFakeYtDlp 假 yt-dlp 脚本（POSIX sh：
+// #!/bin/sh + printf/sed/head /dev/zero）驱动真实 exec 流程，Windows 的
+// CreateProcess 无法直接执行无扩展名的 shell 脚本，故整文件在 Windows
+// 上跳过（构建与 index/name/validate 等纯逻辑测试不受影响）。
 package cache
 
 import (
