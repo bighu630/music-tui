@@ -53,7 +53,7 @@ func Sixel(img image.Image, width, height, cellW, cellH int) string {
 	var sb strings.Builder
 	sb.WriteString("\x1bPq")
 	cur := -1 // 当前已选中的颜色槽
-	def := [64]bool{}
+	def := [216]bool{}
 	// rleRun 输出当前待写字符（含 RLE 压缩）：连续相同 ≥3 个用 !N 前缀。
 	rleRun := func(w *strings.Builder, ch byte, n int) {
 		if n <= 0 {
@@ -76,7 +76,7 @@ func Sixel(img image.Image, width, height, cellW, cellH int) string {
 		var bandColors []int
 		rowColor := make([][]int, boxW) // 每列 band 各行的量化色
 		{
-			seen := [64]bool{}
+			seen := [216]bool{}
 			for x := 0; x < boxW; x++ {
 				rowColor[x] = make([]int, rows)
 				for r := 0; r < rows; r++ {
@@ -117,10 +117,10 @@ func Sixel(img image.Image, width, height, cellW, cellH int) string {
 				cur = c
 				if !def[c] {
 					def[c] = true
-					r4, g4, b4 := c/16, (c/4)%4, c%4
+					r6, g6, b6 := c/36, (c/6)%6, c%6
 					toPct := func(v int) int { return v * 100 / 255 }
 					sb.WriteString(fmt.Sprintf("#%d;2;%d;%d;%d", c,
-						toPct(r4*85), toPct(g4*85), toPct(b4*85)))
+						toPct(r6*255/5), toPct(g6*255/5), toPct(b6*255/5)))
 				} else {
 					sb.WriteString(fmt.Sprintf("#%d", c))
 				}
@@ -158,9 +158,9 @@ func Sixel(img image.Image, width, height, cellW, cellH int) string {
 
 // colorDist 两量化色的 RGB 距离（欧氏平方）。
 func colorDist(a, b int) int {
-	ar4, ag4, ab4 := a/16, (a/4)%4, a%4
-	br4, bg4, bb4 := b/16, (b/4)%4, b%4
-	dr, dg, db := ar4-br4, ag4-bg4, ab4-bb4
+	ar6, ag6, ab6 := a/36, (a/6)%6, a%6
+	br6, bg6, bb6 := b/36, (b/6)%6, b%6
+	dr, dg, db := ar6-br6, ag6-bg6, ab6-bb6
 	return dr*dr + dg*dg + db*db
 }
 
@@ -171,10 +171,10 @@ func SixelClear(width, height, cellW, cellH int) string {
 	return Sixel(bg, width, height, cellW, cellH)
 }
 
-// quantizeSixel 4×4×4 色彩立方体量化（64 色，0..63）。
+// quantizeSixel 6×6×6 色彩立方体量化（216 色，0..215）。
 func quantizeSixel(c color.RGBA) int {
-	r4 := int(c.R) * 4 / 256
-	g4 := int(c.G) * 4 / 256
-	b4 := int(c.B) * 4 / 256
-	return r4*16 + g4*4 + b4
+	r6 := int(c.R) * 6 / 256
+	g6 := int(c.G) * 6 / 256
+	b6 := int(c.B) * 6 / 256
+	return r6*36 + g6*6 + b6
 }

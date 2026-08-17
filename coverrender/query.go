@@ -59,7 +59,7 @@ func QueryCapability(timeout time.Duration) (Mode, bool) {
 	if m := fontCellSizeRe.FindStringSubmatch(s); m != nil {
 		if h, err1 := strconv.Atoi(m[1]); err1 == nil {
 			if w, err2 := strconv.Atoi(m[2]); err2 == nil && w > 0 && h > 0 {
-				SetFontCellSize(w, h)
+				SetFontCellSize(w, h) // 16t 是权威来源
 			}
 		}
 	}
@@ -116,7 +116,7 @@ func CalibrateCellSize(timeout time.Duration) (w, h, rows int, ok bool) {
 	if ew, eok := envInt("MUSIC_TUI_CELL_W"); eok && ew > 0 {
 		w = ew
 	}
-	SetFontCellSize(w, h)
+	SetCalibratedCellSize(w, h)
 	// 清掉测试图（背景色覆盖）
 	clear := Sixel(solidImage(calPx, calPx, color.RGBA{0, 0, 0, 255}), 1, 1, calPx, calPx)
 	_, _ = io.WriteString(os.Stdout, "\x1b[1;1H"+clear)
