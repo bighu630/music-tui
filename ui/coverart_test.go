@@ -46,6 +46,55 @@ func TestRenderCoverArtFixedSize(t *testing.T) {
 	}
 }
 
+// TestRenderCoverArtScaleFit16x9 ScaleFit 语义：16:9 图（64×36）在 30×17 格
+// （30×34px 像素框）内等比例缩放为 30×17px 并垂直居中——上下各 ~4 行列纯
+// 背景色空格留白（不得出现 ▀），中间 4..12 行含 ▀（渐变有上下色差），
+// 不拉伸变形。
+func TestRenderCoverArtScaleFit16x9(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 64, 36))
+	for y := 0; y < 36; y++ {
+		for x := 0; x < 64; x++ {
+			g := y * 24
+			if g > 255 {
+				g = 255
+			}
+			img.Set(x, y, color.RGBA{uint8(x * 4), uint8(g), 128, 255})
+		}
+	}
+	out := renderCoverArt(img, 30, 17)
+	lines := strings.Split(out, "\n")
+	if len(lines) != 17 {
+		t.Fatalf("行数 = %d, want 17", len(lines))
+	}
+	for i, ln := range lines {
+		if w := ansi.StringWidth(ln); w != 30 {
+			t.Errorf("行 %d 可见宽 = %d, want 30", i, w)
+		}
+	}
+	// ScaleFit(64,36,30,34) → 30×17px，offsetY=(34-17)/2=8 → 图像占像素行
+	// 8..24 → 格行 4..12；第 0-3、13-16 行是纯留白，不得出现 ▀。
+	for i := 0; i < 4; i++ {
+		if strings.Contains(lines[i], "▀") {
+			t.Errorf("行 %d 应为纯留白（背景色空格）: %q", i, lines[i])
+		}
+	}
+	for i := 13; i <= 16; i++ {
+		if strings.Contains(lines[i], "▀") {
+			t.Errorf("行 %d 应为纯留白（背景色空格）: %q", i, lines[i])
+		}
+	}
+	anyBlock := false
+	for i := 4; i <= 12; i++ {
+		if strings.Contains(lines[i], "▀") {
+			anyBlock = true
+			break
+		}
+	}
+	if !anyBlock {
+		t.Error("中间行 4..12 应含 ▀（渐变有上下色差）")
+	}
+}
+
 // TestRenderCoverArtEdges 边界：单色图退化（无 ▀）、1×1 小图、空图不 panic。
 func TestRenderCoverArtEdges(t *testing.T) {
 	// 单色：上下同色 → 全部退化为背景色空格
