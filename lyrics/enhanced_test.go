@@ -760,14 +760,15 @@ func TestEnhancedCNFallsToQQ(t *testing.T) {
 	}
 }
 
-// TestEnhancedCNTimeRule 网易云候选时长差 >3s → 跳过 → QQ 命中
-// （时长规则同样约束中文源）。
+// TestEnhancedCNTimeRule 网易云候选全部时长差 >3s → 跳过 → QQ 命中
+// （时长规则同样约束中文源，宁缺毋滥）。
 func TestEnhancedCNTimeRule(t *testing.T) {
 	neteaseWrongDur := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/api/search/get" {
 			_, _ = w.Write([]byte(`{"code":200,"result":{"songs":[
-				{"id":999,"name":"病态","artists":[{"name":"薛之谦"}],"duration":300000}]}}`)) // Δ=20s
+				{"id":999,"name":"病态","artists":[{"name":"薛之谦"}],"duration":300000},
+				{"id":998,"name":"病态","artists":[{"name":"薛之谦"}],"duration":284000}]}}`)) // Δ=20s/4s
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -920,5 +921,113 @@ func TestEnhancedCNUnknownTargetDuration(t *testing.T) {
 	_, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙", Duration: 0})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound（目标时长未知，中文源全部跳过）", err)
+	}
+}
+
+// TestEnhancedCNClosestDurationFirst 多候选通过时长过滤时按时长差距
+// 升序取词（差距最小者优先，与 lrclib 严格路径 chooseBestWithin 语义
+// 一致）：源返回顺序 A(Δ=2.9s) 在前、B(Δ=0.5s) 在后 → 应取 B，且只
+// 请求 B 的歌词（排序后才试取，不浪费请求在更远候选上）。
+func TestEnhancedCNClosestDurationFirst(t *testing.T) {
+	var lyricCalls []string
+	netease := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/search/get":
+			_, _ = w.Write([]byte(`{"code":200,"result":{"songs":[
+				{"id":1001,"name":"病态","artists":[{"name":"薛之谦"}],"duration":282900},
+				{"id":1002,"name":"病态","artists":[{"name":"薛之谦"}],"duration":280500}]}}`)) // Δ=2.9s / Δ=0.5s
+		case "/api/song/lyric":
+			lyricCalls = append(lyricCalls, r.URL.Query().Get("id"))
+			switch r.URL.Query().Get("id") {
+			case "1001":
+				_, _ = w.Write([]byte(`{"code":200,"lrc":{"lyric":"[00:01.00]远距候选\n"}}`))
+			case "1002":
+				_, _ = w.Write([]byte(`{"code":200,"lrc":{"lyric":"[00:01.00]近距候选\n"}}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+	c, _ := newCNEnv(t, netease, nil)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(res.Lyrics.Lines) != 1 || res.Lyrics.Lines[0].Text != "近距候选" {
+		t.Errorf("应取时长差距最小的候选 B（Δ=0.5s）: got %+v", res.Lyrics.Lines)
+	}
+	if len(lyricCalls) != 1 || lyricCalls[0] != "1002" {
+		t.Errorf("应只请求最近候选的歌词, got %v", lyricCalls)
+	}
+}
+
+// TestEnhancedCNClosestLyricErrorFallsToNext 同源内最近候选取词失败 →
+// 继续尝试次近候选（不弃源）；源返回顺序与排序顺序相反时按排序试取：
+// 源返回 [B(Δ=1.0s, 取词成功), A(Δ=0.5s, 取词 500)] → 应先试 A（最近），
+// 失败后试 B 成功，取词请求序列 = [A, B]。
+func TestEnhancedCNClosestLyricErrorFallsToNext(t *testing.T) {
+	var lyricCalls []string
+	netease := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/search/get":
+			_, _ = w.Write([]byte(`{"code":200,"result":{"songs":[
+				{"id":2001,"name":"病态","artists":[{"name":"薛之谦"}],"duration":281000},
+				{"id":2002,"name":"病态","artists":[{"name":"薛之谦"}],"duration":280500}]}}`)) // Δ=1.0s / Δ=0.5s
+		case "/api/song/lyric":
+			lyricCalls = append(lyricCalls, r.URL.Query().Get("id"))
+			if r.URL.Query().Get("id") == "2002" { // 最近候选取词失败
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte(`{"code":200,"lrc":{"lyric":"[00:01.00]次近候选\n"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+	c, _ := newCNEnv(t, netease, nil)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙 JokerXue", Duration: 280.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(res.Lyrics.Lines) != 1 || res.Lyrics.Lines[0].Text != "次近候选" {
+		t.Errorf("最近候选取词失败应继续同源次近候选: got %+v", res.Lyrics.Lines)
+	}
+	if len(lyricCalls) != 2 || lyricCalls[0] != "2002" || lyricCalls[1] != "2001" {
+		t.Errorf("取词请求应按差距升序 [2002, 2001], got %v", lyricCalls)
+	}
+}
+
+// TestEnhancedCNExactBoundaryAccepted 边界：Δ=3.0s 恰好在阈值内采用、
+// Δ=3.01s 弃用（与 lrclib 严格路径同阈值同语义）。
+func TestEnhancedCNExactBoundaryAccepted(t *testing.T) {
+	netease := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/search/get":
+			_, _ = w.Write([]byte(`{"code":200,"result":{"songs":[
+				{"id":3001,"name":"病态","artists":[{"name":"薛之谦"}],"duration":283010},
+				{"id":3002,"name":"病态","artists":[{"name":"薛之谦"}],"duration":283000}]}}`)) // Δ=3.01s / Δ=3.0s
+		case "/api/song/lyric":
+			switch r.URL.Query().Get("id") {
+			case "3002":
+				_, _ = w.Write([]byte(`{"code":200,"lrc":{"lyric":"[00:01.00]边界候选\n"}}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+	c, _ := newCNEnv(t, netease, nil)
+	res, err := c.Fetch(context.Background(), model.Track{Title: "病态", Artist: "薛之謙", Duration: 280.0})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(res.Lyrics.Lines) != 1 || res.Lyrics.Lines[0].Text != "边界候选" {
+		t.Errorf("Δ=3.0s 应在阈值内采用（Δ=3.01s 弃用）: got %+v", res.Lyrics.Lines)
 	}
 }

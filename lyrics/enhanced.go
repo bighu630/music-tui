@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -125,9 +126,12 @@ func (e *EnhancedClient) Fetch(ctx context.Context, track model.Track) (FetchRes
 	return FetchResult{Lyrics: ly, Title: res.Title, Artist: res.Artist}, nil
 }
 
-// fetchCN 按序查询中文歌词源（网易云 → QQ）：候选时长与目标差距 >3s
-// 跳过（用户时长规则同样约束中文源）；纯文本/空歌词视为未命中；
-// 源请求失败记日志继续下一源。全部未命中返回 (nil, false)。
+// fetchCN 按序查询中文歌词源（网易云 → QQ）：候选先按时长过滤（未知或
+// 与目标差距 >3s 跳过，用户时长规则同样约束中文源），通过过滤的候选再
+// 按差距升序排序——差距最小者优先取词（与 lrclib 严格路径
+// chooseBestWithin 语义一致）。同源内按序试取：Lyric 失败继续下一候选，
+// 全部失败才进下一源；纯文本/空歌词视为未命中；源请求失败记日志继续
+// 下一源。全部未命中返回 (nil, false)。
 func (e *EnhancedClient) fetchCN(ctx context.Context, title, artist string, duration float64) (*Lyrics, bool) {
 	for _, src := range e.cnSources {
 		songs, err := src.Search(ctx, title, artist)
@@ -135,12 +139,21 @@ func (e *EnhancedClient) fetchCN(ctx context.Context, title, artist string, dura
 			logger.Warn("歌词源搜索失败（继续下一源）: %v", err)
 			continue
 		}
+		// 时长规则与 lrclib 严格路径一致：候选时长未知（0）或与目标
+		// 差距 >3s → 视为不同曲目，跳过（宁缺毋滥）。
+		cands := make([]cnSong, 0, len(songs))
 		for _, s := range songs {
-			// 时长规则与 lrclib 严格路径一致：候选时长未知（0）或与目标
-			// 差距 >3s → 视为不同曲目，跳过（宁缺毋滥）。
 			if s.Duration == 0 || math.Abs(s.Duration-duration) > maxAIDurationDelta {
 				continue
 			}
+			cands = append(cands, s)
+		}
+		// 差距最小者优先：先试时长最接近的候选（稳定排序保持等距候选
+		// 的源返回顺序）。
+		sort.SliceStable(cands, func(i, j int) bool {
+			return math.Abs(cands[i].Duration-duration) < math.Abs(cands[j].Duration-duration)
+		})
+		for _, s := range cands {
 			ly, err := src.Lyric(ctx, s.ID)
 			if err != nil {
 				logger.Warn("歌词源取词失败（继续下一候选）: %v", err)
