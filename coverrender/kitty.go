@@ -157,15 +157,28 @@ func Kitty(img image.Image, width, height, cellW, cellH int) string {
 		height = DefaultH
 	}
 
-	// 1. 布局几何（cell 单位，ScaleFit 比值运算天然支持）
-	imgC, imgR := ScaleFit(srcW, srcH, width, height)
+	// 1. 布局几何：**像素空间**（cell 不是正方形——高 cellH、宽 cellW 不等，
+	// 用单元尺度的 ScaleFit 会把方形封面算成 17×17 格（半宽）；必须按
+	// 像素框 width*cellW × height*cellH 缩放到真实比例，再换算占格数）。
+	boxW, boxH := width*cellW, height*cellH
+	imgPxW, imgPxH := ScaleFit(srcW, srcH, boxW, boxH)
+	imgC := imgPxW / cellW // 占格宽
 	if imgC < 1 {
 		imgC = 1
 	}
+	imgR := (imgPxH + cellH - 1) / cellH // 占格高（ceil）
 	if imgR < 1 {
 		imgR = 1
 	}
+	if imgC > width {
+		imgC = width
+	}
+	if imgR > height {
+		imgR = height
+	}
 	offsetX, offsetY := CenterIn(imgC, imgR, width, height)
+	// 传输像素：与放置占格严格对齐（pxW/imgC == cellW，pxH/imgR == cellH，
+	// 终端按该占格显示时像素比例与源图一致，无拉伸）
 	pxW, pxH := imgC*cellW, imgR*cellH
 
 	// 2. 传输数据：双线性缩放 → PNG → zlib → base64 分块

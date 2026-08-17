@@ -35,7 +35,7 @@ func SetCapability(m Mode) {
 
 // QueryCapability 向终端发起能力查询（best-effort，timeout 超时返回 half,false）：
 //   - DA1（\x1b[c）：响应含 ";4"（sixel 属性）→ ModeSixel
-//   - kitty 图形查询（\x1b_Gi=31,a=q,s=1,v=1）：响应含 "OK" → ModeKitty
+//   - kitty 图形查询（\x1b_Gi=31,a=q,s=1,v=1;AAAA）：带 4 字节载荷，响应含 "OK" → ModeKitty
 //     （kitty 对 a=q 的应答格式：\x1b_Gi=31;OK\x1b\\，不支持时 ENOSUPPORT/EBADMSG）
 //   - CSI 16t（\x1b[16t）：响应 \x1b[4;<cellH>;<cellW>t —— 终端自报字符格像素，
 //     与六边形/kitty 渲染同一像素空间（ioctl 的窗口物理像素在 wayland 缩放下
@@ -50,7 +50,7 @@ func QueryCapability(timeout time.Duration) (Mode, bool) {
 	}
 	// 并发发出三个查询（终端串行应答）
 	_, _ = io.WriteString(os.Stdout, "\x1b[c")
-	_, _ = io.WriteString(os.Stdout, "\x1b_Gi=31,s=1,v=1,a=q\x1b\\")
+	_, _ = io.WriteString(os.Stdout, "\x1b_Gi=31,s=1,v=1,a=q;AAAA\x1b\\") // 载荷≥4字节，否则 kitty 回 ENODATA
 	_, _ = io.WriteString(os.Stdout, "\x1b[16t")
 
 	s := string(readResponse(timeout))

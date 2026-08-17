@@ -132,6 +132,7 @@ func (m homeModel) ensureSixel() {
 			m.sixelRedrawPending = false
 			payload := m.sixelPayload
 			rr, cc := row, col
+			logger.Info("sixel 重画: 中间区已重建 (row=%d col=%d payload=%d 字节)", rr, cc, len(payload))
 			go func() {
 				time.Sleep(45 * time.Millisecond)
 				overlayMu.Lock()
