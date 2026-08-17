@@ -538,3 +538,39 @@ func TestSixelPayloadSize(t *testing.T) {
 	}
 	t.Logf("sixel 载荷 = %d 字节", len(out))
 }
+
+// TestDetectModeTMUXKittyRelay tmux 内 kitty 中继：默认回退半块；确认外层
+// kitty（SetTMUXKittyRelay）后允许 kitty；env 仍最高优先。
+func TestDetectModeTMUXKittyRelay(t *testing.T) {
+	old := stdinIsTTY
+	stdinIsTTY = func() bool { return true }
+	defer func() { stdinIsTTY = old }()
+	t.Setenv("TMUX", "/tmp/tmux-x/0,0,0")
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TERM_PROGRAM", "")
+	t.Setenv("KITTY_WINDOW_ID", "")
+
+	t.Run("tmux 内默认半块", func(t *testing.T) {
+		ResetModeCacheForTests()
+		SetTMUXKittyRelay(false)
+		if m := DetectMode(); m != ModeHalf {
+			t.Errorf("tmux 未确认中继 → %v, want half", m)
+		}
+	})
+	t.Run("确认外层 kitty 后允许", func(t *testing.T) {
+		ResetModeCacheForTests()
+		SetCapability(ModeKitty) // 模拟 main 查询 client_termname=*kitty* 后置位
+		SetTMUXKittyRelay(true)
+		if m := DetectMode(); m != ModeKitty {
+			t.Errorf("tmux+kitty 中继确认 → %v, want kitty", m)
+		}
+	})
+	t.Run("env 覆盖仍在 tmux 生效", func(t *testing.T) {
+		t.Setenv("MUSIC_TUI_COVER", "kitty")
+		ResetModeCacheForTests()
+		SetTMUXKittyRelay(false)
+		if m := DetectMode(); m != ModeKitty {
+			t.Errorf("env=kitty 在 tmux 内应生效 → %v", m)
+		}
+	})
+}

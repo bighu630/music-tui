@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -185,6 +186,16 @@ func run() error {
 	} else {
 		logger.Info("终端能力查询: 无应答")
 	}
+	// tmux 内：tmux 3.5+ 会原样中继 pane 的 kitty APC 给外层终端。查外层终端名
+	// （tmux client_termname），确认是 kitty（含 xterm-kitty）才允许在 tmux 内用
+	// kitty——避免 foot 等外层收到 kitty APC 变乱码。
+	if os.Getenv("TMUX") != "" {
+		if termName, ok := tmuxClientTermName(); ok && strings.Contains(strings.ToLower(termName), "kitty") {
+			coverrender.SetCapability(coverrender.ModeKitty)
+			coverrender.SetTMUXKittyRelay(true)
+			logger.Info("tmux 外层终端 %q 支持 kitty，允许中继", termName)
+		}
+	}
 	// 六边形 cell 高度自校准：画已知像素高测试图 + DSR 实测占用行数反推真实
 	// cell 像素（ioctl 物理像素在 wayland 缩放下偏大；CSI 16t 部分终端不支持）。
 	if w, h, rows, ok := coverrender.CalibrateCellSize(250 * time.Millisecond); ok {
@@ -344,4 +355,30 @@ func installHint(tool string) string {
 	default: // linux 等
 		return "sudo apt install " + tool + "（dnf: sudo dnf install " + tool + "；pacman: sudo pacman -S " + tool + "）"
 	}
+}
+
+// tmuxClientTermName 查询 tmux 外层终端名（client_termname，如 xterm-kitty /
+// xterm-256color）。不在 tmux 内或查询失败返回 ok=false。
+func tmuxClientTermName() (name string, ok bool) {
+	if os.Getenv("TMUX") == "" {
+		return "", false
+	}
+	out, err := exec.Command("tmux", "display-message", "-p", "#{client_termname}").Output()
+	if err != nil || len(out) == 0 {
+		return "", false
+	}
+	return string(trimSpaceBytes(out)), true
+}
+
+// trimSpaceBytes 简易去空白（避免单独引 bytes 包）。
+func trimSpaceBytes(b []byte) []byte {
+	s := 0
+	for s < len(b) && (b[s] == ' ' || b[s] == '\t' || b[s] == '\n' || b[s] == '\r') {
+		s++
+	}
+	e := len(b)
+	for e > s && (b[e-1] == ' ' || b[e-1] == '\t' || b[e-1] == '\n' || b[e-1] == '\r') {
+		e--
+	}
+	return b[s:e]
 }

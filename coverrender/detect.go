@@ -82,6 +82,12 @@ func computeMode() Mode {
 		return ModeHalf
 	}
 	// 3. tmux/screen 内：保守回退
+	// 3. tmux/screen 内：保守回退。**例外**：外层经 tmux 中继 kitty 已确认
+	// （tmux 3.5+ 原生中继 kitty APC，main 查询 client_termname=*kitty* 后
+	// SetTMUXKittyRelay 置位）→ 允许 kitty（tmux 把 APC 原样转给外层 kitty）。
+	if kittyThroughTMUX {
+		return ModeKitty
+	}
 	if os.Getenv("TMUX") != "" || strings.Contains(strings.ToLower(os.Getenv("TERM")), "screen") {
 		return ModeHalf
 	}
@@ -111,8 +117,19 @@ func computeMode() Mode {
 	return ModeHalf
 }
 
+// kittyThroughTMUX 是否已确证“外层 kitty + tmux 中继”的 kitty（仅当 main 查得
+// 外层终端为 kitty 且 tmux 3.5+ 会中继 APC 时置位——防止 foot 等外层在 tmux
+// 内收到 kitty APC 变乱码）。
+var kittyThroughTMUX bool
+
+// SetTMUXKittyRelay 确证“外层 kitty + tmux 中继”，允许在 tmux 内启用 kitty。
+func SetTMUXKittyRelay(ok bool) {
+	kittyThroughTMUX = ok
+}
+
 // ResetModeCacheForTests 清空进程级探测缓存（测试改 env 后调用）。
 func ResetModeCacheForTests() {
 	modeOnce = sync.Once{}
 	capabilityMode = ModeHalf
+	kittyThroughTMUX = false
 }
