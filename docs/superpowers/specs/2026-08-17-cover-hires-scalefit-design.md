@@ -53,10 +53,23 @@
 
 ## 不做（YAGNI / 已放弃）
 
-- kitty/sixel/iTerm2 协议渲染（含 go-termimg 委托与自写序列）——真实终端不可行，详见决策 3
 - 封面框随窗口动态变化（用户明确保持 30×17）
 - 旧缓存刷新重下（已验证缓存已是高清源）
 - 动画/多图嵌入（无需求）
+- iTerm2 协议（无需求）
+
+## 最终演进（真实终端验证后定稿）
+
+1. **kitty 内联协议渲染**（自动启用，`KITTY_WINDOW_ID`/能力查询判定）：封面显示真图。
+   关键实现细节：
+   - 几何按**像素空间**（框 = width×cellW × height×cellH，cell 高≠宽），方形封面全宽显示；
+   - 序列为行内 APC（零宽）+ U+10EEEE 占位符网格 + a=p 放置，bubbletea 逐行原始直通
+     已验证可承载；cell 尺寸由 CSI 16t 查询（kitty 支持）或 env 覆盖。
+2. **sixel 仅显式启用**（`MUSIC_TUI_COVER=sixel`）：foot 等网格驻留型终端在图像区域
+   写入任何字符即擦除图像（foot 源码 sixel.c:`sixel_overwrite_by_row` 实测），自动
+   启用经验不可靠；konsole 等覆盖型终端可持久。默认关闭。
+3. **全部其它终端（foot/konsole/普通）→ 像素风**（半块自绘 ScaleFit+双线性，纯 256 色
+   SGR，任何环境布局恒定）。
 
 ## 遗留说明
 
