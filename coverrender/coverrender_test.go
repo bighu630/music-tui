@@ -550,11 +550,20 @@ func TestDetectModeTMUXKittyRelay(t *testing.T) {
 	t.Setenv("TERM_PROGRAM", "")
 	t.Setenv("KITTY_WINDOW_ID", "")
 
-	t.Run("tmux 内默认半块", func(t *testing.T) {
+	t.Run("tmux 内 KITTY_WINDOW_ID 透传 → kitty（回归）", func(t *testing.T) {
+		t.Setenv("KITTY_WINDOW_ID", "1")
+		ResetModeCacheForTests()
+		SetTMUXKittyRelay(false)
+		if m := DetectMode(); m != ModeKitty {
+			t.Errorf("tmux + KITTY_WINDOW_ID=1（外层确证 kitty）→ %v, want kitty", m)
+		}
+	})
+	t.Run("tmux 内无 kitty 证据 → 半块", func(t *testing.T) {
+		t.Setenv("KITTY_WINDOW_ID", "")
 		ResetModeCacheForTests()
 		SetTMUXKittyRelay(false)
 		if m := DetectMode(); m != ModeHalf {
-			t.Errorf("tmux 未确认中继 → %v, want half", m)
+			t.Errorf("tmux 未确证 kitty → %v, want half", m)
 		}
 	})
 	t.Run("确认外层 kitty 后允许", func(t *testing.T) {

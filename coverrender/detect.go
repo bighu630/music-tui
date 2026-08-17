@@ -81,12 +81,17 @@ func computeMode() Mode {
 	if !stdinIsTTY() {
 		return ModeHalf
 	}
-	// 3. tmux/screen 内：保守回退
-	// 3. tmux/screen 内：保守回退。**例外**：外层经 tmux 中继 kitty 已确认
-	// （tmux 3.5+ 原生中继 kitty APC，main 查询 client_termname=*kitty* 后
-	// SetTMUXKittyRelay 置位）→ 允许 kitty（tmux 把 APC 原样转给外层 kitty）。
-	if kittyThroughTMUX {
-		return ModeKitty
+	// 3. tmux 内：**优先看外层是否确实是 kitty**（KITTY_WINDOW_ID 只有 kitty 会设，
+	// 透传进 pane 即铁证；tmux 3.5+ 会把 pane 的 kitty APC 原样中继给外层）。
+	// 早期实现把 tmux → half 放在 KITTY_WINDOW_ID 检查之前，导致哪怕外层是 kitty
+	// 也永远回退半块（回归：日志实测 tmux 内 KITTY_WINDOW_ID=1 仍 halfblocks）。
+	if os.Getenv("TMUX") != "" {
+		if os.Getenv("KITTY_WINDOW_ID") != "" {
+			return ModeKitty // 外层确证 kitty，允许中继
+		}
+		if kittyThroughTMUX {
+			return ModeKitty // client_termname 含 kitty（无 KITTY_WINDOW_ID 场景）
+		}
 	}
 	if os.Getenv("TMUX") != "" || strings.Contains(strings.ToLower(os.Getenv("TERM")), "screen") {
 		return ModeHalf
