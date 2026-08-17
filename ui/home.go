@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"music-tui/coverrender"
 	"music-tui/lyrics"
 	"music-tui/lyricshm"
 	"music-tui/model"
@@ -175,8 +176,15 @@ type homeModel struct {
 	aiTitle  string
 	aiArtist string
 
-	coverRenderCache string // 封面渲染缓存：setCover 时渲染一次（固定 30×17 字符画，不依赖终端尺寸）
-	coverFallback    bool   // 封面加载失败 → 占位框
+	coverRenderCache string   // 封面渲染缓存：setCover 时渲染一次（固定 30×17，与终端尺寸无关）
+	coverFallback    bool     // 封面加载失败 → 占位框
+	coverMode        uint8    // 当前封面渲染模式（0=半块/1=kitty/2=sixel；与 coverrender.Mode 对应）
+
+	// sixel 外带覆盖状态：布局只放半块色块，六边形 DCS 在 view() 内按屏幕绝对坐标
+	// 直接写 stdout（像素驻留覆于文本之上，见 ui/coveroverlay.go）。指针共享：
+	// view() 是值接收者，状态变更必须落在共享指针上才能跨渲染循环持久。
+	sixelPayload string        // 全帧 DCS 载荷（空 = 无六像素材质）
+	sixelSt      *sixelState   // 写出状态（token/位置）：view() 内变更，指针可见
 
 	// 中间区渲染缓存（P1-2）：中间区内容仅随封面/歌词/尺寸变化，播放中进度
 	// 推进每帧直接复用（省去 3 个全屏 lipgloss.Place + 逐行宽度计算，渲染 CPU
@@ -194,6 +202,7 @@ func newHomeModel(p player.Player) homeModel {
 		lyricView:   viewport.New(0, 0),
 		lyricsState: lyricsNone,
 		currentLine: -1,
+		sixelSt:      &sixelState{},
 	}
 }
 
@@ -313,6 +322,7 @@ func (m homeModel) resetForTrack(track *model.Track) homeModel {
 	m.lyricView.SetContent("")
 	m.coverRenderCache = ""
 	m.coverFallback = false
+	m = m.clearSixel() // 切歌：清除已绘制的六像素，等待新封面
 	m.middleCache = "" // 内容全部作废：中间区缓存失效（loading 态读取时也跳过）
 	m.aiTitle, m.aiArtist = "", ""
 	// 切歌:文件写入新曲目歌名(歌词加载中/无歌词期间 OBS 等展示歌名)。
@@ -431,37 +441,76 @@ func (m homeModel) currentLyricText() string {
 }
 
 // setCover 应用封面结果（root 已校验 trackID 匹配）。
+// 渲染三模式（coverrender.DetectMode）：
+//   - kitty：coverRenderCache = 行内协议序列（APC 零宽、17×30 网格，直通终端），
+//     布局文本流内即可显示图像（见 coverrender 包注释）；
+//   - sixel：coverRenderCache = 半块自绘色块（布局底座），六边形 DCS 由
+//     view() 按屏幕绝对坐标外带写出（像素覆于半块之上，不占文本流）；
+//   - halfblocks：coverRenderCache = 半块自绘（任何终端可用）。
 func (m homeModel) setCover(trackID, path string, err error) homeModel {
 	if m.state.Track == nil {
 		return m
 	}
 	if err != nil {
+		m.clearSixel() // 回退：清除已绘制的六像素
 		m.coverFallback = true
 		return m.rebuildMiddleCache()
 	}
-	// 自绘像素封面：图片 → 缩放 → 固定 coverW×coverH 半块字符画。
-	// 弃用 go-termimg（mosaic 尺寸单位是像素需 ×2 折算、tmux 下渲染输出
-	// 行数不稳定实测 1~17 行漂移、每行 SGR 数百字节），自绘输出恒定
-	// 行数/宽度、纯 256 色 SGR，与终端特性无关。
 	f, err := os.Open(path)
 	if err != nil {
+		m.clearSixel()
 		m.coverFallback = true
 		return m.rebuildMiddleCache()
 	}
 	defer f.Close()
 	img, _, err := image.Decode(f)
 	if err != nil {
+		m.clearSixel()
 		m.coverFallback = true
 		return m.rebuildMiddleCache()
 	}
-	s := renderCoverArt(img, coverW, coverH)
-	if s == "" {
-		m.coverFallback = true
+	mode := coverrender.DetectMode()
+	m.coverMode = uint8(mode)
+	switch mode {
+	case coverrender.ModeKitty:
+		// 行内 kitty 序列：APC 零宽、占位符网格 17×30，直通终端显示
+		cellW, cellH := coverrender.FontCellSize()
+		s := coverrender.Kitty(img, coverW, coverH, cellW, cellH)
+		if s == "" {
+			m.coverFallback = true
+			return m.rebuildMiddleCache()
+		}
+		m.clearSixel()
+		m.coverRenderCache = s
+		m.coverFallback = false
+		return m.rebuildMiddleCache()
+	case coverrender.ModeSixel:
+		// 布局底座 = 半块自绘；六边形 DCS 外带写出
+		cellW, cellH := coverrender.FontCellSize()
+		m.sixelPayload = coverrender.Sixel(img, coverW, coverH, cellW, cellH)
+		if st := m.sixelSt; st != nil {
+			st.token = "" // 强制下次 view() 重写（含清旧景）
+			st.drawn = false
+		}
+		s := coverrender.HalfBlocks(img, coverW, coverH)
+		if s == "" {
+			m.coverFallback = true
+			return m.rebuildMiddleCache()
+		}
+		m.coverRenderCache = s
+		m.coverFallback = false
+		return m.rebuildMiddleCache()
+	default: // halfblocks 回退
+		m.clearSixel()
+		s := coverrender.HalfBlocks(img, coverW, coverH)
+		if s == "" {
+			m.coverFallback = true
+			return m.rebuildMiddleCache()
+		}
+		m.coverRenderCache = s
+		m.coverFallback = false
 		return m.rebuildMiddleCache()
 	}
-	m.coverRenderCache = s
-	m.coverFallback = false
-	return m.rebuildMiddleCache()
 }
 
 // setSize 响应窗口尺寸变化。
@@ -533,6 +582,9 @@ func (m *homeModel) scrollLyricsTo(idx int) {
 // 无曲目空态：全屏居中提示；有曲目：中间区（封面+歌词）+ 底部进度条行
 // + 底部按钮行。
 func (m homeModel) view() string {
+	// 六像覆盖层：在布局文本流之外把封面图像画到屏幕绝对坐标上
+	// （sixel 模式；kitty 走行内序列、半块走纯文本，均无需此步）。
+	m.ensureSixel()
 	if m.state.Track == nil {
 		hint := lipgloss.NewStyle().
 			Faint(true).

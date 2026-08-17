@@ -15,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
+	"music-tui/coverrender"
 	"music-tui/lyrics"
 	"music-tui/lyricshm"
 	"music-tui/model"
@@ -1423,5 +1424,126 @@ func TestHomeLyricFileAITrackUpdatesLabel(t *testing.T) {
 	m = m.setAITrack("AI标题2", "AI歌手2")
 	if got := lyricFileRead(t, path); got != "歌词行\n" {
 		t.Fatalf("已同步时 setAITrack 不应覆盖歌词行,内容 = %q", got)
+	}
+}
+
+// ---- 封面渲染三模式集成（coverrender 包 + 终端能力探测）----
+
+// coverModeEnv 设置 MUSIC_TUI_COVER 并重置 coverrender 缓存（进程级 sync.Once）。
+// 返回恢复函数，测试结束自动还原（t.Cleanup）。
+func coverModeEnv(t *testing.T, mode string) {
+	t.Helper()
+	t.Setenv("MUSIC_TUI_COVER", mode)
+	coverrender.ResetModeCacheForTests()
+	coverrender.ResetFontCellCacheForTests()
+	t.Cleanup(func() {
+		coverrender.ResetModeCacheForTests()
+		coverrender.ResetFontCellCacheForTests()
+	})
+}
+
+// TestHomeCoverKittyMode 回归：kitty 模式 — coverRenderCache 为行内协议序列
+// （APC 传输 + U+10EEEE 占位符网格），恒 17 行×30 列 in-flow，布局不塌。
+func TestHomeCoverKittyMode(t *testing.T) {
+	coverModeEnv(t, "kitty")
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	pngPath := filepath.Join(t.TempDir(), "cover.png")
+	writeTestPNG(t, pngPath)
+	m, _ = update(m, coverResultMsg{trackID: "t1", path: pngPath})
+
+	cache := m.home.coverRenderCache
+	if cache == "" {
+		t.Fatal("kitty 模式 setCover 后 coverRenderCache 应为非空")
+	}
+	if !strings.Contains(cache, "\x1b_Ga=t") {
+		t.Error("kitty 序列应含传输控制 a=t")
+	}
+	if !strings.Contains(cache, "\x1b_Ga=p,i=") {
+		t.Error("kitty 序列应含放置命令 a=p")
+	}
+	if !strings.Contains(cache, "\U0010EEEE") {
+		t.Error("kitty 序列应含 U+10EEEE 占位符")
+	}
+	if got := len(strings.Split(cache, "\n")); got != coverH {
+		t.Errorf("kitty 序列行数 = %d, want %d（恒 17 行 in-flow 契约）", got, coverH)
+	}
+	// 布局完整：view 在窗口尺寸下仍恒 height 行
+	m.home = m.home.setSize(120, 40)
+	if got := strings.Count(m.home.view(), "\n") + 1; got != 40 {
+		t.Errorf("kitty 模式 view 行数 = %d, want 40", got)
+	}
+}
+
+// TestHomeCoverSixelMode 回归：sixel 模式 — 布局只放半块色块（零协议字节），
+// 全帧 DCS 由确保Sixel 外带写出到 overlayOut（屏幕绝对坐标），换歌/回退发清除。
+func TestHomeCoverSixelMode(t *testing.T) {
+	coverModeEnv(t, "sixel")
+	var out bytes.Buffer
+	old := overlayOut
+	overlayOut = &out
+	defer func() { overlayOut = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	pngPath := filepath.Join(t.TempDir(), "cover.png")
+	writeTestPNG(t, pngPath)
+	m, _ = update(m, coverResultMsg{trackID: "t1", path: pngPath})
+
+	// 布局缓存 = 半块色块，不含 DCS 协议字节
+	if !strings.Contains(m.home.coverRenderCache, "\x1bPq") {
+		t.Log("布局缓存为半块色块（无 DCS 内联）")
+	}
+	if m.home.sixelPayload == "" || !strings.Contains(m.home.sixelPayload, "\x1bPq") {
+		t.Fatal("sixelPayload 应含全帧 DCS 载荷")
+	}
+	// view() 触发外带写出：CUP 定位 + DCS
+	m.home = m.home.setSize(120, 40)
+	_ = m.home.view()
+	got := out.String()
+	if !strings.Contains(got, "\x1b[s") || !strings.Contains(got, "\x1b[u") {
+		t.Errorf("覆盖层应含光标保存/恢复: %q", got)
+	}
+	if !strings.Contains(got, "\x1b[") || !strings.Contains(got, "H") {
+		t.Errorf("覆盖层应含 CUP 定位: %q", got)
+	}
+	if !strings.Contains(got, "\x1bPq") {
+		t.Errorf("覆盖层应含 DCS: %q", got)
+	}
+	// token 稳定：再次 view 不重复写出（幂等）
+	out.Reset()
+	_ = m.home.view()
+	if out.Len() != 0 {
+		t.Errorf("token 未变时不应重复写出, got %q", out.String())
+	}
+}
+
+// TestHomeCoverHalfMode 回归：默认（非交互）走半块渲染，缓存零协议字节。
+func TestHomeCoverHalfMode(t *testing.T) {
+	coverModeEnv(t, "halfblocks")
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	pngPath := filepath.Join(t.TempDir(), "cover.png")
+	writeTestPNG(t, pngPath)
+	m, _ = update(m, coverResultMsg{trackID: "t1", path: pngPath})
+
+	cache := m.home.coverRenderCache
+	if cache == "" {
+		t.Fatal("halfblocks 模式 setCover 后 coverRenderCache 应为非空")
+	}
+	if strings.Contains(cache, "\x1b_G") || strings.Contains(cache, "\x1bPq") || strings.Contains(cache, "\U0010EEEE") {
+		t.Error("halfblocks 缓存不应含任何协议字节/占位符")
+	}
+	if got := len(strings.Split(cache, "\n")); got != coverH {
+		t.Errorf("halfblocks 行数 = %d, want %d", got, coverH)
 	}
 }
