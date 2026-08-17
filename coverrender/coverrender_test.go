@@ -574,3 +574,28 @@ func TestDetectModeTMUXKittyRelay(t *testing.T) {
 		}
 	})
 }
+
+// TestKittyPayloadSizeBound 回归：大 cell（tmux 内 14×27 格 → 显示 420×459px）
+// 传输分辨率封顶到基准 8×16 格（240×272px），载荷从 300-500KB 压到 ~100KB 内
+//（tmux 中继超大 APC 易丢）。
+func TestKittyPayloadSizeBound(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		cellW, cellH      int
+		wantTransmitLimit bool
+	}{
+		{"大 cell(tmux 14x27) 封顶", 14, 27, true},
+		{"标准 8x16 不缩", 8, 16, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := Kitty(gradientImg(512, 512), 30, 17, tc.cellW, tc.cellH)
+			if tc.wantTransmitLimit && len(out) > 120*1024 {
+				t.Errorf("载荷 = %d 字节, want ≤120KB（传输封顶未生效）", len(out))
+			}
+			if !tc.wantTransmitLimit && len(out) > 300*1024 {
+				t.Errorf("标准 cell 载荷过大 = %d 字节", len(out))
+			}
+			t.Logf("%s 载荷 = %d 字节", tc.name, len(out))
+		})
+	}
+}

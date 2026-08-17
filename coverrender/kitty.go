@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"strings"
 	"sync/atomic"
 )
@@ -178,8 +179,25 @@ func Kitty(img image.Image, width, height, cellW, cellH int) string {
 	}
 	offsetX, offsetY := CenterIn(imgC, imgR, width, height)
 	// 传输像素：与放置占格严格对齐（pxW/imgC == cellW，pxH/imgR == cellH，
-	// 终端按该占格显示时像素比例与源图一致，无拉伸）
+	// 终端按该占格显示时像素比例与源图一致，无拉伸）。
 	pxW, pxH := imgC*cellW, imgR*cellH
+	// **传输分辨率封顶**：终端显示大小由占格 (imgC×imgR) 决定，kitty 会把收到的
+	// 图放大到占格呈现——大 cell（如 tmux 内 14×27 格 → 显示 420×459px）时全尺寸
+	// 传图会让 APC 达 300-500KB，tmux 中继（及其它通道）极易丢弃；按基准 8×16 格
+	// 的显示像素封顶（240×272），显示清晰度基本不变（终端再放大到占格），载荷降到
+	// ~50KB 级。标准 8×16 格终端不受影响（px 已 ≤ 基准）。
+	if tW, tH := width*8, height*16; pxW > tW || pxH > tH {
+		if s := math.Min(float64(tW)/float64(pxW), float64(tH)/float64(pxH)); s < 1 && s > 0 {
+			pxW = int(float64(pxW) * s)
+			pxH = int(float64(pxH) * s)
+			if pxW < 1 {
+				pxW = 1
+			}
+			if pxH < 1 {
+				pxH = 1
+			}
+		}
+	}
 
 	// 2. 传输数据：双线性缩放 → PNG → zlib → base64 分块
 	id := coverImageID.Add(1)
