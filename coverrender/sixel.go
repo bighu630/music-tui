@@ -12,12 +12,12 @@ import (
 // 布局契约：源图等比例缩放到 width*cellW × height*cellH 像素的全帧画布
 // （留边填深色 RGB{16,16,16} letterbox，不裁切、不超出、比例不变），整块编码为
 // sixel DCS。返回串不含尾随换行（不构成 in-flow 行），集成层把它写到屏幕坐标
-// (row,col) 后图像恰好铺满 width×height 个字符格——sixel 像素驻留且覆盖文本，
-// 后续帧的布局文本（占位框）绘制在其下方，不影响显示；换歌/回退时用 SixelClear
-// 显式清除。
+// (row,col) 后图像恰好铺满 width×height 个字符格。换歌/回退时用 SixelClear 清除。
 //
-// 编码：256 色 6×6×6 立方体量化；每 6 像素一行 band；逐列输出位图字符
-// （'?'+6 位掩码，bit i = 该列第 i 行的像素是否命中该列的当前代表色）。
+// 编码算法（DECDIS 六像素）：每 6 像素一 band；对 band 内每个像素列，按该列 6 行
+// 的**每种颜色**分别输出色选 + 位掩码（bit i = 该列第 i 行是否命中该色）——同列多色
+// 必须逐色输出，否则非首行色像素会丢失（早期实现的缺陷，导致图像空洞/不可见）。
+// 颜色量化为 6×6×6 立方体（216 色）。
 func Sixel(img image.Image, width, height, cellW, cellH int) string {
 	b := img.Bounds()
 	srcW, srcH := b.Dx(), b.Dy()
@@ -46,32 +46,59 @@ func Sixel(img image.Image, width, height, cellW, cellH int) string {
 	cur := -1 // 当前已选中的颜色槽
 	def := [256]bool{}
 	for by := 0; by < boxH; by += 6 {
-		sb.WriteByte('$') // 回车到左边界（同一 band）
+		sb.WriteByte('$') // 回车到左边界（同一 band 新起一行）
 		rows := 6
 		if by+rows > boxH {
 			rows = boxH - by
 		}
 		for x := 0; x < boxW; x++ {
-			rep := quantizeSixel(frame.RGBAAt(x, by))
-			var mask byte
+			// 统计该列 band 各行颜色：按出现顺序（从上到下）逐色输出
+			var colColors []int
+			var rowColor [6]int
 			for r := 0; r < rows; r++ {
-				if quantizeSixel(frame.RGBAAt(x, by+r)) == rep {
-					mask |= 1 << r
+				c := quantizeSixel(frame.RGBAAt(x, by+r))
+				rowColor[r] = c
+				seen := false
+				for _, cc := range colColors {
+					if cc == c {
+						seen = true
+						break
+					}
+				}
+				if !seen {
+					colColors = append(colColors, c)
 				}
 			}
-			if rep != cur {
-				cur = rep
-				if !def[rep] {
-					def[rep] = true
-					r6, g6, b6 := rep/36, (rep/6)%6, rep%6
-					toPct := func(v int) int { return v * 100 / 255 }
-					sb.WriteString(fmt.Sprintf("#%d;2;%d;%d;%d", rep,
-						toPct(r6*255/5), toPct(g6*255/5), toPct(b6*255/5)))
-				} else {
-					sb.WriteString(fmt.Sprintf("#%d", rep))
+			if len(colColors) == 0 {
+				continue
+			}
+			for _, c := range colColors {
+				if c != cur {
+					cur = c
+					if !def[c] {
+						def[c] = true
+						r6, g6, b6 := c/36, (c/6)%6, c%6
+						toPct := func(v int) int { return v * 100 / 255 }
+						sb.WriteString(fmt.Sprintf("#%d;2;%d;%d;%d", c,
+							toPct(r6*255/5), toPct(g6*255/5), toPct(b6*255/5)))
+					} else {
+						sb.WriteString(fmt.Sprintf("#%d", c))
+					}
 				}
 			}
-			sb.WriteByte('?' + mask) // 0x3F + 6 位掩码 → 可见字符
+			// 该列各色掩码：bit i = 第 i 行命中该色
+			for i, c := range colColors {
+				var mask byte
+				for r := 0; r < rows; r++ {
+					if rowColor[r] == c {
+						mask |= 1 << r
+					}
+				}
+				if mask != 0 {
+					sb.WriteByte('?' + mask) // 0x3F + 6 位掩码 → 可见字符
+				}
+				_ = i
+			}
 		}
 		if by+6 < boxH {
 			sb.WriteByte('-') // 移到下一 band

@@ -485,18 +485,15 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 		m.coverFallback = false
 		return m.rebuildMiddleCache()
 	case coverrender.ModeSixel:
-		// 布局底座 = 半块自绘；六边形 DCS 外带写出
+		// 布局底座 = 空白 30×17 格（不画任何文本/SGR——六色图像覆盖其上，
+		// 文本底座会把图像区域整块涂掉/干扰显示）；DCS 由 view() 外带写出
 		cellW, cellH := coverrender.FontCellSize()
 		m.sixelPayload = coverrender.Sixel(img, coverW, coverH, cellW, cellH)
 		if st := m.sixelSt; st != nil {
 			st.token = "" // 强制下次 view() 重写（含清旧景）
 			st.drawn = false
 		}
-		s := coverrender.HalfBlocks(img, coverW, coverH)
-		if s == "" {
-			m.coverFallback = true
-			return m.rebuildMiddleCache()
-		}
+		s := blankCoverGrid(coverW, coverH)
 		m.coverRenderCache = s
 		m.coverFallback = false
 		return m.rebuildMiddleCache()

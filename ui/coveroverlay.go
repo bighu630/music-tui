@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"music-tui/coverrender"
 )
@@ -27,6 +28,16 @@ type sixelState struct {
 	drawn  bool   // 当前画面是否有已写出的六像素（切歌/回退时需先清）
 	posRow int    // 上次写出的屏幕行（0 基，清除用）
 	posCol int
+}
+
+// blankCoverGrid 生成 w 列×h 行的纯空格网格（无任何 SGR/文本内容）——sixel 图像
+// 模式的布局底座：图像覆盖在空白上，避免文字/色块底图干扰显示。
+func blankCoverGrid(w, h int) string {
+	lines := make([]string, h)
+	for i := range lines {
+		lines[i] = strings.Repeat(" ", w)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // coverScreenPos 计算封面框 30×17 内容的屏幕绝对坐标（0 基行/列），供六像素定位。
