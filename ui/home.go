@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"music-tui/coverrender"
+	"music-tui/logger"
 	"music-tui/lyrics"
 	"music-tui/lyricshm"
 	"music-tui/model"
@@ -471,11 +472,15 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 	}
 	mode := coverrender.DetectMode()
 	m.coverMode = uint8(mode)
+	logger.Debug("封面探测: TERM=%q TERM_PROGRAM=%q TMUX=%q KITTY_WINDOW_ID=%q → 模式 %v",
+		os.Getenv("TERM"), os.Getenv("TERM_PROGRAM"), os.Getenv("TMUX"), os.Getenv("KITTY_WINDOW_ID"), mode)
+	logger.Debug("封面渲染模式: %v (track=%s path=%s)", mode, trackID, path)
 	switch mode {
 	case coverrender.ModeKitty:
 		// 行内 kitty 序列：APC 零宽、占位符网格 17×30，直通终端显示
 		cellW, cellH := coverrender.FontCellSize()
 		s := coverrender.Kitty(img, coverW, coverH, cellW, cellH)
+		logger.Debug("kitty 序列生成: %d 字节 %d 行 (cell %dx%d)", len(s), strings.Count(s, "\n")+1, cellW, cellH)
 		if s == "" {
 			m.coverFallback = true
 			return m.rebuildMiddleCache()
@@ -489,6 +494,8 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 		// 文本底座会把图像区域整块涂掉/干扰显示）；DCS 由 view() 外带写出
 		cellW, cellH := coverrender.FontCellSize()
 		m.sixelPayload = coverrender.Sixel(img, coverW, coverH, cellW, cellH)
+		logger.Debug("sixel 载荷生成: %d 字节 (cell %dx%d, 前缀 %q)",
+			len(m.sixelPayload), cellW, cellH, m.sixelPayload[:8])
 		if st := m.sixelSt; st != nil {
 			st.token = "" // 强制下次 view() 重写（含清旧景）
 			st.drawn = false

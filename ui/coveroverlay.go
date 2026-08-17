@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"music-tui/coverrender"
+	"music-tui/logger"
 )
 
 // overlayOut 覆盖层输出目标（包级可替换，测试捕获用）。真实运行 = os.Stdout。
@@ -111,12 +112,15 @@ func (m homeModel) ensureSixel() {
 	// 页面起点 = 顶部 3 行（空行+Tab 栏+分隔线），页面之下 1 行状态栏
 	row, col := coverScreenPos(m.width, m.height+overlayHdrRows+overlayStatusRows, overlayHdrRows)
 	if row == 0 && col == 0 {
+		logger.Debug("sixel 跳过: 窗口过小 (w=%d h=%d)", m.width, m.height)
 		return // 窗口过小：封面被裁剪，不画
 	}
 	token := fmt.Sprintf("%s|%d|%d|%d", m.state.Track.ID, m.coverMode, row, col)
 	if token == st.token && st.drawn {
 		return // 已写出且未变化
 	}
+	logger.Debug("sixel 写出: row=%d col=%d payload=%d 字节 token=%q (旧=%q)",
+		row, col, len(m.sixelPayload), token, st.token)
 	writeSixel(row, col, m.sixelPayload)
 	st.token = token
 	st.drawn = true
