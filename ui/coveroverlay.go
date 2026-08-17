@@ -119,8 +119,8 @@ func (m homeModel) ensureSixel() {
 	if token == st.token && st.drawn {
 		return // 已写出且未变化
 	}
-	logger.Info("sixel 写出: row=%d col=%d payload=%d 字节 token=%q (旧=%q)",
-		row, col, len(m.sixelPayload), token, st.token)
+	logger.Info("sixel 写出: row=%d col=%d (窗口 w=%d h=%d, 屏幕高=%d) payload=%d 字节 token=%q (旧=%q)",
+		row, col, m.width, m.height, m.height+overlayHdrRows+overlayStatusRows, len(m.sixelPayload), token, st.token)
 	writeSixel(row, col, m.sixelPayload)
 	st.token = token
 	st.drawn = true
