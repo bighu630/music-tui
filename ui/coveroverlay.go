@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"music-tui/coverrender"
 	"music-tui/logger"
@@ -125,7 +126,20 @@ func (m homeModel) ensureSixel() {
 	}
 	token := fmt.Sprintf("%s|%d|%d|%d", m.state.Track.ID, m.coverMode, row, col)
 	if token == st.token && st.drawn {
-		return // 已写出且未变化
+		// 已画出：若中间区重建过，foot 网格驻留型六边形可能被行重写擦除——
+		// 延迟重画（等擦除帧 flush 落地后，落笔在安静期；payload 4KB 开销可忽略）。
+		if m.sixelRedrawPending {
+			m.sixelRedrawPending = false
+			payload := m.sixelPayload
+			rr, cc := row, col
+			go func() {
+				time.Sleep(45 * time.Millisecond)
+				overlayMu.Lock()
+				writeSixel(rr, cc, payload)
+				overlayMu.Unlock()
+			}()
+		}
+		return
 	}
 	logger.Info("sixel 写出: row=%d col=%d (窗口 w=%d h=%d, 屏幕高=%d) payload=%d 字节 token=%q (旧=%q)",
 		row, col, m.width, m.height, m.height+overlayHdrRows+overlayStatusRows, len(m.sixelPayload), token, st.token)

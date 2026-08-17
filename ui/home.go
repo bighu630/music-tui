@@ -185,6 +185,7 @@ type homeModel struct {
 	// 直接写 stdout（像素驻留覆于文本之上，见 ui/coveroverlay.go）。指针共享：
 	// view() 是值接收者，状态变更必须落在共享指针上才能跨渲染循环持久。
 	sixelPayload string        // 全帧 DCS 载荷（空 = 无六像素材质）
+	sixelRedrawPending bool    // 中间区已重建：foot 网格驻留型六边形会被行重写擦除，需延迟重画
 	sixelSt      *sixelState   // 写出状态（token/位置）：view() 内变更，指针可见
 
 	// 中间区渲染缓存（P1-2）：中间区内容仅随封面/歌词/尺寸变化，播放中进度
@@ -649,6 +650,11 @@ func (m homeModel) rebuildMiddleCache() homeModel {
 	m.middleCache = m.renderMiddleView()
 	m.middleCacheW = m.width
 	m.middleCacheH = m.middleHeight()
+	// 中间区内容变化 → 封面行可能被帧差量重写（foot 网格驻留型六边形会被重写
+	// 擦除，konsole/kitty 覆盖型不受影响）：标记需延迟重画（ensureSixel 消费）。
+	if m.coverMode == 2 && m.sixelPayload != "" {
+		m.sixelRedrawPending = true
+	}
 	return m
 }
 

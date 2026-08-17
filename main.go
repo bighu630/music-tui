@@ -179,6 +179,11 @@ func run() error {
 	// 查询会与输入循环抢读。DA1（sixel）/ kitty 图形查询超时 250ms，无应答忽略。
 	if mode, ok := coverrender.QueryCapability(250 * time.Millisecond); ok {
 		coverrender.SetCapability(mode)
+		logger.Info("终端能力查询: %v（应答 %q）", mode, coverrender.LastQueryRaw())
+	} else if r := coverrender.LastQueryRaw(); r != "" {
+		logger.Info("终端能力查询: 未确认（应答 %q）", r)
+	} else {
+		logger.Info("终端能力查询: 无应答")
 	}
 	// 六边形 cell 高度自校准：画已知像素高测试图 + DSR 实测占用行数反推真实
 	// cell 像素（ioctl 物理像素在 wayland 缩放下偏大；CSI 16t 部分终端不支持）。

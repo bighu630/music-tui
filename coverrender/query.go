@@ -17,6 +17,12 @@ import (
 
 var capabilityMode Mode // 启动期查询结果（ModeHalf=未确认，回落环境提示）
 
+// lastQueryRaw 最近一次能力查询的原始应答（诊断用，main 日志输出）。
+var lastQueryRaw string
+
+// LastQueryRaw 返回最近一次能力查询的原始应答文本（转义序列原样）。
+func LastQueryRaw() string { return lastQueryRaw }
+
 // fontCellSizeRe 匹配 CSI 16t 应答：\x1b[6;<行高px>;<列宽px>t
 // （注意：子码 6 才是 cell 尺寸；子码 4 是 CSI 14t 窗口像素的应答）
 var fontCellSizeRe = regexp.MustCompile(`\x1b\[6;(\d+);(\d+)t`)
@@ -48,6 +54,7 @@ func QueryCapability(timeout time.Duration) (Mode, bool) {
 	_, _ = io.WriteString(os.Stdout, "\x1b[16t")
 
 	s := string(readResponse(timeout))
+	lastQueryRaw = s
 	// CSI 16t：终端自报字符格像素 \x1b[6;<cellH>;<cellW>t
 	if m := fontCellSizeRe.FindStringSubmatch(s); m != nil {
 		if h, err1 := strconv.Atoi(m[1]); err1 == nil {
