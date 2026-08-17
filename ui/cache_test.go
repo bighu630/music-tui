@@ -5,6 +5,7 @@ package ui
 // 回退网络重试 / 续播恢复命中本地。
 
 import (
+	"runtime"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -257,6 +258,9 @@ func TestResumeCachePreservedOnPlayPausedIpcError(t *testing.T) {
 // 启动，避免与 mpv 内置 yt-dlp 并发访问同一 URL 放大 403 风控（回归：连播
 // 未缓存下一首卡住）。下载完成即缓存，下次恢复/播放直接走本地。
 func TestResumeCacheMissTriggersBackgroundDownload(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("依赖 POSIX sh 假 yt-dlp 脚本，Windows 无法执行，skip")
+    }
 	// 假 yt-dlp 直接下载：解析 -o 模板把合法音频字节（EBML 魔数 + 零填充
 	// 到 2048 ≥ MinAudioSize）落盘到缓存目录（与真实 yt-dlp -o 落盘同语义）；
 	// 文件内容断言证明提取→下载→注册全链路真实走通。

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -379,6 +380,9 @@ func validAudioBytes() []byte {
 // 注册进索引 → 完成信号关闭。轮询 Lookup 命中（超时 5s）后断言
 // 文件落盘（正确文件名 + 合法音频内容）与索引注册。
 func TestSchedulerIntegrationWithRealCache(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本，集成下载链路不可测")
+	}
 	dir := t.TempDir()
 	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: dir},
 		writeFakeYtDlp(t, fakeYtDlpBody(fakeAudioOut)), "", nil)

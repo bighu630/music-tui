@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"runtime"
+
 	"errors"
 	"fmt"
 	"net/http"
@@ -1128,6 +1130,9 @@ func TestYTCookiesFileUnreadable(t *testing.T) {
 
 // 粘贴 Cookie 流程：输入 → ytLoginPasteMsg → 落盘 cookies 文件 + 配置 → 验证成功。
 func TestYTPasteLoginFlow(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义（cookies 文件 0600 断言），skip")
+    }
 	toastSuccessDuration = time.Millisecond // 快进 toast 定时器（BatchMsg 展开会执行 tick）
 	defer func() { toastSuccessDuration = 3 * time.Second }()
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)

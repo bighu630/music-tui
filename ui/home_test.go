@@ -1295,7 +1295,7 @@ func lyricFileTestHome(t *testing.T) (homeModel, string) {
 	t.Helper()
 	m := newHomeModel(nil)
 	path := filepath.Join(t.TempDir(), "lyrics")
-	m.lyricFile = lyricshm.New(path)
+	m.lyricFile = lyricshm.NewForTest(path)
 	return m, path
 }
 

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"runtime"
 	"context"
 	"errors"
 	"fmt"
@@ -2246,6 +2247,9 @@ func ytDlpCallCount(logPath string) int {
 // 预加载集成后下载来源有两个：当前曲预热（TrackStarted）+ 下一首预载
 // （refreshPreload，单曲回绕跳过），二者均与 beginPlay 解耦。
 func TestTrackStartedTriggersCacheWarmup(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("依赖 POSIX sh 假 yt-dlp 脚本或系统根目录可读性差异（Access denied），Windows skip")
+    }
 	fp := newFakePlayer()
 	fa := &fakeSearchAdapter{}
 	logPath := filepath.Join(t.TempDir(), "ytdlp.log")
@@ -2745,6 +2749,9 @@ func TestCacheFallbackImmediateWhenCacheReady(t *testing.T) {
 // 未缓存时取流失败：进入兜底等待（不立即 URL 重试），下载完成后（轮询 Lookup
 // 命中）发 cacheFallbackDoneMsg → 改用本地缓存文件播放。
 func TestCacheFallbackWaitsDownloadThenPlaysLocal(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("依赖 POSIX sh 假 yt-dlp 脚本或系统根目录可读性差异（Access denied），Windows skip")
+    }
 	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpOK(t))
 	tr := testTrack("t1")
 
@@ -2794,6 +2801,9 @@ func TestCacheFallbackWaitsDownloadThenPlaysLocal(t *testing.T) {
 // 播放（playStarted=false）→ 切本地；若 TrackStartedEvent 已到（mpv 已开始
 // 播放）→ 丢弃，保持 URL 播放（对照组子测试）。
 func TestCacheFallbackDoneChecksPlayStarted(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("依赖 POSIX sh 假 yt-dlp 脚本或系统根目录可读性差异（Access denied），Windows skip")
+    }
 	t.Run("未开始播放则切本地", func(t *testing.T) {
 		m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpOK(t))
 		tr := testTrack("t1")
@@ -3464,6 +3474,9 @@ func TestPlaylistLocalAddMsgFailure(t *testing.T) {
 // 防护必须先于 local.Scan 触发：否则 "/" 会先递归扫描整个文件系统
 // （本测试快速安全正依赖此顺序）。
 func TestPlaylistLocalAddMsgRootPath(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("依赖 POSIX sh 假 yt-dlp 脚本或系统根目录可读性差异（Access denied），Windows skip")
+    }
 	for _, p := range []string{string(os.PathSeparator), "."} {
 		m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 		m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})

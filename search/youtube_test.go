@@ -1,6 +1,7 @@
 package search
 
 import (
+	"runtime"
 	"context"
 	"fmt"
 	"os"
@@ -116,6 +117,9 @@ func TestParseYTDLPOutputSkipsLongGarbageLine(t *testing.T) {
 }
 
 func TestSearchTimeout(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	a := NewYouTubeAdapter(writeScript(t, "#!/bin/sh\nwhile :; do :; done\n"))
 	a.timeout = 200 * time.Millisecond
 	start := time.Now()
@@ -131,6 +135,9 @@ func TestSearchTimeout(t *testing.T) {
 }
 
 func TestSearchCanceled(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	a := NewYouTubeAdapter(writeScript(t, "#!/bin/sh\nwhile :; do :; done\n"))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // 立即取消，非超时
@@ -143,6 +150,9 @@ func TestSearchCanceled(t *testing.T) {
 }
 
 func TestSearchErrorIncludesStderr(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	a := NewYouTubeAdapter(writeScript(t, "#!/bin/sh\necho 'ERROR: [youtube] Unable to download API page' >&2\nexit 1\n"))
 	_, err := a.Search(context.Background(), "q")
 	if err == nil {
@@ -251,6 +261,9 @@ func argsCaptureScript(t *testing.T, argsFile string) string {
 }
 
 func TestFetchPlaylistCookieArgs(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	cases := []struct {
 		name    string
 		cookies CookieArgs
@@ -304,6 +317,9 @@ func TestFetchPlaylistCookieArgs(t *testing.T) {
 // yt-dlp 2026.07+ 对私有歌单默认网页 authcheck 验证，失败即报错建议跳过，
 // 跳过对公开/私有歌单均无害）。
 func TestFetchPlaylistAuthcheckSkipped(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
 	a := NewYouTubeAdapter(argsCaptureScript(t, argsFile))
 	const url = "https://music.youtube.com/playlist?list=PL1"
@@ -321,6 +337,9 @@ func TestFetchPlaylistAuthcheckSkipped(t *testing.T) {
 }
 
 func TestFetchPlaylistSubprocessOutput(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	jsonFile := filepath.Join(t.TempDir(), "pl.json")
 	if err := os.WriteFile(jsonFile, []byte(fakePlaylistJSON), 0o644); err != nil {
 		t.Fatal(err)
@@ -336,6 +355,9 @@ func TestFetchPlaylistSubprocessOutput(t *testing.T) {
 }
 
 func TestFetchPlaylistTimeout(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	a := NewYouTubeAdapter(writeScript(t, "#!/bin/sh\nwhile :; do :; done\n"))
 	a.plTimeout = 200 * time.Millisecond
 	start := time.Now()
@@ -351,6 +373,9 @@ func TestFetchPlaylistTimeout(t *testing.T) {
 }
 
 func TestFetchPlaylistCanceled(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	a := NewYouTubeAdapter(writeScript(t, "#!/bin/sh\nwhile :; do :; done\n"))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // 立即取消，非超时
@@ -363,6 +388,9 @@ func TestFetchPlaylistCanceled(t *testing.T) {
 }
 
 func TestFetchPlaylistErrorIncludesStderr(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	a := NewYouTubeAdapter(writeScript(t, "#!/bin/sh\necho 'ERROR: [youtube] Playlist unavailable' >&2\nexit 1\n"))
 	_, err := a.FetchPlaylist(context.Background(), "https://music.youtube.com/playlist?list=PL1", CookieArgs{})
 	if err == nil {
@@ -384,6 +412,9 @@ func searchArgsCaptureScript(t *testing.T, argsFile string) string {
 }
 
 func TestSearchGlobalCookieAndHeaders(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
 	a := NewYouTubeAdapter(searchArgsCaptureScript(t, argsFile))
 	a.SetGlobalYTDlp("/tmp/cookies.txt", map[string]string{
@@ -420,6 +451,9 @@ func TestSearchGlobalCookieAndHeaders(t *testing.T) {
 }
 
 func TestSearchNoGlobalArgsUnchanged(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
 	a := NewYouTubeAdapter(searchArgsCaptureScript(t, argsFile))
 	if _, err := a.Search(context.Background(), "hello"); err != nil {
@@ -436,6 +470,9 @@ func TestSearchNoGlobalArgsUnchanged(t *testing.T) {
 }
 
 func TestFetchPlaylistGlobalCookieFallback(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
 	a := NewYouTubeAdapter(argsCaptureScript(t, argsFile))
 	a.SetGlobalYTDlp("/tmp/global-cookies.txt", nil)
@@ -453,6 +490,9 @@ func TestFetchPlaylistGlobalCookieFallback(t *testing.T) {
 }
 
 func TestFetchPlaylistCookieParamPrecedesGlobal(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
 	a := NewYouTubeAdapter(argsCaptureScript(t, argsFile))
 	a.SetGlobalYTDlp("/tmp/global-cookies.txt", nil)
@@ -474,6 +514,9 @@ func TestFetchPlaylistCookieParamPrecedesGlobal(t *testing.T) {
 }
 
 func TestFetchPlaylistGlobalHeadersAlwaysAppended(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	const url = "https://music.youtube.com/playlist?list=PL1"
 	// CookieArgs 为空：全局 headers 附加
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
@@ -514,6 +557,9 @@ func TestFetchPlaylistGlobalHeadersAlwaysAppended(t *testing.T) {
 }
 
 func TestSetGlobalYTDlpEmptyNoOp(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
 	// 空 cookieFile + 全空/空白 value：不附加任何 --cookies/--add-header
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
 	a := NewYouTubeAdapter(argsCaptureScript(t, argsFile))

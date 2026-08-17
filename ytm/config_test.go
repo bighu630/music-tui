@@ -1,6 +1,7 @@
 package ytm
 
 import (
+	"runtime"
 	"errors"
 	"os"
 	"path/filepath"
@@ -89,6 +90,9 @@ func TestClearLogin(t *testing.T) {
 }
 
 func TestStoreFilePermissionsAndAtomic(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义，skip")
+    }
 	s, path := newTestStore(t)
 	if err := s.SetLogin(LoginConfig{Method: MethodPasted, CookiesPath: "p"}); err != nil {
 		t.Fatal(err)
@@ -159,6 +163,9 @@ func TestCookieHeaderNoLogin(t *testing.T) {
 }
 
 func TestCookieHeaderPasted(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义或浏览器导出不支持，skip")
+    }
 	s, _ := newTestStore(t)
 	p := filepath.Join(filepath.Dir(s.path), "ytm-cookies.txt")
 	raw := "SAPISID=pasted-sap; __Secure-3PAPISID=3p; SID=xxx"
@@ -251,6 +258,9 @@ func TestCookieHeaderCookiesFileNoYTCookies(t *testing.T) {
 }
 
 func TestCookieHeaderBrowserLazyExport(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义或浏览器导出不支持，skip")
+    }
 	home, _ := fakeBrowserHome(t)
 	profileDir := filepath.Join(home, "google-chrome", "Default")
 	key := deriveChromeKey([]byte("peanuts"), linuxKeyIterations)
@@ -289,6 +299,9 @@ func TestCookieHeaderBrowserLazyExport(t *testing.T) {
 
 // SetPastedLogin：落盘 cookies 文件（0600）+ 保存配置 + CookieHeader 可派生。
 func TestSetPastedLogin(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义或浏览器导出不支持，skip")
+    }
 	s, path := newTestStore(t)
 	p, err := s.SetPastedLogin("SAPISID=abc; __Secure-3PAPISID=xyz")
 	if err != nil {

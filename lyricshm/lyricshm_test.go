@@ -15,7 +15,7 @@ import (
 
 // newEnabledWriter 构造一个绕过平台检查的启用 Writer（仅供测试）。
 func newEnabledWriter(path string) *Writer {
-	return &Writer{path: path, enabled: true}
+	return NewForTest(path)
 }
 
 func readFile(t *testing.T, path string) string {

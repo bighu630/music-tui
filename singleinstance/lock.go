@@ -23,12 +23,16 @@ type Lock struct {
 }
 
 // Close 释放单实例锁。重复调用与 nil 接收者均为安全 no-op。
+// 先关闭句柄再调用平台释放：Windows 上不能删除仍被打开的文件的句柄
+// （os.Remove 对打开文件返回 Access denied 且被忽略，锁文件会残留）；
+// unix 的 flock 随文件描述符关闭由内核自动释放（紧随的显式 LOCK_UN
+// 对已关闭的 fd 返回 EBADF，被忽略，语义等价）。
 func (l *Lock) Close() error {
 	if l == nil || l.f == nil {
 		return nil
 	}
-	releaseLock(l) // 平台实现；使用 l.f/l.path/l.pid，必须在置 nil 前调用
 	err := l.f.Close()
-	l.f = nil // 无论 Close 成败都置 nil，保证二次调用安全 no-op
+	l.f = nil
+	releaseLock(l) // 平台实现；使用 l.path/l.pid（l.f 已关闭，unix flock 已随 fd 释放）
 	return err
 }

@@ -42,6 +42,13 @@ func New(path string) *Writer {
 	return w
 }
 
+// NewForTest 创建一个跳过平台/目录检查的启用 Writer（故意不绑定平台限制，
+// 供测试在多平台构造写入用例。生产代码请用 New——非 Linux 平台歌词文件写入
+// 本就应禁用（writeToShm 是 Linux 专属特性）。
+func NewForTest(path string) *Writer {
+	return &Writer{path: path, enabled: true}
+}
+
 // WriteLine 覆盖写入 text 并追加换行。text 为空白串(TrimSpace 为空)时跳过,
 // 保留文件现有内容(空行保留上一行歌词)。禁用时 no-op;写入失败仅 Warn 日志。
 func (w *Writer) WriteLine(text string) {

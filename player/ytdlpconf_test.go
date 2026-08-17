@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -146,6 +147,9 @@ func TestBuildYtdlpConfFiltersConfigLocations(t *testing.T) {
 
 // 临时配置文件权限 0600（含 cookie 头，仅当前用户可读）。
 func TestBuildYtdlpConfFilePerm0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 无 POSIX 权限位语义，跳过 0600 断言")
+	}
 	cleanupTestConf(t)
 	path := buildConfForTest(t, map[string]string{"X-A": "a"})
 	fi, err := os.Stat(path)

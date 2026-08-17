@@ -1,6 +1,7 @@
 package ytm
 
 import (
+	"runtime"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -58,6 +59,9 @@ func TestParseNetscapeEmpty(t *testing.T) {
 }
 
 func TestWriteNetscapePermissionsAndRoundtrip(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
 	path := filepath.Join(t.TempDir(), "cookies.txt")
 	cookies := []Cookie{
 		{Domain: ".youtube.com", IncludeSubdomains: true, Path: "/", Secure: true, Expires: 1750000000, Name: "SAPISID", Value: "abc"},
@@ -173,6 +177,9 @@ func fakeBrowserHome(t *testing.T) (home string, profileDir string) {
 }
 
 func TestExportBrowserCookiesNotFound(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
 	fakeBrowserHome(t) // 空配置目录
 	err := ExportBrowserCookies("chrome", filepath.Join(t.TempDir(), "out.txt"))
 	if !errors.Is(err, ErrBrowserNotFound) {
@@ -181,6 +188,9 @@ func TestExportBrowserCookiesNotFound(t *testing.T) {
 }
 
 func TestExportBrowserCookiesUnsupportedBrowser(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
 	fakeBrowserHome(t)
 	err := ExportBrowserCookies("firefox", filepath.Join(t.TempDir(), "out.txt"))
 	if !errors.Is(err, ErrBrowserNotFound) && !strings.Contains(err.Error(), "不支持") {
@@ -189,6 +199,9 @@ func TestExportBrowserCookiesUnsupportedBrowser(t *testing.T) {
 }
 
 func TestExportBrowserCookiesV10Decrypt(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
 	_, profileDir := fakeBrowserHome(t)
 	key := deriveChromeKey([]byte("peanuts"), linuxKeyIterations)
 	rows := []fakeCookieRow{
@@ -248,6 +261,9 @@ func TestExportBrowserCookiesV10Decrypt(t *testing.T) {
 }
 
 func TestExportBrowserCookiesMeta24StripsPrefix(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
 	_, profileDir := fakeBrowserHome(t)
 	key := deriveChromeKey([]byte("peanuts"), linuxKeyIterations)
 	// meta_version=24：密文带 32 字节 SHA256 前缀，解密后应剥掉
@@ -270,6 +286,9 @@ func TestExportBrowserCookiesMeta24StripsPrefix(t *testing.T) {
 }
 
 func TestExportBrowserCookiesEmptyKeyFallback(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
 	_, profileDir := fakeBrowserHome(t)
 	// Local State 无 encrypted_key → peanuts 优先；cookie 用 empty key 加密 → 降级成功
 	emptyKey := deriveChromeKey(nil, linuxKeyIterations)
@@ -295,6 +314,9 @@ func TestExportBrowserCookiesEmptyKeyFallback(t *testing.T) {
 // Windows/DPAPI 使用）——Local State 存在时 peanuts 仍被尝试（旧实现用
 // encrypted_key 替换 primary，peanuts 永不被尝试导致解密失败）。
 func TestExportBrowserCookiesIgnoresLocalStateKey(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
 	t.Run("peanuts-still-tried", func(t *testing.T) {
 		home, profileDir := fakeBrowserHome(t)
 		_ = home
@@ -352,6 +374,9 @@ func TestExportBrowserCookiesIgnoresLocalStateKey(t *testing.T) {
 }
 
 func TestExportBrowserCookiesNoYouTubeCookies(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
 	_, profileDir := fakeBrowserHome(t)
 	key := deriveChromeKey([]byte("peanuts"), linuxKeyIterations)
 	rows := []fakeCookieRow{
@@ -366,6 +391,9 @@ func TestExportBrowserCookiesNoYouTubeCookies(t *testing.T) {
 }
 
 func TestExportBrowserCookiesDecryptFailure(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
 	_, profileDir := fakeBrowserHome(t)
 	rows := []fakeCookieRow{
 		// 无法解密的垃圾密文（填充校验失败）
@@ -380,6 +408,9 @@ func TestExportBrowserCookiesDecryptFailure(t *testing.T) {
 }
 
 func TestExportBrowserCookiesBraveAlternativeDir(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
 	home, _ := fakeBrowserHome(t)
 	// Brave Linux 实际目录：~/.config/BraveSoftware/Brave-Browser
 	profileDir := filepath.Join(home, "BraveSoftware", "Brave-Browser", "Default")
