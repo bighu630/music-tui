@@ -472,9 +472,9 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 	}
 	mode := coverrender.DetectMode()
 	m.coverMode = uint8(mode)
-	logger.Debug("封面探测: TERM=%q TERM_PROGRAM=%q TMUX=%q KITTY_WINDOW_ID=%q → 模式 %v",
+	logger.Info("封面探测: TERM=%q TERM_PROGRAM=%q TMUX=%q KITTY_WINDOW_ID=%q → 模式 %v",
 		os.Getenv("TERM"), os.Getenv("TERM_PROGRAM"), os.Getenv("TMUX"), os.Getenv("KITTY_WINDOW_ID"), mode)
-	logger.Debug("封面渲染模式: %v (track=%s path=%s)", mode, trackID, path)
+	logger.Info("封面渲染模式: %v (track=%s path=%s)", mode, trackID, path)
 	switch mode {
 	case coverrender.ModeKitty:
 		// 行内 kitty 序列：APC 零宽、占位符网格 17×30，直通终端显示

@@ -119,7 +119,7 @@ func (m homeModel) ensureSixel() {
 	if token == st.token && st.drawn {
 		return // 已写出且未变化
 	}
-	logger.Debug("sixel 写出: row=%d col=%d payload=%d 字节 token=%q (旧=%q)",
+	logger.Info("sixel 写出: row=%d col=%d payload=%d 字节 token=%q (旧=%q)",
 		row, col, len(m.sixelPayload), token, st.token)
 	writeSixel(row, col, m.sixelPayload)
 	st.token = token
