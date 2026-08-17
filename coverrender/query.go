@@ -16,8 +16,9 @@ import (
 
 var capabilityMode Mode // 启动期查询结果（ModeHalf=未确认，回落环境提示）
 
-// fontCellSizeRe 匹配 CSI 16t 应答：\x1b[4;<行高px>;<列宽px>t
-var fontCellSizeRe = regexp.MustCompile(`\x1b\[4;(\d+);(\d+)t`)
+// fontCellSizeRe 匹配 CSI 16t 应答：\x1b[6;<行高px>;<列宽px>t
+// （注意：子码 6 才是 cell 尺寸；子码 4 是 CSI 14t 窗口像素的应答）
+var fontCellSizeRe = regexp.MustCompile(`\x1b\[6;(\d+);(\d+)t`)
 
 // SetCapability 注入启动期能力查询结果（main 在 TUI 启动前调用 QueryCapability
 // 后写入；测试可直接注入）。
@@ -46,7 +47,7 @@ func QueryCapability(timeout time.Duration) (Mode, bool) {
 	_, _ = io.WriteString(os.Stdout, "\x1b[16t")
 
 	s := string(readResponse(timeout))
-	// CSI 16t：终端自报字符格像素 \x1b[4;<cellH>;<cellW>t
+	// CSI 16t：终端自报字符格像素 \x1b[6;<cellH>;<cellW>t
 	if m := fontCellSizeRe.FindStringSubmatch(s); m != nil {
 		if h, err1 := strconv.Atoi(m[1]); err1 == nil {
 			if w, err2 := strconv.Atoi(m[2]); err2 == nil && w > 0 && h > 0 {
