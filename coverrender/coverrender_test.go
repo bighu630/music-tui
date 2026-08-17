@@ -459,3 +459,53 @@ func containsStr(s, sub string) bool {
 	}
 	return false
 }
+
+// TestSixelPassAlignment 回归：颜色分离 pass 方案——每个 pass 恰好输出 boxW 个
+// 像素字符（列位对齐）。早期实现把同列多色掩码连续输出导致列位膨胀 k 倍、花屏。
+// 解析输出：以 '$'（pass 分隔/回行首）与 '-'（band 分隔）切分，像素字符段
+// （'?'..'~'）长度必须恒 == boxW。
+func TestSixelPassAlignment(t *testing.T) {
+	// 红蓝各半的竖条图：每列同色、列间两色——强制每 band 出现多色多 pass
+	img := image.NewRGBA(image.Rect(0, 0, 16, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 16; x++ {
+			if x < 8 {
+				img.SetRGBA(x, y, color.RGBA{255, 0, 0, 255})
+			} else {
+				img.SetRGBA(x, y, color.RGBA{0, 0, 255, 255})
+			}
+		}
+	}
+	const w, h = 30, 17
+	out := Sixel(img, w, h, 8, 16)
+	// 去掉 DCS 外壳（\x1bPq / \x1b\），避免头尾转义字节被误计为像素字符
+	out = out[len("\x1bPq") : len(out)-len("\x1b\\")]
+
+	// 解析：逐字符扫描，像素字符段按 '$' 与 '-' 分隔，段长必须恒 == boxW
+	boxW := w * 8
+	segLen := 0
+	segs := map[int]int{}
+	flush := func() {
+		if segLen > 0 {
+			segs[segLen]++
+			segLen = 0
+		}
+	}
+	for _, r := range out {
+		switch {
+		case r >= '?' && r <= '~':
+			segLen++
+		case r == '$' || r == '-':
+			flush()
+		}
+	}
+	flush()
+	for ln, cnt := range segs {
+		if ln != boxW {
+			t.Errorf("像素字符段长度 = %d（%d 段）, want 恒 %d（列位对齐）", ln, cnt, boxW)
+		}
+	}
+	if len(segs) == 0 {
+		t.Error("应有像素字符段")
+	}
+}
