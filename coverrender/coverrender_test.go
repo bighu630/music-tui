@@ -365,3 +365,97 @@ func ansiSGRCodes(s string) [][]string {
 	}
 	return out
 }
+// ---- 能力查询与缓存注入 ----
+
+// TestDetectModeCapability 回归：真实终端应答优先于环境提示——
+// 用户的 foot 配置 TERM=xterm-256color（无 TERM_PROGRAM），环境提示不可靠，
+// 靠启动期能力查询（SetCapability）确认 sixel/kitty。
+func TestDetectModeCapability(t *testing.T) {
+	old := stdinIsTTY
+	stdinIsTTY = func() bool { return true }
+	defer func() { stdinIsTTY = old }()
+	// 模拟 foot 但 TERM 无 foot 线索
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TERM_PROGRAM", "")
+	t.Setenv("KITTY_WINDOW_ID", "")
+
+	t.Run("sixel 应答优先", func(t *testing.T) {
+		ResetModeCacheForTests()
+		SetCapability(ModeSixel)
+		if m := DetectMode(); m != ModeSixel {
+			t.Errorf("capability=sixel 应优先 → %v", m)
+		}
+	})
+	t.Run("kitty 应答优先", func(t *testing.T) {
+		ResetModeCacheForTests()
+		SetCapability(ModeKitty)
+		if m := DetectMode(); m != ModeKitty {
+			t.Errorf("capability=kitty 应优先 → %v", m)
+		}
+	})
+	t.Run("无应答回落环境提示", func(t *testing.T) {
+		ResetModeCacheForTests()
+		SetCapability(ModeHalf) // 未确认
+		if m := DetectMode(); m != ModeHalf {
+			t.Errorf("xterm-256color 无应答应 half → %v", m)
+		}
+	})
+	t.Run("tmux 内即使有应答也回退", func(t *testing.T) {
+		t.Setenv("TMUX", "/tmp/tmux-x/0,0,0")
+		ResetModeCacheForTests()
+		SetCapability(ModeSixel)
+		if m := DetectMode(); m != ModeHalf {
+			t.Errorf("TMUX 内应 half（capability 也回退）→ %v", m)
+		}
+	})
+	t.Run("env 强制最高优先", func(t *testing.T) {
+		t.Setenv("TMUX", "")
+		t.Setenv("MUSIC_TUI_COVER", "halfblocks")
+		ResetModeCacheForTests()
+		SetCapability(ModeSixel)
+		if m := DetectMode(); m != ModeHalf {
+			t.Errorf("MUSIC_TUI_COVER=halfblocks 应覆盖 capability → %v", m)
+		}
+	})
+}
+
+// TestQueryCapabilityResponse 解析模拟应答（注入 stdin 读取不便——QueryCapability
+// 直接读 os.Stdin；此处验证应答判定的纯逻辑：SetCapability 注入等价路径。
+// 应答格式参考：foot/xterm DA1 "\x1b[?62;4;22;...c"；kitty 图形应答 "\x1b_Gi=31;OK\x1b\\"。
+func TestQueryCapabilityResponseFormats(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		resp string
+		want Mode
+	}{
+		{"kitty OK 应答", "\x1b_Gi=31;OK\x1b\\", ModeKitty},
+		{"DA1 含 4（sixel）", "\x1b[?62;4;22;23c", ModeSixel},
+		{"DA1 无 sixel", "\x1b[?62;22;23c", ModeHalf},
+		{"空应答", "", ModeHalf},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// 判定逻辑与 QueryCapability 内联一致（读 stdin 的 IO 部分无法在
+			// 单元测试中无副作用模拟，此处覆盖字符串判定）
+			s := tc.resp
+			got := ModeHalf
+			switch {
+			case containsStr(s, "OK"):
+				got = ModeKitty
+			case containsStr(s, ";4"):
+				got = ModeSixel
+			}
+			if got != tc.want {
+				t.Errorf("resp %q → %v, want %v", tc.resp, got, tc.want)
+			}
+		})
+	}
+}
+
+func containsStr(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

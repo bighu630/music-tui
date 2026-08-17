@@ -85,7 +85,11 @@ func computeMode() Mode {
 	if os.Getenv("TMUX") != "" || strings.Contains(strings.ToLower(os.Getenv("TERM")), "screen") {
 		return ModeHalf
 	}
-	// 4. 环境提示
+	// 4. 启动期能力查询结果（真实终端应答，优先于环境提示）
+	if capabilityMode == ModeKitty || capabilityMode == ModeSixel {
+		return capabilityMode
+	}
+	// 5. 环境提示
 	if os.Getenv("KITTY_WINDOW_ID") != "" {
 		return ModeKitty
 	}
@@ -103,11 +107,12 @@ func computeMode() Mode {
 	if strings.Contains(t, "foot") || strings.Contains(t, "sixel") {
 		return ModeSixel
 	}
-	// 5. 默认
+	// 6. 默认
 	return ModeHalf
 }
 
 // ResetModeCacheForTests 清空进程级探测缓存（测试改 env 后调用）。
 func ResetModeCacheForTests() {
 	modeOnce = sync.Once{}
+	capabilityMode = ModeHalf
 }

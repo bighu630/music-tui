@@ -15,6 +15,7 @@ import (
 	"music-tui/cache"
 	"music-tui/config"
 	"music-tui/cover"
+	"music-tui/coverrender"
 	"music-tui/history"
 	"music-tui/logger"
 	"music-tui/lyrics"
@@ -174,6 +175,11 @@ func run() error {
 	// CellMotion：点击/滚轮/拖拽（按下移动）必报，但无按键的悬停移动不再上报
 	// ——Tab 悬停高亮随之下线（AllMotion 下鼠标任何移动都产生 MouseMsg → 全量
 	// View 渲染，CPU 热点 3；悬停高亮与 CPU 目标不可兼得，取舍以 CPU 为准）。
+	// 终端图形能力查询（封面渲染用）：必须在 TUI 接管 stdin 之前完成——运行期
+	// 查询会与输入循环抢读。DA1（sixel）/ kitty 图形查询超时 250ms，无应答忽略。
+	if mode, ok := coverrender.QueryCapability(250 * time.Millisecond); ok {
+		coverrender.SetCapability(mode)
+	}
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI 运行失败: %w", err)
