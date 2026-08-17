@@ -100,20 +100,12 @@ func TestDetectModeHints(t *testing.T) {
 			t.Errorf("TERM_PROGRAM=ghostty → %v, want kitty", m)
 		}
 	})
-	t.Run("foot", func(t *testing.T) {
+	t.Run("foot 默认像素风（sixel 需 env 强制）", func(t *testing.T) {
 		t.Setenv("TERM", "foot")
 		t.Setenv("TERM_PROGRAM", "")
 		ResetModeCacheForTests()
-		if m := DetectMode(); m != ModeSixel {
-			t.Errorf("TERM=foot → %v, want sixel", m)
-		}
-	})
-	t.Run("TERM-sixel", func(t *testing.T) {
-		t.Setenv("TERM", "xterm-sixel")
-		t.Setenv("TERM_PROGRAM", "")
-		ResetModeCacheForTests()
-		if m := DetectMode(); m != ModeSixel {
-			t.Errorf("TERM=xterm-sixel → %v, want sixel", m)
+		if m := DetectMode(); m != ModeHalf {
+			t.Errorf("TERM=foot → %v, want half（sixel 不自动）", m)
 		}
 	})
 	t.Run("tmux 优先回退", func(t *testing.T) {
@@ -379,13 +371,6 @@ func TestDetectModeCapability(t *testing.T) {
 	t.Setenv("TERM_PROGRAM", "")
 	t.Setenv("KITTY_WINDOW_ID", "")
 
-	t.Run("sixel 应答优先", func(t *testing.T) {
-		ResetModeCacheForTests()
-		SetCapability(ModeSixel)
-		if m := DetectMode(); m != ModeSixel {
-			t.Errorf("capability=sixel 应优先 → %v", m)
-		}
-	})
 	t.Run("kitty 应答优先", func(t *testing.T) {
 		ResetModeCacheForTests()
 		SetCapability(ModeKitty)
@@ -400,6 +385,13 @@ func TestDetectModeCapability(t *testing.T) {
 			t.Errorf("xterm-256color 无应答应 half → %v", m)
 		}
 	})
+	t.Run("sixel 能力应答不自动启用（六边形网格驻留擦除问题）", func(t *testing.T) {
+		ResetModeCacheForTests()
+		SetCapability(ModeSixel)
+		if m := DetectMode(); m != ModeHalf {
+			t.Errorf("capability=sixel 不应自动启用 → %v（需 env 强制）", m)
+		}
+	})
 	t.Run("tmux 内即使有应答也回退", func(t *testing.T) {
 		t.Setenv("TMUX", "/tmp/tmux-x/0,0,0")
 		ResetModeCacheForTests()
@@ -408,13 +400,20 @@ func TestDetectModeCapability(t *testing.T) {
 			t.Errorf("TMUX 内应 half（capability 也回退）→ %v", m)
 		}
 	})
-	t.Run("env 强制最高优先", func(t *testing.T) {
+	t.Run("env 强制最高优先（sixel 显式开启）", func(t *testing.T) {
 		t.Setenv("TMUX", "")
+		t.Setenv("MUSIC_TUI_COVER", "sixel")
+		ResetModeCacheForTests()
+		if m := DetectMode(); m != ModeSixel {
+			t.Errorf("MUSIC_TUI_COVER=sixel 应启用 → %v", m)
+		}
+	})
+	t.Run("env 强制 halfblocks 覆盖 capability", func(t *testing.T) {
 		t.Setenv("MUSIC_TUI_COVER", "halfblocks")
 		ResetModeCacheForTests()
 		SetCapability(ModeSixel)
 		if m := DetectMode(); m != ModeHalf {
-			t.Errorf("MUSIC_TUI_COVER=halfblocks 应覆盖 capability → %v", m)
+			t.Errorf("MUSIC_TUI_COVER=halfblocks 应覆盖 → %v", m)
 		}
 	})
 }
