@@ -1,6 +1,7 @@
 package coverrender
 
 import (
+	"image/color"
 	"io"
 	"os"
 	"regexp"
@@ -62,4 +63,55 @@ func QueryCapability(timeout time.Duration) (Mode, bool) {
 		return ModeSixel, true
 	}
 	return ModeHalf, false
+}
+// dsrRe 匹配 DSR 光标位置应答：\x1b[<row>;<col>R
+var dsrRe = regexp.MustCompile(`\x1b\[(\d+);(\d+)R`)
+
+// CalibrateCellSize 用 DSR 实测终端字符格像素高（不依赖 CSI 16t——foot 实测不回
+// 16t）。原理：在 (1,1) 画一块已知像素高（calPx）的六边形 → 查询光标位置 →
+// 图像占用行数 = row-1 → cellH = ceil(calPx/占用行数)。结果与六边形渲染同一像素
+// 空间，任何终端都准确。仅校准高度（宽度沿用 ioctl/16t/env 的现有推算——纵向
+// 行数溢出是六边形错位的主因；横向 30 列宽度的 ±几像素不影响对齐）。
+//
+// 必须在 TUI 启动前调用（raw 模式读 stdin 阶段）；测试图绘制在 (1,1) 主屏左上角，
+// TUI 进入 alt screen 后自然被覆盖。返回 (cellW, cellH, 占用行数, ok) 供日志。
+func CalibrateCellSize(timeout time.Duration) (w, h, rows int, ok bool) {
+	if !stdinIsTTY() {
+		return 0, 0, 0, false
+	}
+	const calPx = 96 // 测试图像素高（96 = 常见 cellH 的整数倍，占用行数易算）
+	_, _ = io.WriteString(os.Stdout, "\x1b[1;1H")
+	test := Sixel(solidImage(calPx, calPx, color.RGBA{0, 0, 0, 255}), 1, 1, calPx, calPx)
+	_, _ = io.WriteString(os.Stdout, test)
+	_, _ = io.WriteString(os.Stdout, "\x1b[6n") // DSR 光标位置
+
+	s := string(readResponse(timeout))
+	m := dsrRe.FindStringSubmatch(s)
+	if m == nil {
+		return 0, 0, 0, false
+	}
+	row, _ := strconv.Atoi(m[1])
+	rows = row - 1
+	if rows <= 0 {
+		return 0, 0, rows, false
+	}
+	h = (calPx + rows - 1) / rows // ceil
+	if h < 5 || h > 60 {
+		return 0, 0, rows, false // 异常值，拒绝
+	}
+	// 宽度沿用现有推算链（env > 16t > ioctl > 默认），不触发 FontCellSize 缓存
+	w = 8
+	if qw, qh := queryFontW, queryFontH; qw > 0 && qh > 0 {
+		w = qw
+	} else if iw, _, iok := ioctlCellSize(); iok {
+		w = iw
+	}
+	if ew, eok := envInt("MUSIC_TUI_CELL_W"); eok && ew > 0 {
+		w = ew
+	}
+	SetFontCellSize(w, h)
+	// 清掉测试图（背景色覆盖）
+	clear := Sixel(solidImage(calPx, calPx, color.RGBA{0, 0, 0, 255}), 1, 1, calPx, calPx)
+	_, _ = io.WriteString(os.Stdout, "\x1b[1;1H"+clear)
+	return w, h, rows, true
 }

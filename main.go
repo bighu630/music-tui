@@ -180,6 +180,11 @@ func run() error {
 	if mode, ok := coverrender.QueryCapability(250 * time.Millisecond); ok {
 		coverrender.SetCapability(mode)
 	}
+	// 六边形 cell 高度自校准：画已知像素高测试图 + DSR 实测占用行数反推真实
+	// cell 像素（ioctl 物理像素在 wayland 缩放下偏大；CSI 16t 部分终端不支持）。
+	if w, h, rows, ok := coverrender.CalibrateCellSize(250 * time.Millisecond); ok {
+		logger.Info("cell 自校准: %dx%d（测试图 %dpx 占用 %d 行）", w, h, 96, rows)
+	}
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI 运行失败: %w", err)
