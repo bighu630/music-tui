@@ -78,8 +78,13 @@ func Scan(path string) ([]model.Track, error) {
 		return nil, fmt.Errorf("目录中没有找到支持的音频文件: %s", path)
 	}
 
-	// 按完整路径字符串排序，保证稳定顺序
-	sort.Strings(paths)
+// 按完整路径排序：Windows 路径分隔符为 '\'（0x5C > '2'=0x32），
+// 字典序会令 "sub2\\..." 排在 "sub\\..." 之前，与 Linux 的 '/'(0x2F)
+// 层级语义不一致。统一把分隔符视作 '/' 比较（filepath.ToSlash），
+// 保证跨平台一致的稳定层级顺序。
+	sort.Slice(paths, func(i, j int) bool {
+		return filepath.ToSlash(paths[i]) < filepath.ToSlash(paths[j])
+	})
 
 	tracks := make([]model.Track, 0, len(paths))
 	for _, p := range paths {

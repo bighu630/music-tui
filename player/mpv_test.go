@@ -1,3 +1,8 @@
+//go:build !windows
+
+// 本文件全部用例基于 Unix domain socket 模拟 mpv IPC（net.Listen("unix")），
+// Windows 的 CreateProcess/命名管道语义下无法工作，整个文件在 Windows 跳过
+// （产品层 mpv IPC 在 Windows 需走命名管道，尚未支持，见 player/mpv.go）。
 package player
 
 import (
@@ -11,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -31,9 +37,25 @@ type fakeMpvServer struct {
 	silent       bool            // true 时对所有命令不响应（模拟 mpv 挂死；需用 setSilent 设置避免竞态）
 }
 
+
+// sockSeq 保证同一测试进程内 socket 路径唯一（包内测试串行执行）。
+var sockSeq atomic.Uint64
+
+// testSockPath 返回一个短 unix socket 路径（创建于 os.TempDir()）。
+// 不用 t.TempDir()：macOS 的临时目录前缀（/var/folders/xx/.../T/）加上长
+// 测试名会使 socket 路径超过 sun_path 上限（macOS 104 字节）导致
+// net.Listen("unix") 报 bind: invalid argument；短路径不受影响，并在
+// 测试结束时自动清理。
+func testSockPath(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(os.TempDir(), fmt.Sprintf("mt-%d-%d.sock", os.Getpid(), sockSeq.Add(1)))
+	t.Cleanup(func() { _ = os.Remove(p) })
+	return p
+}
+
 func newFakeMpvServer(t *testing.T) *fakeMpvServer {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "mpv.sock")
+	path := testSockPath(t)
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -960,7 +982,7 @@ func TestMpvPlayerStartFailureLeavesNoDirtyState(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	p := NewMpvPlayer(script, filepath.Join(dir, "mpv.sock"), "", nil)
+	p := NewMpvPlayer(script, testSockPath(t), "", nil)
 
 	if err := p.Start(); err == nil {
 		t.Fatal("进程立即退出（不建 socket）时 Start 应报错")
@@ -986,7 +1008,7 @@ func TestMpvPlayerStartFailureLeavesNoDirtyState(t *testing.T) {
 // socket 已就绪（args 行先于 socket 出现），直接读日志断言。
 func TestMpvStartProcessYtdlFormatArg(t *testing.T) {
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "mpv.sock")
+	socketPath := testSockPath(t)
 	logPath := filepath.Join(dir, "starts.log")
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
 	script := writeFakeMpvWrapperScript(t, dir)
@@ -1021,7 +1043,7 @@ func TestMpvStartProcessYtdlRawOptionsWithCookieAndHeaders(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "empty-xdg")) // 隔离用户默认配置
 	t.Setenv("HOME", filepath.Join(dir, "empty-home"))
-	socketPath := filepath.Join(dir, "mpv.sock")
+	socketPath := testSockPath(t)
 	logPath := filepath.Join(dir, "starts.log")
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
 	script := writeFakeMpvWrapperScript(t, dir)
@@ -1069,7 +1091,7 @@ func TestMpvStartProcessYtdlRawOptionsWithCookieAndHeaders(t *testing.T) {
 func TestMpvStartProcessYtdlRawOptionsQuotesCommaCookiePath(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "empty-xdg"))
-	socketPath := filepath.Join(dir, "mpv.sock")
+	socketPath := testSockPath(t)
 	logPath := filepath.Join(dir, "starts.log")
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
 	script := writeFakeMpvWrapperScript(t, dir)
@@ -1227,7 +1249,7 @@ func TestMpvPlayerVolume(t *testing.T) {
 func TestMpvPlayerVolumeFailsWhenNotConnected(t *testing.T) {
 	// binPath 用不存在的路径：ensureConnected 会触发重连但 exec 必然失败，
 	// 命令应快速返回错误（不能用 "mpv"——本机真实 mpv 会被启动并连接成功）。
-	p := NewMpvPlayer(filepath.Join(t.TempDir(), "no-such-mpv"), filepath.Join(t.TempDir(), "x.sock"), "", nil)
+	p := NewMpvPlayer(filepath.Join(t.TempDir(), "no-such-mpv"), testSockPath(t), "", nil)
 	if _, err := p.Volume(); err == nil {
 		t.Fatal("未连接时 Volume 应报错")
 	}
@@ -1466,7 +1488,7 @@ func waitForLogLine(t *testing.T, path, substr string, timeout time.Duration) {
 // 恢复后 Play 直接可用且新进程确实收到 loadfile 命令。
 func TestMpvPlayerAutoReconnectAfterProcessDeath(t *testing.T) {
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "mpv.sock")
+	socketPath := testSockPath(t)
 	logPath := filepath.Join(dir, "starts.log")
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
 	script := writeFakeMpvWrapperScript(t, dir)
@@ -1504,7 +1526,7 @@ func TestMpvPlayerAutoReconnectAfterProcessDeath(t *testing.T) {
 // 触发或等待单飞重连，而不是报"mpv 未连接"。
 func TestMpvPlayerLazyReconnectOnPlay(t *testing.T) {
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "mpv.sock")
+	socketPath := testSockPath(t)
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", filepath.Join(dir, "starts.log"))
 	script := writeFakeMpvWrapperScript(t, dir)
 
@@ -1528,7 +1550,7 @@ func TestMpvPlayerLazyReconnectOnPlay(t *testing.T) {
 // 冷却期内 Play 快速失败（含"重连失败"文案）且不再发起新进程（防风暴）。
 func TestMpvPlayerReconnectFailureGivesClearError(t *testing.T) {
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "mpv.sock")
+	socketPath := testSockPath(t)
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", filepath.Join(dir, "starts.log"))
 	script := writeFakeMpvWrapperScript(t, dir)
 
@@ -1595,7 +1617,7 @@ func TestMpvPlayerReconnectFailureGivesClearError(t *testing.T) {
 // 请求超时）——生产 UI 为单线程顺序调用，不受影响。
 func TestMpvPlayerReconnectSingleFlight(t *testing.T) {
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "mpv.sock")
+	socketPath := testSockPath(t)
 	logPath := filepath.Join(dir, "starts.log")
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
 	script := writeFakeMpvWrapperScript(t, dir)
@@ -1641,7 +1663,7 @@ func TestMpvPlayerReconnectSingleFlight(t *testing.T) {
 // 必须仍可用（Play 成功），不得出现"conn 非 nil 但无 pump"的卡死终态。
 func TestMpvPlayerReconnectCrashLoop(t *testing.T) {
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "mpv.sock")
+	socketPath := testSockPath(t)
 	logPath := filepath.Join(dir, "starts.log")
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
 	script := writeFakeMpvWrapperScript(t, dir)
@@ -1685,7 +1707,7 @@ func TestMpvPlayerReconnectCrashLoop(t *testing.T) {
 // （conn 置 nil），且后续命令经 ensureConnected 惰性重连恢复。
 func TestMpvPlayerDisconnectDuringReconnectRecovers(t *testing.T) {
 	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "mpv.sock")
+	socketPath := testSockPath(t)
 	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", filepath.Join(dir, "starts.log"))
 	script := writeFakeMpvWrapperScript(t, dir)
 

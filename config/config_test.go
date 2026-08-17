@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -283,7 +284,11 @@ func TestSaveRoundtripOpenAI(t *testing.T) {
 
 // TestSavePerms0600 配置文件含 OpenAI API key：写盘权限必须 0600
 // （其他本地用户不可读）。
+// Windows: 无 POSIX 权限位语义（os.Chmod 0600 会映射为 0666），跳过。
 func TestSavePerms0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 无 POSIX 权限位语义，跳过 0600 断言")
+	}
 	path := filepath.Join(t.TempDir(), "config.json")
 	cfg := &Config{OpenAI: OpenAI{APIKey: "sk-secret", Model: "gpt-4o-mini"}}
 	if err := cfg.Save(path); err != nil {
