@@ -172,7 +172,13 @@ func fakeBrowserHome(t *testing.T) (home string, profileDir string) {
 	home = t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", home)
 	t.Setenv("HOME", home)
-	profileDir = filepath.Join(home, "google-chrome", "Default")
+	// 平台布局：Linux 用 ~/.config（XDG），macOS 用
+	// ~/Library/Application Support（findProfileDir 的候选路径）。
+	if runtime.GOOS == "darwin" {
+		profileDir = filepath.Join(home, "Library", "Application Support", "Google", "Chrome", "Default")
+	} else {
+		profileDir = filepath.Join(home, "google-chrome", "Default")
+	}
 	return home, profileDir
 }
 
@@ -201,6 +207,9 @@ func TestExportBrowserCookiesUnsupportedBrowser(t *testing.T) {
 func TestExportBrowserCookiesV10Decrypt(t *testing.T) {
     if runtime.GOOS == "windows" {
         t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
+    if runtime.GOOS == "darwin" {
+        t.Skip("macOS 解密依赖钥匙串（security CLI 读取 Chrome Safe Storage），CI 环境无该密码，skip")
     }
 	_, profileDir := fakeBrowserHome(t)
 	key := deriveChromeKey([]byte("peanuts"), linuxKeyIterations)
@@ -264,6 +273,9 @@ func TestExportBrowserCookiesMeta24StripsPrefix(t *testing.T) {
     if runtime.GOOS == "windows" {
         t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
     }
+    if runtime.GOOS == "darwin" {
+        t.Skip("macOS 解密依赖钥匙串（security CLI 读取 Chrome Safe Storage），CI 环境无该密码，skip")
+    }
 	_, profileDir := fakeBrowserHome(t)
 	key := deriveChromeKey([]byte("peanuts"), linuxKeyIterations)
 	// meta_version=24：密文带 32 字节 SHA256 前缀，解密后应剥掉
@@ -288,6 +300,9 @@ func TestExportBrowserCookiesMeta24StripsPrefix(t *testing.T) {
 func TestExportBrowserCookiesEmptyKeyFallback(t *testing.T) {
     if runtime.GOOS == "windows" {
         t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
+    if runtime.GOOS == "darwin" {
+        t.Skip("macOS 解密依赖钥匙串（security CLI 读取 Chrome Safe Storage），CI 环境无该密码，skip")
     }
 	_, profileDir := fakeBrowserHome(t)
 	// Local State 无 encrypted_key → peanuts 优先；cookie 用 empty key 加密 → 降级成功
@@ -316,6 +331,9 @@ func TestExportBrowserCookiesEmptyKeyFallback(t *testing.T) {
 func TestExportBrowserCookiesIgnoresLocalStateKey(t *testing.T) {
     if runtime.GOOS == "windows" {
         t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
+    if runtime.GOOS == "darwin" {
+        t.Skip("macOS 解密依赖钥匙串（security CLI 读取 Chrome Safe Storage），CI 环境无该密码，skip")
     }
 	t.Run("peanuts-still-tried", func(t *testing.T) {
 		home, profileDir := fakeBrowserHome(t)
@@ -377,6 +395,9 @@ func TestExportBrowserCookiesNoYouTubeCookies(t *testing.T) {
     if runtime.GOOS == "windows" {
         t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
     }
+    if runtime.GOOS == "darwin" {
+        t.Skip("macOS 解密依赖钥匙串（security CLI 读取 Chrome Safe Storage），CI 环境无该密码，skip")
+    }
 	_, profileDir := fakeBrowserHome(t)
 	key := deriveChromeKey([]byte("peanuts"), linuxKeyIterations)
 	rows := []fakeCookieRow{
@@ -394,6 +415,9 @@ func TestExportBrowserCookiesDecryptFailure(t *testing.T) {
     if runtime.GOOS == "windows" {
         t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
     }
+    if runtime.GOOS == "darwin" {
+        t.Skip("macOS 解密依赖钥匙串（security CLI 读取 Chrome Safe Storage），CI 环境无该密码，skip")
+    }
 	_, profileDir := fakeBrowserHome(t)
 	rows := []fakeCookieRow{
 		// 无法解密的垃圾密文（填充校验失败）
@@ -410,6 +434,9 @@ func TestExportBrowserCookiesDecryptFailure(t *testing.T) {
 func TestExportBrowserCookiesBraveAlternativeDir(t *testing.T) {
     if runtime.GOOS == "windows" {
         t.Skip("Windows 无 POSIX 权限位语义；浏览器 cookie 导出仅 linux/darwin 支持（ErrUnsupportedOS），skip")
+    }
+    if runtime.GOOS == "darwin" {
+        t.Skip("macOS 解密依赖钥匙串（security CLI 读取 Chrome Safe Storage），CI 环境无该密码，skip")
     }
 	home, _ := fakeBrowserHome(t)
 	// Brave Linux 实际目录：~/.config/BraveSoftware/Brave-Browser

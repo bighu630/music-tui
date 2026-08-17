@@ -261,6 +261,9 @@ func TestCookieHeaderBrowserLazyExport(t *testing.T) {
     if runtime.GOOS == "windows" {
         t.Skip("Windows 无 POSIX 权限位语义或浏览器导出不支持，skip")
     }
+    if runtime.GOOS == "darwin" {
+        t.Skip("macOS 解密依赖钥匙串（security CLI 读取 Chrome Safe Storage），CI 环境无该密码，skip")
+    }
 	home, _ := fakeBrowserHome(t)
 	profileDir := filepath.Join(home, "google-chrome", "Default")
 	key := deriveChromeKey([]byte("peanuts"), linuxKeyIterations)
