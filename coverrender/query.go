@@ -12,10 +12,10 @@ import (
 // 以终端实际应答为准。查询只在启动早期、bubbletea 接管 stdin 之前执行——运行期
 // 查询会与 TUI 输入循环抢读（响应字节会被当作按键事件）。
 
-var capabilityMode Mode // 启动期查询结果（0=未查询/不支持，此时回落环境提示）
+var capabilityMode Mode // 启动期查询结果（ModeHalf=未确认，回落环境提示）
 
 // SetCapability 注入启动期能力查询结果（main 在 TUI 启动前调用 QueryCapability
-// 后写入；测试可直接注入）。ModeHalf 表示"未确认"，DetectMode 回落环境提示。
+// 后写入；测试可直接注入）。
 func SetCapability(m Mode) {
 	capabilityMode = m
 }
@@ -35,35 +35,12 @@ func QueryCapability(timeout time.Duration) (Mode, bool) {
 	_, _ = io.WriteString(os.Stdout, "\x1b[c")
 	_, _ = io.WriteString(os.Stdout, "\x1b_Gi=31,s=1,v=1,a=q\x1b\\")
 
-	resp := readResponse(timeout)
-	s := string(resp)
+	s := string(readResponse(timeout))
 	switch {
 	case strings.Contains(s, "OK"): // kitty 图形协议应答
 		return ModeKitty, true
-	case strings.Contains(s, ";4"): // DA1 含 sixel 属性（xterm 应答形如 \x1b[?62;4;22;…c）
+	case strings.Contains(s, ";4"): // DA1 含 sixel 属性（形如 \x1b[?62;4;22;…c）
 		return ModeSixel, true
 	}
 	return ModeHalf, false
-}
-
-// readResponse 以 timeout 上限读取 stdin 应答（一次性；等不到就放弃）。
-// 读取必须在原始输入接管之前：调用方保证（TUI 启动前）。
-func readResponse(timeout time.Duration) []byte {
-	// 起读 goroutine，select 超时放弃（读不会永久卡住调用方；goroutine 挂起
-	// 在后续 stdin 被 TUI 接管时自然结束）。
-	type res struct {
-		buf []byte
-	}
-	ch := make(chan res, 1)
-	go func() {
-		var buf [256]byte
-		n, _ := os.Stdin.Read(buf[:])
-		ch <- res{buf: buf[:n]}
-	}()
-	select {
-	case r := <-ch:
-		return r.buf
-	case <-time.After(timeout):
-		return nil
-	}
 }

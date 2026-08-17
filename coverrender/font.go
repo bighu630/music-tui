@@ -4,8 +4,6 @@ import (
 	"os"
 	"strconv"
 	"sync"
-
-	"golang.org/x/sys/unix"
 )
 
 var (
@@ -38,18 +36,8 @@ func computeFontCellSize() (int, int) {
 	return 8, 16
 }
 
-// ioctlCellSize 通过 TIOCGWINSZ 获取窗口像素尺寸与行列数，推算每字符格像素。
-func ioctlCellSize() (cellW, cellH int, ok bool) {
-	ws, err := unix.IoctlGetWinsize(1, unix.TIOCGWINSZ) // stdout
-	if err != nil {
-		return 0, 0, false
-	}
-	// xpixel/ypixel 部分终端为 0（未报告）→ 无法推算
-	if ws.Xpixel <= 0 || ws.Ypixel <= 0 || ws.Col <= 0 || ws.Row <= 0 {
-		return 0, 0, false
-	}
-	return int(ws.Xpixel) / int(ws.Col), int(ws.Ypixel) / int(ws.Row), true
-}
+// ioctlCellSize 通过 TIOCGWINSZ 获取窗口像素尺寸与行列数，推算每字符格像素
+// （平台相关：unix 实现见 font_unix.go，windows 恒失败回落默认）。
 
 // envInt 读取正整数环境变量；缺失或非法返回 (0, false)。
 func envInt(key string) (int, bool) {
