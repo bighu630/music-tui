@@ -320,10 +320,10 @@ func (q *Queue) Snapshot() Snapshot {
 }
 
 // Restore 用快照覆盖当前队列状态。先过滤全空死条目（保持相对顺序）。
-// 当前曲位置按 ID 保留（ID 唯一性：youtube video id / 本地绝对路径）：
-// 过滤会平移下标，故依 s.Tracks[s.CurrentIdx].ID 在新列表重新定位；
-// 当前曲恰是死条目被过滤（找不到）或 CurrentIdx 越界（损坏/手改数据）
-// 时降级为无当前曲目（-1），避免恢复出不可用状态。
+// 当前曲位置用"下标平移"定位：存活曲相对顺序不变，当前曲存活时其新下标 =
+// 过滤后位于它之前的存活条数。不作按 ID 定位（规避空 ID 碰撞与重复 ID
+// 误命中第 1 处）；当前曲恰是死条目被过滤或 CurrentIdx 越界（损坏/手改
+// 数据）时降级为无当前曲目（-1），避免恢复出不可用状态。
 func (q *Queue) Restore(s Snapshot) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -336,14 +336,14 @@ func (q *Queue) Restore(s Snapshot) {
 	q.tracks = kept
 	q.mode = s.Mode
 	q.currentIdx = -1
-	if s.CurrentIdx < 0 || s.CurrentIdx >= len(s.Tracks) {
-		return
-	}
-	curID := s.Tracks[s.CurrentIdx].ID
-	for i, t := range q.tracks {
-		if t.ID == curID {
-			q.currentIdx = i
-			return
+	// 当前曲存活时，其新下标 = 过滤后列表中排在它之前的存活条数
+	//（存活相对序不变；不用按 ID 定位以规避空 ID 碰撞 / 重复 ID 误命中第 1 处）
+	if s.CurrentIdx >= 0 && s.CurrentIdx < len(s.Tracks) && !isEmpty(s.Tracks[s.CurrentIdx]) {
+		q.currentIdx = 0
+		for i := 0; i < s.CurrentIdx; i++ {
+			if !isEmpty(s.Tracks[i]) {
+				q.currentIdx++
+			}
 		}
 	}
 }

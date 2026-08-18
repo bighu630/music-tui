@@ -1409,6 +1409,98 @@ func TestRestoreFiltersDeadAndPreservesCurrentByID(t *testing.T) {
 	}
 }
 
+// ---- Restore 定位回归（ae245ba 后续修复：按 ID 定位的两个边界 bug） ----
+
+// 回归 bug1（空 ID 碰撞）：死条目可带 ID（乃至 ""），isEmpty 不看 ID；
+// 存活曲 ID=""（有标题无 ID）与死条目 ID="" 并存时，旧按 ID 定位循环会命中
+// 存活曲把 currentIdx 设为它而非 -1。下标平移对此天然免疫 → 降级 -1。
+func TestRestoreEmptyCurrentIDDegrades(t *testing.T) {
+	// 存活曲：有标题+有时长，但 ID 为空串（与死条目同 ID，会碰撞旧实现）
+	alive := model.Track{Title: "local 曲", Artist: "", Duration: 180, ID: ""}
+	// 死条目：ID 也为空串（isEmpty 只看 Title/Artist/Duration，不看 ID）
+	dnr := model.Track{ID: ""}
+	q := New()
+	q.Restore(Snapshot{
+		Tracks:     []model.Track{alive, dnr},
+		CurrentIdx: 1, // 当前曲是死条目（应降级 -1，不得因 ID 碰撞命中 alive 的 0）
+		Mode:       Sequential,
+	})
+	if q.Len() != 1 {
+		t.Errorf("Len = %d, want 1（仅存活曲保留）", q.Len())
+	}
+	if q.CurrentIndex() != -1 {
+		t.Errorf("CurrentIndex = %d, want -1（当前曲是死条目、ID 碰撞不应命中存活曲）", q.CurrentIndex())
+	}
+	if _, ok := q.Current(); ok {
+		t.Error("降级后不应有当前曲")
+	}
+}
+
+// 回归 bug2（重复 ID 误定位）：队列可含重复 ID（Add 不去重/播放列表不去重）。
+// 快照当前指向第 2 处重复 ID 时，旧按 ID 循环命中第 1 处。下标平移按存活
+// 相对序定位 → 精确命中快照所指的同一处。
+func TestRestoreDuplicateIDPointsToCorrectOccurrence(t *testing.T) {
+	mk := func(title string) model.Track {
+		return model.Track{ID: "dup", Title: title, Artist: "歌手", Duration: 180}
+	}
+	tracks := []model.Track{
+		mk("第一处"), // ID=dup
+		testTrack("other"),
+		mk("第二处"), // ID=dup（Title 各异以区分）
+	}
+	// CurrentIdx=2 → 第 2 个 dup，恢复后仍为下标 2（不得误命中第 1 处为 0）
+	q := New()
+	q.Restore(Snapshot{Tracks: tracks, CurrentIdx: 2, Mode: Sequential})
+	if q.CurrentIndex() != 2 {
+		t.Errorf("CurrentIndex = %d, want 2（第 2 处 dup；不得误定位到第 1 处）", q.CurrentIndex())
+	}
+	if cur, ok := q.Current(); !ok || cur.Title != "第二处" {
+		t.Errorf("Current = %s/%v, want 第二处", cur.Title, ok)
+	}
+	// CurrentIdx=1 → other，恢复后仍为下标 1（顺序复验）
+	q2 := New()
+	q2.Restore(Snapshot{Tracks: tracks, CurrentIdx: 1, Mode: Sequential})
+	if q2.CurrentIndex() != 1 {
+		t.Errorf("CurrentIndex = %d, want 1（other）", q2.CurrentIndex())
+	}
+	if cur, ok := q2.Current(); !ok || cur.ID != "other" {
+		t.Errorf("Current = %+v/%v, want other", cur, ok)
+	}
+}
+
+// 增强回归：当前曲前有多个死条目（下标平移多格）且当前曲存活时，
+// 新下标 = 其前存活条数；同时复验首位存活/单曲存活场景（起始 0 无 off-by-one）。
+func TestRestoreShiftsCurrentAfterDeadBefore(t *testing.T) {
+	tracks := []model.Track{
+		testTrack("a"), // 正常
+		model.Track{ID: "d1"},
+		testTrack("b"), // 正常
+		model.Track{ID: "d2"},
+		testTrack("c"), // 当前（其前存活 a、b 共 2 条）
+	}
+	q := New()
+	q.Restore(Snapshot{Tracks: tracks, CurrentIdx: 4, Mode: Sequential})
+	if q.CurrentIndex() != 2 {
+		t.Errorf("CurrentIndex = %d, want 2（a,b 存活前置 2 条 → 平移后 c）", q.CurrentIndex())
+	}
+	if cur, ok := q.Current(); !ok || cur.ID != "c" {
+		t.Errorf("Current = %s/%v, want c", cur.ID, ok)
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"a", "b", "c"}) {
+		t.Errorf("Tracks = %v, want [a b c]", got)
+	}
+	// 单曲存活场景（起始必须为 0 而不是 -1，否则 off-by-one 得 0 而非预期 0）
+	singleton := []model.Track{model.Track{ID: "d"}, testTrack("x")}
+	qs := New()
+	qs.Restore(Snapshot{Tracks: singleton, CurrentIdx: 1})
+	if qs.Len() != 1 || qs.CurrentIndex() != 0 {
+		t.Errorf("单曲存活: Len/CurrentIndex = %d/%d, want 1/0", qs.Len(), qs.CurrentIndex())
+	}
+	if cur, ok := qs.Current(); !ok || cur.ID != "x" {
+		t.Errorf("单曲存活 Current = %s/%v, want x", cur.ID, ok)
+	}
+}
+
 // 当前曲恰是死条目（被过滤）或 CurrentIdx 非法 → 降级 -1，其余正常曲保留。
 func TestRestoreDeadOrInvalidCurrentDegrades(t *testing.T) {
 	// 当前曲是死条目 → 过滤后按 ID 找不到 → -1
