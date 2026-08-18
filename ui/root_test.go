@@ -4349,36 +4349,36 @@ func testLyricOffsetModel(t *testing.T, fp *fakePlayer, ly *lyrics.Lyrics) (Mode
 	return m, rc
 }
 
-// shiftRightKey 构造 Ctrl+Shift+→ 按键（String() == "ctrl+shift+right"）。
+// shiftRightKey 构造 Ctrl+Shift+↑ 按键（String() == "ctrl+shift+up"）。
 func shiftRightKey() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyCtrlShiftRight}
+	return tea.KeyMsg{Type: tea.KeyCtrlShiftUp}
 }
 
-// shiftLeftKey 构造 Ctrl+Shift+← 按键（String() == "ctrl+shift+left"）。
+// shiftLeftKey 构造 Ctrl+Shift+↓ 按键（String() == "ctrl+shift+down"）。
 func shiftLeftKey() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyCtrlShiftLeft}
+	return tea.KeyMsg{Type: tea.KeyCtrlShiftDown}
 }
 
-// TestAdjustLyricOffsetShiftRight Ctrl+Shift+→：歌词时间整体 +0.5s、toast 展示累计偏移、
+// TestAdjustLyricOffsetShiftUp Ctrl+Shift+↑：歌词时间整体 +0.5s、toast 展示累计偏移、
 // CacheRewriter 收到偏移后的歌词与键。
-func TestAdjustLyricOffsetShiftRight(t *testing.T) {
+func TestAdjustLyricOffsetShiftUp(t *testing.T) {
 	fp := newFakePlayer()
 	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
 	m, rc := testLyricOffsetModel(t, fp, ly)
 	key := shiftRightKey()
-	if got := key.String(); got != "ctrl+shift+right" {
-		t.Fatalf("key.String() = %q, want ctrl+shift+right", got)
+	if got := key.String(); got != "ctrl+shift+up" {
+		t.Fatalf("key.String() = %q, want ctrl+shift+up", got)
 	}
 	before := m.home.lyrics.Lines[0].Time
 	m, cmd := update(m, key)
 	if cmd == nil {
-		t.Fatal("ctrl+shift+right 应返回 toast cmd")
+		t.Fatal("ctrl+shift+up 应返回 toast cmd")
 	}
 	if got := m.home.lyrics.Lines[0].Time; got != before+0.5 {
-		t.Errorf("ctrl+shift+right 后 Lines[0].Time = %v, want %v", got, before+0.5)
+		t.Errorf("ctrl+shift+up 后 Lines[0].Time = %v, want %v", got, before+0.5)
 	}
 	if got := m.home.lyrics.Lines[1].Time; got != 20.5 {
-		t.Errorf("ctrl+shift+right 后 Lines[1].Time = %v, want 20.5", got)
+		t.Errorf("ctrl+shift+up 后 Lines[1].Time = %v, want 20.5", got)
 	}
 	if got := m.home.lyricOffset; got != 0.5 {
 		t.Errorf("lyricOffset = %v, want 0.5", got)
@@ -4398,21 +4398,21 @@ func TestAdjustLyricOffsetShiftRight(t *testing.T) {
 	}
 }
 
-// TestAdjustLyricOffsetShiftLeft Ctrl+Shift+←：歌词时间整体 -0.5s、toast 展示 -0.5s。
-func TestAdjustLyricOffsetShiftLeft(t *testing.T) {
+// TestAdjustLyricOffsetShiftDown Ctrl+Shift+↓：歌词时间整体 -0.5s、toast 展示 -0.5s。
+func TestAdjustLyricOffsetShiftDown(t *testing.T) {
 	fp := newFakePlayer()
 	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
 	m, rc := testLyricOffsetModel(t, fp, ly)
 	key := shiftLeftKey()
-	if got := key.String(); got != "ctrl+shift+left" {
-		t.Fatalf("key.String() = %q, want ctrl+shift+left", got)
+	if got := key.String(); got != "ctrl+shift+down" {
+		t.Fatalf("key.String() = %q, want ctrl+shift+down", got)
 	}
 	m, cmd := update(m, key)
 	if cmd == nil {
-		t.Fatal("ctrl+shift+left 应返回 toast cmd")
+		t.Fatal("ctrl+shift+down 应返回 toast cmd")
 	}
 	if got := m.home.lyrics.Lines[0].Time; got != 9.5 {
-		t.Errorf("ctrl+shift+left 后 Lines[0].Time = %v, want 9.5", got)
+		t.Errorf("ctrl+shift+down 后 Lines[0].Time = %v, want 9.5", got)
 	}
 	if got := m.home.lyricOffset; got != -0.5 {
 		t.Errorf("lyricOffset = %v, want -0.5", got)
@@ -4434,10 +4434,10 @@ func TestAdjustLyricOffsetAccumulates(t *testing.T) {
 	m, _ = update(m, key)
 	m, _ = update(m, key)
 	if got := m.home.lyricOffset; got != 1.0 {
-		t.Errorf("两次 ctrl+shift+right lyricOffset = %v, want 1.0", got)
+		t.Errorf("两次 ctrl+shift+up lyricOffset = %v, want 1.0", got)
 	}
 	if got := m.home.lyrics.Lines[0].Time; got != 11.0 {
-		t.Errorf("两次 ctrl+shift+right Lines[0].Time = %v, want 11.0", got)
+		t.Errorf("两次 ctrl+shift+up Lines[0].Time = %v, want 11.0", got)
 	}
 	if !strings.Contains(activeToastText(m), "+1.0s") {
 		t.Errorf("toast = %q, want 含 +1.0s", activeToastText(m))
@@ -4468,7 +4468,7 @@ func TestAdjustLyricOffsetNoLyrics(t *testing.T) {
 	}
 	m, gotCmd := update(m, shiftRightKey())
 	if gotCmd != nil {
-		t.Errorf("无歌词 ctrl+shift+right 不应有 toast cmd: %v", gotCmd)
+		t.Errorf("无歌词 ctrl+shift+up 不应有 toast cmd: %v", gotCmd)
 	}
 	if activeToastText(m) != "" {
 		t.Errorf("无歌词不应有 toast: %q", activeToastText(m))
@@ -4494,7 +4494,7 @@ func TestAdjustLyricOffsetLoading(t *testing.T) {
 	}
 	m, gotCmd := update(m, shiftLeftKey())
 	if gotCmd != nil {
-		t.Errorf("加载中 ctrl+shift+left 不应有 toast cmd")
+		t.Errorf("加载中 ctrl+shift+down 不应有 toast cmd")
 	}
 	if rc.rewriteCount() != 0 {
 		t.Errorf("加载中不应触发 RewriteCache")
@@ -4551,10 +4551,10 @@ func TestAdjustLyricOffsetGlobalInSearchInput(t *testing.T) {
 	before := m.home.lyrics.Lines[0].Time
 	m, cmd := update(m, shiftRightKey())
 	if cmd == nil {
-		t.Fatal("搜索输入框聚焦时 ctrl+shift+right 仍应全局生效（返回 toast cmd）")
+		t.Fatal("搜索输入框聚焦时 ctrl+shift+up 仍应全局生效（返回 toast cmd）")
 	}
 	if got := m.home.lyrics.Lines[0].Time; got != before+0.5 {
-		t.Errorf("输入框聚焦时 ctrl+shift+right 未全局生效: Lines[0].Time = %v, want %v", got, before+0.5)
+		t.Errorf("输入框聚焦时 ctrl+shift+up 未全局生效: Lines[0].Time = %v, want %v", got, before+0.5)
 	}
 	if got := m.home.lyricOffset; got != 0.5 {
 		t.Errorf("lyricOffset = %v, want 0.5", got)
@@ -4563,6 +4563,6 @@ func TestAdjustLyricOffsetGlobalInSearchInput(t *testing.T) {
 		t.Errorf("RewriteCache 调用次数 = %d, want 1", rc.rewriteCount())
 	}
 	if got := m.searchPage.input.Value(); got != "" {
-		t.Errorf("ctrl+shift+right 不应被 textinput 消费: input = %q", got)
+		t.Errorf("ctrl+shift+up 不应被 textinput 消费: input = %q", got)
 	}
 }
