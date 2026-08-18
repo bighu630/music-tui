@@ -1550,3 +1550,50 @@ func TestHomeCoverHalfMode(t *testing.T) {
 		t.Errorf("halfblocks 行数 = %d, want %d", got, coverH)
 	}
 }
+
+
+// TestHomeCoverKittyPersist 回归：kitty 网格驻留擦除——中间区重建后封面末行注入
+// 零宽前景色 token（变化字节强制差量重发 a=p 所在行，图片在擦除行后恢复）。
+func TestHomeCoverKittyPersist(t *testing.T) {
+	coverModeEnv(t, "kitty")
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	pngPath := filepath.Join(t.TempDir(), "cover.png")
+	writeTestPNG(t, pngPath)
+	m, _ = update(m, coverResultMsg{trackID: "t1", path: pngPath})
+	m.home = m.home.setSize(120, 40)
+
+	build1 := m.home.coverView()
+	lines1 := strings.Split(build1, "\n")
+	if len(lines1) != coverH {
+		t.Fatalf("coverView 行数 = %d, want %d", len(lines1), coverH)
+	}
+	// 重建（setCover/setSize 触发）后：末行应含注入的零宽 token 且仍带 a=p
+	if !strings.Contains(build1, "\x1b[38;5;") {
+		t.Error("重建后 coverView 末行应含零宽前景色 token")
+	}
+	if !strings.Contains(build1, "\x1b_Ga=p") {
+		t.Error("末行仍应携带 a=p 放置命令")
+	}
+	// 每行可见宽仍为 30（token 零宽，不破坏 in-flow 契约）
+	for i, ln := range lines1 {
+		if w := ansi.StringWidth(ln); w != coverW {
+			t.Errorf("行 %d 可见宽 = %d, want %d", i, w, coverW)
+		}
+	}
+	// 连续重建 → 末行 token 变化（字节不同 → 帧差量重发）
+	mk1 := lastLine(build1)
+	m.home = m.home.rebuildMiddleCache()
+	build2 := m.home.coverView()
+	mk2 := lastLine(build2)
+	if mk1 == mk2 {
+		t.Errorf("重建后末行应变化（token 随计数递增）:\n%q", mk1)
+	}
+}
+
+func lastLine(s string) string {
+	lines := strings.Split(s, "\n")
+	return lines[len(lines)-1]
+}

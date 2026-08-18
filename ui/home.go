@@ -185,6 +185,7 @@ type homeModel struct {
 	coverRenderCache string   // 封面渲染缓存：setCover 时渲染一次（固定 30×17，与终端尺寸无关）
 	coverFallback    bool     // 封面加载失败 → 占位框
 	coverMode        uint8    // 当前封面渲染模式（0=半块/1=kitty/2=sixel；与 coverrender.Mode 对应）
+	kittySeq         int      // kitty 重发计数：中间区重建时 +1，注入封面末行使 a=p 重触发（见 coverView）
 
 	// sixel 外带覆盖状态：布局只放半块色块，六边形 DCS 在 view() 内按屏幕绝对坐标
 	// 直接写 stdout（像素驻留覆于文本之上，见 ui/coveroverlay.go）。指针共享：
@@ -702,6 +703,12 @@ func (m homeModel) rebuildMiddleCache() homeModel {
 	m.middleCacheW = m.width
 	m.middleCacheH = m.middleHeight()
 	m.middleCacheHide = m.coverHidden()
+	// kitty 网格驻留：歌词高亮滚动会整行重写封面区（覆盖格即擦除图像）。序列末行
+	// 携 a=p 放置命令——重建时递增计数，coverView 注入末行变体 token 强制该行
+	// 重发，a=p 在擦除行之后重新触发、同一帧内恢复图像（无闪烁）。
+	if m.coverMode == 1 && m.coverRenderCache != "" && !m.coverHidden() {
+		m.kittySeq++
+	}
 	// 中间区内容变化 → 封面行可能被帧差量重写（foot 网格驻留型六边形会被重写
 	// 擦除，konsole/kitty 覆盖型不受影响）：标记需延迟重画（ensureSixel 消费）。
 	if m.coverMode == 2 && m.sixelPayload != "" && !m.coverHidden() {
@@ -857,6 +864,17 @@ func (m homeModel) coverView() string {
 	var s string
 	if !m.coverFallback && m.coverRenderCache != "" {
 		s = m.coverRenderCache
+		// kitty：网格驻留图像会被歌词行重写擦除。序列末行携带 a=p 放置命令；
+		// 重建计数变化时向末行注入一个零宽前景色 token，使该行字节与上一渲染
+		// 不同 → 帧差量重发末行 → a=p 在擦除行之后重新触发 → 同一帧恢复图像。
+		// （token 为纯色设置+复位，宽度 0，无可见影响；图像已覆盖该行区域。）
+		if m.coverMode == 1 && m.kittySeq > 0 {
+			if lines := strings.Split(s, "\n"); len(lines) == coverH {
+				c := 16 + (m.kittySeq % 216)
+				lines[coverH-1] = fmt.Sprintf("\x1b[38;5;%dm\x1b[0m", c) + lines[coverH-1]
+				s = strings.Join(lines, "\n")
+			}
+		}
 	} else {
 		s = lipgloss.NewStyle().
 			Width(coverW).
