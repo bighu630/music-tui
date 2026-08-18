@@ -224,8 +224,9 @@ func newHomeModel(p player.Player) homeModel {
 // Init 首页无独立 cmd（spinner tick 由 root 统一驱动）。
 func (m homeModel) Init() tea.Cmd { return nil }
 
-// Update 处理首页局部按键（←/→ seek、, 上一首、. 下一首）与鼠标
-// （进度条点击 seek、按钮行点击）；全局按键（空格等）由 root 处理。
+// Update 处理首页局部按键（←/→ seek、, 上一首、. 下一首，同时支持中文输入法
+// 下的全角标点 ，上一首 / 。下一首）与鼠标（进度条点击 seek、按钮行点击）；
+// 全局按键（空格等）由 root 处理。
 // 鼠标坐标换算：屏幕坐标 - 3 = 页面坐标（顶部空行 + Tab 栏 + 分隔线占 3 行，
 // root.onMouse 在 Y!=1 时已把事件 delegate 到本页）。
 func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
@@ -253,12 +254,12 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 			}
 			m.state.Position = target
 			return m, seekCmd(m.player, target)
-		case ",":
+		case ",", "，":
 			if m.state.Track == nil {
 				return m, nil
 			}
 			return m, emitPrevTrack()
-		case ".":
+		case ".", "。":
 			if m.state.Track == nil {
 				return m, nil
 			}

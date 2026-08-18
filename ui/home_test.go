@@ -552,6 +552,51 @@ func TestHomePrevNextKeys(t *testing.T) {
 	_ = m
 }
 
+// TestHomeChinesePunctuationKeys 中文标点 ，上一首 / 。下一首（中文输入法下输入
+// 的 U+FF0C/U+3002 经 bubbletea 解析为 KeyRunes，msg.String() == "，"/"。"）；
+// 无曲目忽略。英文逗号句号由 TestHomePrevNextKeys 覆盖。仅首页生效的
+// 非全局约束由 root 级 TestPrevNextKeysHomeOnly 覆盖。
+func TestHomeChinesePunctuationKeys(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("，")})
+	if cmd == nil {
+		t.Fatal("，键应产生命令")
+	}
+	msgs := execCmds(cmd)
+	if len(msgs) != 1 {
+		t.Fatalf("，键消息数 = %d, want 1", len(msgs))
+	}
+	if _, ok := msgs[0].(prevTrackMsg); !ok {
+		t.Errorf("，键消息类型 = %T, want prevTrackMsg", msgs[0])
+	}
+
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("。")})
+	if cmd == nil {
+		t.Fatal("。键应产生命令")
+	}
+	msgs = execCmds(cmd)
+	if len(msgs) != 1 {
+		t.Fatalf("。键消息数 = %d, want 1", len(msgs))
+	}
+	if _, ok := msgs[0].(nextTrackMsg); !ok {
+		t.Errorf("。键消息类型 = %T, want nextTrackMsg", msgs[0])
+	}
+
+	// 无曲目：忽略（nil cmd）
+	m.state = model.PlaybackState{}
+	m.home = m.home.syncState(m.state)
+	if m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("，")}); cmd != nil {
+		t.Error("无曲目时 ，键不应产生命令")
+	}
+	if m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("。")}); cmd != nil {
+		t.Error("无曲目时 。键不应产生命令")
+	}
+}
+
 // TestHomeMouseSeekClick 点击进度条行（页面 Y == height-2）→ seek 到点击处；
 // X 越界忽略；无曲目忽略。
 func TestHomeMouseSeekClick(t *testing.T) {

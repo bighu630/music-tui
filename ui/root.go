@@ -1205,10 +1205,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		switch msg.String() {
-		case "tab", "ctrl+right":
+		case "tab":
 			return m.switchPage(msg.String()), nil
-		case "shift+tab", "ctrl+left":
+		case "shift+tab":
 			return m.switchPage(msg.String()), nil
+		case "ctrl+right":
+			// 全局下一首（原 Ctrl+→ 为切页；切页保留 Tab/Shift+Tab/数字 1-5，
+			// 底部提示不新增键位，见 README）。root 在 delegate 前消费，
+			// 任何页面（含搜索输入聚焦）都触发。
+			return m, emitNextTrack()
+		case "ctrl+left":
+			// 全局上一首（原 Ctrl+← 为切页）；同上不检查输入框聚焦。
+			return m, emitPrevTrack()
 		case "1", "2", "3", "4", "5":
 			// 数字键通常始终切页（TestTabSwitchesPages：搜索输入聚焦时也切页，
 			// 故无全局例外）。唯一例外：播放列表页本地路径输入（plLocalAdd）——
@@ -2251,9 +2259,9 @@ func (m Model) onMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	return m, nil // 其余（滚轮等）在 Tab 栏上不处理
 }
 
-// switchPage 处理切页按键：Tab/Ctrl+Right 正向循环
-// （首页→队列→播放列表→搜索→历史→首页）、Shift+Tab/Ctrl+Left 反向循环、
-// 1/2/3/4/5 直达。
+// switchPage 处理切页按键：Tab 正向循环
+// （首页→队列→播放列表→搜索→历史→首页）、Shift+Tab 反向循环、1/2/3/4/5 直达。
+// （Ctrl+←/→ 已不再切页——改为全局上一首/下一首，见 Update 全局按键分支。）
 func (m Model) switchPage(key string) Model {
 	switch key {
 	case "1":
@@ -2266,9 +2274,9 @@ func (m Model) switchPage(key string) Model {
 		m.current = pageSearch
 	case "5":
 		m.current = pageHistory
-	case "shift+tab", "ctrl+left":
+	case "shift+tab":
 		m.current = page((int(m.current) + 4) % 5)
-	default: // tab, ctrl+right
+	default: // tab
 		m.current = page((int(m.current) + 1) % 5)
 	}
 	return m

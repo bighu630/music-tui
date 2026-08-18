@@ -507,36 +507,40 @@ func TestTabSwitchesPages(t *testing.T) {
 	}
 }
 
-func TestCtrlArrowsSwitchPages(t *testing.T) {
+// Ctrl+←/→ 从切页改为全局上下一首（不再切 Tag；切页保留 Tab/Shift+Tab/数字 1-5）。
+// 任何页面按下都产生 nextTrackMsg/prevTrackMsg（root 在 delegate 前全局消费），
+// 且页面不切换。切页行为回归由 TestTabSwitchesPages/TestShiftTabSwitchesPagesReverse 覆盖。
+func TestCtrlArrowGlobalPrevNext(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // 首页 → 队列（非首页验证“全局”+“不切页”）
 
-	// Ctrl+Right：正向循环 首页→队列→播放列表→搜索→历史→首页
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
-	if m.current != pageQueue {
-		t.Errorf("Ctrl+Right 后 current = %v, want pageQueue", m.current)
+	// Ctrl+Right → nextTrackMsg，页面留在队列
+	got, cmd := update(m, tea.KeyMsg{Type: tea.KeyCtrlRight})
+	msgs := execCmds(cmd)
+	if len(msgs) != 1 {
+		t.Fatalf("Ctrl+Right 消息数 = %d, want 1", len(msgs))
 	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
-	if m.current != pagePlaylists {
-		t.Errorf("Ctrl+Right 后 current = %v, want pagePlaylists", m.current)
+	if _, ok := msgs[0].(nextTrackMsg); !ok {
+		t.Errorf("Ctrl+Right 消息类型 = %T, want nextTrackMsg", msgs[0])
 	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
-	if m.current != pageSearch {
-		t.Errorf("Ctrl+Right 后 current = %v, want pageSearch", m.current)
-	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
-	if m.current != pageHistory {
-		t.Errorf("Ctrl+Right 后 current = %v, want pageHistory", m.current)
-	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
-	if m.current != pageHome {
-		t.Errorf("Ctrl+Right 循环后 current = %v, want pageHome", m.current)
+	if got.current != pageQueue {
+		t.Errorf("Ctrl+Right 不应切页: current = %v, want pageQueue", got.current)
 	}
 
-	// Ctrl+Left：反向一步 首页→历史
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlLeft})
-	if m.current != pageHistory {
-		t.Errorf("Ctrl+Left 后 current = %v, want pageHistory", m.current)
+	// Ctrl+Left → prevTrackMsg，页面留在队列
+	got, cmd = update(got, tea.KeyMsg{Type: tea.KeyCtrlLeft})
+	msgs = execCmds(cmd)
+	if len(msgs) != 1 {
+		t.Fatalf("Ctrl+Left 消息数 = %d, want 1", len(msgs))
+	}
+	if _, ok := msgs[0].(prevTrackMsg); !ok {
+		t.Errorf("Ctrl+Left 消息类型 = %T, want prevTrackMsg", msgs[0])
+	}
+	if got.current != pageQueue {
+		t.Errorf("Ctrl+Left 不应切页: current = %v, want pageQueue", got.current)
 	}
 }
 
@@ -577,30 +581,46 @@ func TestShiftTabSwitchesPagesReverse(t *testing.T) {
 	}
 }
 
-// 搜索输入框聚焦时 Ctrl+←/→ 仍应全局切页（root 在 delegate 前消费按键，
-// textinput 的 ctrl+←/→ 词跳转绑定收不到；代价是输入框内失去 ctrl+←/→
-// 词跳转，alt+←/→ 仍可用）。
-func TestCtrlArrowsSwitchPagesWhenSearchInputFocused(t *testing.T) {
+// 搜索输入框聚焦时 Ctrl+←/→ 仍应全局上下一首（root 在 delegate 前消费按键）：
+// 不切页、不干扰输入框内容。textinput 的 ctrl+←/→ 词跳转绑定收不到；
+// 代价是输入框内失去 ctrl+←/→ 词跳转，alt+←/→ 仍可用（与旧切页绑定同代价）。
+func TestCtrlArrowGlobalPrevNextWhenSearchInputFocused(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
-	m = runProgram(t, m,
-		tea.KeyMsg{Type: tea.KeyTab}, // → 队列
-		tea.KeyMsg{Type: tea.KeyTab}, // → 播放列表
-		tea.KeyMsg{Type: tea.KeyTab}, // → 搜索页，输入框聚焦
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")},
-		tea.KeyMsg{Type: tea.KeyCtrlLeft},
-	)
-	// 搜索页（index 3）反向一步 = 播放列表；聚焦不阻碍切页
-	if m.current != pagePlaylists {
-		t.Errorf("搜索输入框聚焦时 Ctrl+Left 后 current = %v, want pagePlaylists", m.current)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // → 队列
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // → 播放列表
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // → 搜索页，输入框聚焦
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")})
+
+	// Ctrl+Left → prevTrackMsg；页面留在搜索页，输入框内容保留
+	got, cmd := update(m, tea.KeyMsg{Type: tea.KeyCtrlLeft})
+	msgs := execCmds(cmd)
+	if len(msgs) != 1 {
+		t.Fatalf("Ctrl+Left 消息数 = %d, want 1", len(msgs))
 	}
-	if got := m.searchPage.input.Value(); got != "晴天" {
-		t.Errorf("切页后输入框内容应保留: input = %q, want %q", got, "晴天")
+	if _, ok := msgs[0].(prevTrackMsg); !ok {
+		t.Errorf("Ctrl+Left 消息类型 = %T, want prevTrackMsg", msgs[0])
 	}
-	// 播放列表正向一步 = 搜索页（切走后焦点输入框内容仍在）
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyCtrlRight})
-	if m.current != pageSearch {
-		t.Errorf("Ctrl+Right 后 current = %v, want pageSearch", m.current)
+	if got.current != pageSearch {
+		t.Errorf("搜索输入框聚焦时 Ctrl+Left 不应切页: current = %v, want pageSearch", got.current)
+	}
+	if v := got.searchPage.input.Value(); v != "晴天" {
+		t.Errorf("输入框内容应保留: input = %q, want %q", v, "晴天")
+	}
+
+	// Ctrl+Right → nextTrackMsg；页面仍在搜索页
+	got, cmd = update(got, tea.KeyMsg{Type: tea.KeyCtrlRight})
+	msgs = execCmds(cmd)
+	if len(msgs) != 1 {
+		t.Fatalf("Ctrl+Right 消息数 = %d, want 1", len(msgs))
+	}
+	if _, ok := msgs[0].(nextTrackMsg); !ok {
+		t.Errorf("Ctrl+Right 消息类型 = %T, want nextTrackMsg", msgs[0])
+	}
+	if got.current != pageSearch {
+		t.Errorf("Ctrl+Right 不应切页: current = %v, want pageSearch", got.current)
 	}
 }
 
@@ -1075,6 +1095,37 @@ func TestPrevNextTrackMessages(t *testing.T) {
 	m2, cmd = update(m2, nextTrackMsg{})
 	if cmd != nil {
 		t.Errorf("空队列 next 应无命令: %v", cmd)
+	}
+}
+
+// 首页 , . 与中文标点 ，。仅在首页生效（root 委托给当前页）；
+// 其他页面按下不产生上一下一/下一首（切页需 Tab/数字，切曲需 Ctrl+←/→）。
+func TestPrevNextKeysHomeOnly(t *testing.T) {
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+
+	// 切到队列页（非首页）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	if m.current != pageQueue {
+		t.Fatalf("前置: current=%v, want pageQueue", m.current)
+	}
+
+	for _, k := range []string{",", ".", "，", "。"} {
+		got, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+		msgs := execCmds(cmd)
+		if len(msgs) != 0 {
+			t.Errorf("%q 在非首页不应产生命令消息: %v", k, msgs)
+		}
+		if got.current != pageQueue {
+			t.Errorf("%q 在非首页不应切页: current=%v", k, got.current)
+		}
+		m = got
+	}
+	// 播放未被触发：仍只播放过初始 t1
+	if fp.playCount() != 1 {
+		t.Errorf("非首页 , . 不应触发播放: playCount=%d, want 1", fp.playCount())
 	}
 }
 
