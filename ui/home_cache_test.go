@@ -87,7 +87,10 @@ func TestMiddleViewCacheInvalidatedByResize(t *testing.T) {
 func TestMiddleViewCacheInvalidatedByCover(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.WindowSizeMsg{Width: 120, Height: 24})
+	// 窗口高 40（≥ 2×coverH）使封面显示：本测试验证封面到达时占位框 → 像素封面
+	// 的缓存失效；小窗口（如 120×24）会触发封面隐藏（封面列移除），封面到达
+	// 不再改变可见布局，测不到失效点。
+	m, _ = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	// 先回灌歌词使缓存激活（synced 态）

@@ -986,6 +986,9 @@ func TestHomeLyricsCenterFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	// 声明整窗口高度 40（≥ 2×coverH）使封面显示：本测试验证封面显示布局下的
+	// 歌词列内居中兜底；不设 windowHeight 时回退页面高 24 < 34 会隐藏封面（歌词占满整行）。
+	m.home.windowHeight = 40
 	m.home = m.home.setSize(80, 24) // midX=40，屏幕中心放不下 44 列行
 
 	for _, ln := range strings.Split(m.home.view(), "\n") {

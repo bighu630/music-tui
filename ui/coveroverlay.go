@@ -90,6 +90,20 @@ func writeSixel(row, col int, payload string) {
 	_, _ = io.WriteString(overlayOut, sb)
 }
 
+// sixelClear 若已绘制六像素则在原位置重绘背景色全帧清除，并复位写出状态。
+// 覆盖型终端（konsole/kitty 等，像素驻留）缩小窗口致使封面隐藏时，不清理
+// 会残影罩住居中歌词；foot 网格驻留型会被行重写自愈，清除同样无害。
+func sixelClear(st *sixelState) {
+	if st == nil || !st.drawn {
+		return
+	}
+	cellW, cellH := coverrender.FontCellSize()
+	clear := coverrender.SixelClear(coverW, coverH, cellW, cellH)
+	writeSixel(st.posRow, st.posCol, clear)
+	st.drawn = false
+	st.token = ""
+}
+
 // clearSixel 清除已绘制的六像素（在最后一次写出位置重绘背景色全帧）。
 func (m homeModel) clearSixel() homeModel {
 	st := m.sixelSt
@@ -97,13 +111,7 @@ func (m homeModel) clearSixel() homeModel {
 		st = &sixelState{}
 		m.sixelSt = st
 	}
-	if st.drawn {
-		cellW, cellH := coverrender.FontCellSize()
-		clear := coverrender.SixelClear(coverW, coverH, cellW, cellH)
-		writeSixel(st.posRow, st.posCol, clear)
-	}
-	st.drawn = false
-	st.token = ""
+	sixelClear(st)
 	m.sixelPayload = ""
 	return m
 }
@@ -111,6 +119,13 @@ func (m homeModel) clearSixel() homeModel {
 // ensureSixel 在 view() 内写出六像覆盖层：素材/位置（token）变化时重绘。
 // 布局文本流不包含任何协议字节（DCS 仅经此外带写出）。
 func (m homeModel) ensureSixel() {
+	// 封面隐藏（窗口不足以容纳封面框两倍）：不渲染封面区，也不外带写出图像。
+	// 显示→隐藏过渡须清除已画出的六像素（覆盖型终端像素驻留：不清则旧封面
+	// 残影罩住缩放后的居中歌词）；sixelPayload 保留，放大恢复到显示态时重绘。
+	if m.coverHidden() {
+		sixelClear(m.sixelSt)
+		return
+	}
 	if m.coverMode != 2 || m.sixelPayload == "" || m.state.Track == nil {
 		return
 	}
@@ -133,6 +148,11 @@ func (m homeModel) ensureSixel() {
 			payload := m.sixelPayload
 			rr, cc := row, col
 			logger.Info("sixel 重画: 中间区已重建 (row=%d col=%d payload=%d 字节)", rr, cc, len(payload))
+			// 已知角点（低概率、非阻塞）：异步 45ms 无法取消——若其间窗口缩小到
+			// 封面隐藏触发 sixelClear（drawn 复位），此 goroutine 仍会把载荷画回旧位，
+			// 残留幽灵封面。foot 网格驻留型会被行重写自愈；覆盖型（konsole/kitty）
+			// 需下次 rebuild/重绘覆盖，影响有限。如后续需要，可给 sixelState 加代数计数
+			// 在 goroutine 写出前复查跳过。
 			go func() {
 				time.Sleep(45 * time.Millisecond)
 				overlayMu.Lock()
