@@ -1377,8 +1377,8 @@ func TestReplaceAllAllDeadClears(t *testing.T) {
 	}
 }
 
-// Restore 过滤死条目、当前曲按 ID 保留（过滤平移下标后重新定位同一首）。
-func TestRestoreFiltersDeadAndPreservesCurrentByID(t *testing.T) {
+// Restore 过滤死条目、当前曲按下标平移保留（存活相对序不变，落在其前存活条数处）。
+func TestRestoreFiltersDeadAndPreservesCurrentByShift(t *testing.T) {
 	src := Snapshot{
 		Tracks: []model.Track{
 			testTrack("a"),
@@ -1503,7 +1503,7 @@ func TestRestoreShiftsCurrentAfterDeadBefore(t *testing.T) {
 
 // 当前曲恰是死条目（被过滤）或 CurrentIdx 非法 → 降级 -1，其余正常曲保留。
 func TestRestoreDeadOrInvalidCurrentDegrades(t *testing.T) {
-	// 当前曲是死条目 → 过滤后按 ID 找不到 → -1
+	// 当前曲是死条目 → 被过滤 → 降级 -1
 	q := New()
 	q.Restore(Snapshot{
 		Tracks:     []model.Track{testTrack("a"), model.Track{ID: "d1"}},
