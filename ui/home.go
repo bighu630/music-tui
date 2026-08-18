@@ -184,17 +184,23 @@ type homeModel struct {
 	// sixel 外带覆盖状态：布局只放半块色块，六边形 DCS 在 view() 内按屏幕绝对坐标
 	// 直接写 stdout（像素驻留覆于文本之上，见 ui/coveroverlay.go）。指针共享：
 	// view() 是值接收者，状态变更必须落在共享指针上才能跨渲染循环持久。
-	sixelPayload string        // 全帧 DCS 载荷（空 = 无六像素材质）
-	sixelRedrawPending bool    // 中间区已重建：foot 网格驻留型六边形会被行重写擦除，需延迟重画
+	sixelPayload string     // 全帧 DCS 载荷（空 = 无六像素材质）
+	sixelRedrawPending bool // 中间区已重建：foot 网格驻留型六边形会被行重写擦除，需延迟重画
 	sixelSt      *sixelState   // 写出状态（token/位置）：view() 内变更，指针可见
+
+	// windowHeight 整个终端窗口高度（root 在 WindowSizeMsg 时注入 msg.Height，
+	// 非页面高度 m.height=窗口高-4）。封面隐藏判定按整个窗口尺寸计算（用户需求：
+	// 窗口尺度不足封面框两倍即隐藏封面）；测试/未初始化（<=0）时回退到页面高度。
+	windowHeight int
 
 	// 中间区渲染缓存（P1-2）：中间区内容仅随封面/歌词/尺寸变化，播放中进度
 	// 推进每帧直接复用（省去 3 个全屏 lipgloss.Place + 逐行宽度计算，渲染 CPU
 	// 热点）。在内容变化点（setCover/setLyrics/syncState 行切换/setSize/滚轮）
 	// 重建；歌词加载中 spinner 每帧动画，读取时跳过缓存。
-	middleCache  string
-	middleCacheW int
-	middleCacheH int
+	middleCache     string
+	middleCacheW    int
+	middleCacheH    int
+	middleCacheHide bool // 建缓存时的封面隐藏态：windowHeight 变化也必须失效（窗口高不在缓存键内）
 }
 
 func newHomeModel(p player.Player) homeModel {
@@ -264,7 +270,7 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 		// 播放推进时 scrollLyricsTo 会重新把当前行居中（自动跟随优先）。
 		if tea.MouseEvent(msg).IsWheel() {
 			if m.lyricsState == lyricsSynced {
-				if pageY >= 0 && pageY < m.height-2 && msg.X >= coverW+2 {
+				if pageY >= 0 && pageY < m.height-2 && msg.X >= m.lyricsStartCol() {
 					if msg.Button == tea.MouseButtonWheelUp {
 						m.lyricView.SetYOffset(m.lyricView.YOffset - 3)
 					} else if msg.Button == tea.MouseButtonWheelDown {
@@ -608,8 +614,13 @@ func (m homeModel) middleHeight() int {
 	return h
 }
 
-// lyricsColumnWidth 歌词列宽：页面宽 - 封面宽 - gap 2 - 边距 2。
+// lyricsColumnWidth 歌词列宽：封面显示时 = 页面宽 - 封面宽 - gap 2 - 边距 2；
+// 封面隐藏时（窗口不足以容纳封面框两倍）封面列移除，歌词区占满整页宽（直接居中
+// 屏幕，见 renderMiddleView/centerLyrics）。
 func (m homeModel) lyricsColumnWidth() int {
+	if m.coverHidden() {
+		return m.width
+	}
 	w := m.width - coverW - 4
 	if w < 10 {
 		w = 10
@@ -617,22 +628,56 @@ func (m homeModel) lyricsColumnWidth() int {
 	return w
 }
 
-// middleView 中间区（占 height-2 行）：封面列与歌词列水平并排（gap 2），
-// 整体在页面宽度内水平居中；封面与歌词内容各自在列内垂直居中。
+// coverHidden 判断封面是否隐藏：窗口尺寸不足以容纳封面框的两倍时（宽 < 2×coverW
+// 或 高 < 2×coverH，任一即隐藏）不显示封面区（用户需求：窗口只有封面宽度/高度
+// 的两倍就不显示）。OR 语义 + 严格小于：恰好等于 2 倍时显示。高度指整个终端窗口
+// 高度（非页面高度）。纯函数，TDD 边界矩阵见 TestCoverHidden。
+func coverHidden(width, height int) bool {
+	return width < coverW*2 || height < coverH*2
+}
+
+// coverHidden 首页封面隐藏态：高度用整窗口高度（windowHeight，root 注入；
+// 未初始化/测试用 <=0 时回退到页面高度 m.height，避免窗口语义缺失时误渲染）。
+func (m homeModel) coverHidden() bool {
+	h := m.windowHeight
+	if h <= 0 {
+		h = m.height
+	}
+	return coverHidden(m.width, h)
+}
+
+// lyricsStartCol 歌词区起点列：封面显示时从封面右缘+gap 起（X ≥ coverW+2 滚轮才
+// 命中歌词区）；封面隐藏时整行都是歌词区（起点 0）。与渲染/命中区间一致。
+func (m homeModel) lyricsStartCol() int {
+	if m.coverHidden() {
+		return 0
+	}
+	return coverW + 2
+}
+
+// middleView 中间区（占 height-2 行）：封面显示时 = 封面列与歌词列水平并排
+// （gap 2），整体在页面宽度内水平居中；封面隐藏时（窗口不足以容纳封面框两倍）
+// 封面列移除，歌词区占满整页宽并直接以屏幕中心居中。
 // 读取渲染缓存：中间区内容仅随封面/歌词/尺寸变化，播放中进度推进（5fps）
 // 每帧直接复用缓存（省去 3 个全屏 Place + 逐行宽度计算）；缓存缺失时现场
 // 渲染兜底（不应发生：所有内容变化点都会重建）。
 func (m homeModel) middleView() string {
 	if m.middleCache != "" && m.middleCacheW == m.width && m.middleCacheH == m.middleHeight() &&
+		m.middleCacheHide == m.coverHidden() && // 窗口高变化改隐藏态：窗口高不在缓存键内，需显式失效
 		m.lyricsState != lyricsLoading { // 加载中 spinner 每帧动画，不缓存
 		return m.middleCache
 	}
 	return m.renderMiddleView()
 }
 
-// renderMiddleView 渲染中间区（封面列 + 歌词列 + 整体居中）。
+// renderMiddleView 渲染中间区。封面显示：封面列 + 歌词列 + 整体居中；
+// 封面隐藏：仅歌词列占满整页宽居中（歌词行 padding 到整页宽，即屏幕中心）。
 func (m homeModel) renderMiddleView() string {
 	midH := m.middleHeight()
+	if m.coverHidden() {
+		lyricsCol := lipgloss.Place(m.width, midH, lipgloss.Center, lipgloss.Center, m.lyricsColumnView())
+		return lipgloss.Place(m.width, midH, lipgloss.Center, lipgloss.Center, lyricsCol)
+	}
 	lyricsW := m.lyricsColumnWidth()
 	coverCol := lipgloss.Place(coverW, midH, lipgloss.Center, lipgloss.Center, m.coverView())
 	lyricsCol := lipgloss.Place(lyricsW, midH, lipgloss.Center, lipgloss.Center, m.lyricsColumnView())
@@ -650,9 +695,10 @@ func (m homeModel) rebuildMiddleCache() homeModel {
 	m.middleCache = m.renderMiddleView()
 	m.middleCacheW = m.width
 	m.middleCacheH = m.middleHeight()
+	m.middleCacheHide = m.coverHidden()
 	// 中间区内容变化 → 封面行可能被帧差量重写（foot 网格驻留型六边形会被重写
 	// 擦除，konsole/kitty 覆盖型不受影响）：标记需延迟重画（ensureSixel 消费）。
-	if m.coverMode == 2 && m.sixelPayload != "" {
+	if m.coverMode == 2 && m.sixelPayload != "" && !m.coverHidden() {
 		m.sixelRedrawPending = true
 	}
 	return m

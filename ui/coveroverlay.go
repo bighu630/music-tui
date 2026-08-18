@@ -111,6 +111,10 @@ func (m homeModel) clearSixel() homeModel {
 // ensureSixel 在 view() 内写出六像覆盖层：素材/位置（token）变化时重绘。
 // 布局文本流不包含任何协议字节（DCS 仅经此外带写出）。
 func (m homeModel) ensureSixel() {
+	// 封面隐藏（窗口不足以容纳封面框两倍）：不渲染封面区，也不外带写出图像
+	if m.coverHidden() {
+		return
+	}
 	if m.coverMode != 2 || m.sixelPayload == "" || m.state.Track == nil {
 		return
 	}
