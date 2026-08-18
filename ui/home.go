@@ -174,7 +174,7 @@ type homeModel struct {
 	lyrics      *lyrics.Lyrics
 	currentLine int // 当前高亮行下标;-1 = 无高亮
 
-	// lyricOffset 当前歌曲歌词时间偏移累计（秒；Alt+L/H 每按 ±0.5s）。
+	// lyricOffset 当前歌曲歌词时间偏移累计（秒；Ctrl+Shift+←/→ 每按 ±0.5s）。
 	// 仅用于 toast 展示与测试断言——偏移已并入 m.lyrics.Lines 的时间戳，
 	// 播放进度按新时间重算高亮行；换歌（resetForTrack）时清零。
 	lyricOffset float64

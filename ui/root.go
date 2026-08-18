@@ -300,16 +300,17 @@ const saveInterval = 5 * time.Second
 
 // 播放失败自动重试：取流失败（如 YouTube 403 风控）多为瞬态错误，
 // 重试 = 重新 loadfile = 重新取流拿新签名 URL，大概率恢复。
-const maxPlayRetries = 2           // 每首曲目最多自动重试次数
+const maxPlayRetries = 2 // 每首曲目最多自动重试次数
 
 // maxStallRestarts 卡住自动重启上限：file-loaded 后窗口内无推进（StalledEvent）
 // 时重启 mpv 进程并重播，若仍卡住（第二次 StalledEvent）则放弃重启，走统一失败链
-//（URL 重试 → 跳过/停止，toast 明确）——避免无限重启循环。值为“重启次数上限”，
+// （URL 重试 → 跳过/停止，toast 明确）——避免无限重启循环。值为“重启次数上限”，
 // 1 = 重启一次后复查；仍卡住即交给失败链。
 const maxStallRestarts = 1
 
 // stallFailHint 卡住重启耗尽后的失败链提示文案。
 const stallFailHint = "播放无进展（mpv 未开始推进）"
+
 var retryBackoff = 2 * time.Second // 重试间隔（包级变量：测试可调小以缩短等待）
 
 // fallbackWaitTimeout 缓存兜底等待下载完成的上限（包级变量：测试可调小）。
@@ -1082,7 +1083,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 失败）只代表命令未被 mpv 接受（连接/参数瞬态问题），与缓存文件损坏
 			// 无关（坏文件 mpv 会接受 loadfile 后异步报 end-file error）；删除健康
 			// 缓存有害，真实损坏由异步 LoadFailedError 路径处理。
-			m.resuming = false // 恢复上下文作废
+			m.resuming = false   // 恢复上下文作废
 			m = m.clearLoading() // 恢复失败：无加载中提示
 			m, cmd := m.showToast("恢复播放失败: "+msg.err.Error(), toastError)
 			m.state = model.PlaybackState{}
@@ -1259,6 +1260,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.plPicker = &picker
 			return m, cmd
 		}
+		// 诊断：Ctrl+Shift+←/→ 是歌词偏移键（bubbletea 仅对方向键区分 Shift，
+		// 依赖终端发送修饰键 CSI 序列）。终端不支持时会被降级（Ctrl+Shift+→ →
+		// Ctrl+→，触发全局下一首）或整序列被丢弃——日志里能看到实际收到的键名。
+		if s := msg.String(); strings.Contains(s, "ctrl+shift") {
+			logger.Info("按键: 收到 %q（歌词偏移用；若终端降级修饰键将显示为 ctrl+left/right）", s)
+		}
 		switch msg.String() {
 		case "tab":
 			return m.switchPage(msg.String()), nil
@@ -1313,13 +1320,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.hoverTab = -1 // 打开选择器时清除悬停高亮（打开期间鼠标事件被忽略，防残留）
 			m.plPicker = newPlPicker(m.pl, track)
 			return m, nil
-		case "alt+l":
-			// 全局歌词时间 +0.5s（Alt+H 为 -0.5s）：任意页面生效，输入框聚焦不冲突
-			//（textinput 会原样插入 alt+l 的 'l'，此键必须在 delegate 前消费，
-			// 勿移到 delegate 之后）；选择器打开时按键交选择器（与现有
-			// ctrl+left/right 全局键行为一致）。
+		case "ctrl+shift+right":
+			// 全局歌词时间 +0.5s（Ctrl+Shift+← 为 -0.5s）：任意页面生效，输入框聚焦不冲突
+			//（textinput 不占用该键；此键必须在 delegate 前消费，勿移到 delegate 之后）；
+			// 选择器打开时按键交选择器（与现有 ctrl+left/right 全局键行为一致）。
+			// 注意：依赖终端发送修饰键 CSI 序列（\x1b[1;6C/D）——不支持时 Ctrl+Shift+→
+			// 会降级为 Ctrl+→（触发全局下一首）或序列被丢弃，见 Update 的 ctrl+shift 诊断日志。
 			return m.adjustLyricOffset(+0.5)
-		case "alt+h":
+		case "ctrl+shift+left":
 			return m.adjustLyricOffset(-0.5)
 		}
 		return m.delegate(msg)
@@ -1935,7 +1943,7 @@ func (m Model) skipFailedTrack(tr model.Track, hint string) (Model, tea.Cmd) {
 // stopAfterEnd 播放结束且无下一首：停在当前位置等待用户操作（空格重播同曲）。
 func (m Model) stopAfterEnd() (Model, tea.Cmd) {
 	m.ended = true
-	m.refreshPreload()           // 播放停止：清空预加载目标（ended 下无下一首可预载）
+	m.refreshPreload()   // 播放停止：清空预加载目标（ended 下无下一首可预载）
 	m = m.clearLoading() // 已停止：无加载中提示
 	m.state.Playing = false
 	m.home = m.home.syncState(m.state)
@@ -1948,8 +1956,8 @@ func (m Model) stopAfterEnd() (Model, tea.Cmd) {
 // 状态重置为空回到"未在播放"空态 + 错误 toast。
 func (m Model) startPlay(track model.Track) (Model, tea.Cmd) {
 	m.queue.Replace(track)
-	m.retryCount = 0    // 手动播放：全新重试预算
-	m.queueSkip = false // 替换即重新对齐，解除删除解耦标记
+	m.retryCount = 0                    // 手动播放：全新重试预算
+	m.queueSkip = false                 // 替换即重新对齐，解除删除解耦标记
 	m.stallHopeless = map[string]bool{} // 手动重选 = 用户新意图：解除历史“重启无效”标记，给一首全新预算
 	m.current = pageHome
 	m2, cmd := m.playQueueTrack()
@@ -2294,7 +2302,7 @@ func (m Model) togglePlay() (Model, tea.Cmd) {
 			m.fallback.active = false
 			m.fallback.canceled = true
 			m.ended = true
-			m.refreshPreload() // ended 门控：清空预加载目标（与其他停止路径一致，审查 P2）
+			m.refreshPreload()   // ended 门控：清空预加载目标（与其他停止路径一致，审查 P2）
 			m = m.clearLoading() // 用户暂停取消兜底：无加载中提示
 			m.state.Playing = false
 			m.home = m.home.syncState(m.state)
@@ -2491,12 +2499,18 @@ func (m Model) typingText() bool {
 // 静默忽略（无 toast）；toast 展示累计偏移。
 func (m Model) adjustLyricOffset(delta float64) (Model, tea.Cmd) {
 	if m.home.lyricsState != lyricsSynced || m.home.lyrics == nil {
+		logger.Info("歌词偏移: 忽略——无同步歌词（state=%d）", m.home.lyricsState)
 		return m, nil // 静默忽略
 	}
 	m.home = m.home.shiftLyrics(delta)
 	if rw, ok := m.lyrics.(lyrics.CacheRewriter); ok {
 		title, artist := m.home.cacheKey()
+		logger.Info("歌词偏移: delta=%+.1fs 累计=%+.1fs 行数=%d 写回 LRC 缓存 %q/%q",
+			delta, m.home.lyricOffset, len(m.home.lyrics.Lines), title, artist)
 		rw.RewriteCache(title, artist, m.home.lyrics)
+	} else {
+		logger.Info("歌词偏移: delta=%+.1fs 累计=%+.1fs 行数=%d（歌词服务无 LRC 缓存，仅内存偏移）",
+			delta, m.home.lyricOffset, len(m.home.lyrics.Lines))
 	}
 	return m.showToast(fmt.Sprintf("歌词偏移 %+.1fs", m.home.lyricOffset), toastInfo)
 }

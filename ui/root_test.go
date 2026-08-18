@@ -4189,7 +4189,7 @@ func TestStallRestartMixedQueueSkipsStuckKeepsHealthy(t *testing.T) {
 	}
 }
 
-// ---- 歌词时间偏移（全局 Alt+L/H） ----
+// ---- 歌词时间偏移（全局 Ctrl+Shift+←/→） ----
 
 // rewriteCapturingFetcher 同时实现 lyrics.Fetcher 与 lyrics.CacheRewriter：
 // 记录 RewriteCache 调用参数与次数（偏移测试断言用）。
@@ -4245,36 +4245,36 @@ func testLyricOffsetModel(t *testing.T, fp *fakePlayer, ly *lyrics.Lyrics) (Mode
 	return m, rc
 }
 
-// altL 构造 Alt+L 按键（String() == "alt+l"）。
-func altL() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l"), Alt: true}
+// shiftRightKey 构造 Ctrl+Shift+→ 按键（String() == "ctrl+shift+right"）。
+func shiftRightKey() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyCtrlShiftRight}
 }
 
-// altH 构造 Alt+H 按键（String() == "alt+h"）。
-func altH() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h"), Alt: true}
+// shiftLeftKey 构造 Ctrl+Shift+← 按键（String() == "ctrl+shift+left"）。
+func shiftLeftKey() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyCtrlShiftLeft}
 }
 
-// TestAdjustLyricOffsetAltL Alt+L：歌词时间整体 +0.5s、toast 展示累计偏移、
+// TestAdjustLyricOffsetShiftRight Ctrl+Shift+→：歌词时间整体 +0.5s、toast 展示累计偏移、
 // CacheRewriter 收到偏移后的歌词与键。
-func TestAdjustLyricOffsetAltL(t *testing.T) {
+func TestAdjustLyricOffsetShiftRight(t *testing.T) {
 	fp := newFakePlayer()
 	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
 	m, rc := testLyricOffsetModel(t, fp, ly)
-	key := altL()
-	if got := key.String(); got != "alt+l" {
-		t.Fatalf("key.String() = %q, want alt+l", got)
+	key := shiftRightKey()
+	if got := key.String(); got != "ctrl+shift+right" {
+		t.Fatalf("key.String() = %q, want ctrl+shift+right", got)
 	}
 	before := m.home.lyrics.Lines[0].Time
 	m, cmd := update(m, key)
 	if cmd == nil {
-		t.Fatal("alt+l 应返回 toast cmd")
+		t.Fatal("ctrl+shift+right 应返回 toast cmd")
 	}
 	if got := m.home.lyrics.Lines[0].Time; got != before+0.5 {
-		t.Errorf("alt+l 后 Lines[0].Time = %v, want %v", got, before+0.5)
+		t.Errorf("ctrl+shift+right 后 Lines[0].Time = %v, want %v", got, before+0.5)
 	}
 	if got := m.home.lyrics.Lines[1].Time; got != 20.5 {
-		t.Errorf("alt+l 后 Lines[1].Time = %v, want 20.5", got)
+		t.Errorf("ctrl+shift+right 后 Lines[1].Time = %v, want 20.5", got)
 	}
 	if got := m.home.lyricOffset; got != 0.5 {
 		t.Errorf("lyricOffset = %v, want 0.5", got)
@@ -4294,21 +4294,21 @@ func TestAdjustLyricOffsetAltL(t *testing.T) {
 	}
 }
 
-// TestAdjustLyricOffsetAltH Alt+H：歌词时间整体 -0.5s、toast 展示 -0.5s。
-func TestAdjustLyricOffsetAltH(t *testing.T) {
+// TestAdjustLyricOffsetShiftLeft Ctrl+Shift+←：歌词时间整体 -0.5s、toast 展示 -0.5s。
+func TestAdjustLyricOffsetShiftLeft(t *testing.T) {
 	fp := newFakePlayer()
 	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
 	m, rc := testLyricOffsetModel(t, fp, ly)
-	key := altH()
-	if got := key.String(); got != "alt+h" {
-		t.Fatalf("key.String() = %q, want alt+h", got)
+	key := shiftLeftKey()
+	if got := key.String(); got != "ctrl+shift+left" {
+		t.Fatalf("key.String() = %q, want ctrl+shift+left", got)
 	}
 	m, cmd := update(m, key)
 	if cmd == nil {
-		t.Fatal("alt+h 应返回 toast cmd")
+		t.Fatal("ctrl+shift+left 应返回 toast cmd")
 	}
 	if got := m.home.lyrics.Lines[0].Time; got != 9.5 {
-		t.Errorf("alt+h 后 Lines[0].Time = %v, want 9.5", got)
+		t.Errorf("ctrl+shift+left 后 Lines[0].Time = %v, want 9.5", got)
 	}
 	if got := m.home.lyricOffset; got != -0.5 {
 		t.Errorf("lyricOffset = %v, want -0.5", got)
@@ -4321,19 +4321,19 @@ func TestAdjustLyricOffsetAltH(t *testing.T) {
 	}
 }
 
-// TestAdjustLyricOffsetAccumulates 多次按键 ±0.5s 累加（两次 alt+l → +1.0s）；换歌清零。
+// TestAdjustLyricOffsetAccumulates 多次按键 ±0.5s 累加（两次 Ctrl+Shift+→ → +1.0s）；换歌清零。
 func TestAdjustLyricOffsetAccumulates(t *testing.T) {
 	fp := newFakePlayer()
 	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
 	m, rc := testLyricOffsetModel(t, fp, ly)
-	key := altL()
+	key := shiftRightKey()
 	m, _ = update(m, key)
 	m, _ = update(m, key)
 	if got := m.home.lyricOffset; got != 1.0 {
-		t.Errorf("两次 alt+l lyricOffset = %v, want 1.0", got)
+		t.Errorf("两次 ctrl+shift+right lyricOffset = %v, want 1.0", got)
 	}
 	if got := m.home.lyrics.Lines[0].Time; got != 11.0 {
-		t.Errorf("两次 alt+l Lines[0].Time = %v, want 11.0", got)
+		t.Errorf("两次 ctrl+shift+right Lines[0].Time = %v, want 11.0", got)
 	}
 	if !strings.Contains(activeToastText(m), "+1.0s") {
 		t.Errorf("toast = %q, want 含 +1.0s", activeToastText(m))
@@ -4362,9 +4362,9 @@ func TestAdjustLyricOffsetNoLyrics(t *testing.T) {
 	if m.home.lyricsState != lyricsNone {
 		t.Fatalf("state = %v, want lyricsNone", m.home.lyricsState)
 	}
-	m, gotCmd := update(m, altL())
+	m, gotCmd := update(m, shiftRightKey())
 	if gotCmd != nil {
-		t.Errorf("无歌词 alt+l 不应有 toast cmd: %v", gotCmd)
+		t.Errorf("无歌词 ctrl+shift+right 不应有 toast cmd: %v", gotCmd)
 	}
 	if activeToastText(m) != "" {
 		t.Errorf("无歌词不应有 toast: %q", activeToastText(m))
@@ -4388,9 +4388,9 @@ func TestAdjustLyricOffsetLoading(t *testing.T) {
 	if m.home.lyricsState != lyricsLoading {
 		t.Fatalf("state = %v, want lyricsLoading", m.home.lyricsState)
 	}
-	m, gotCmd := update(m, altH())
+	m, gotCmd := update(m, shiftLeftKey())
 	if gotCmd != nil {
-		t.Errorf("加载中 alt+h 不应有 toast cmd")
+		t.Errorf("加载中 ctrl+shift+left 不应有 toast cmd")
 	}
 	if rc.rewriteCount() != 0 {
 		t.Errorf("加载中不应触发 RewriteCache")
@@ -4414,7 +4414,7 @@ func TestAdjustLyricOffsetCacheKey(t *testing.T) {
 	m, cmd := m.startPlay(raw)
 	_ = execCmds(cmd)
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
-	m, _ = update(m, altL())
+	m, _ = update(m, shiftRightKey())
 	call := rc.lastRewrite()
 	if call.title != "原始标题" || call.artist != "原始歌手" {
 		t.Errorf("无 AI 信息 cacheKey = %q/%q, want 原始标题/原始歌手", call.title, call.artist)
@@ -4424,14 +4424,14 @@ func TestAdjustLyricOffsetCacheKey(t *testing.T) {
 	m, cmd = m.startPlay(testTrack("t2"))
 	_ = execCmds(cmd)
 	m, _ = update(m, lyricsResultMsg{trackID: "t2", lyrics: ly, title: "晴天", artist: "周杰伦"})
-	m, _ = update(m, altL())
+	m, _ = update(m, shiftRightKey())
 	call = rc.lastRewrite()
 	if call.title != "晴天" || call.artist != "周杰伦" {
 		t.Errorf("AI cacheKey = %q/%q, want 晴天/周杰伦", call.title, call.artist)
 	}
 }
 
-// TestAdjustLyricOffsetGlobalInSearchInput 搜索输入框聚焦时 Alt+L 仍全
+// TestAdjustLyricOffsetGlobalInSearchInput 搜索输入框聚焦时 Ctrl+Shift+→ 仍全
 // 局生效（不被 textinput 消费，与 ctrl+left/right 全局键行为一致）。
 func TestAdjustLyricOffsetGlobalInSearchInput(t *testing.T) {
 	fp := newFakePlayer()
@@ -4445,12 +4445,12 @@ func TestAdjustLyricOffsetGlobalInSearchInput(t *testing.T) {
 		t.Fatal("typingText 应为 true（搜索输入框聚焦）")
 	}
 	before := m.home.lyrics.Lines[0].Time
-	m, cmd := update(m, altL())
+	m, cmd := update(m, shiftRightKey())
 	if cmd == nil {
-		t.Fatal("搜索输入框聚焦时 alt+l 仍应全局生效（返回 toast cmd）")
+		t.Fatal("搜索输入框聚焦时 ctrl+shift+right 仍应全局生效（返回 toast cmd）")
 	}
 	if got := m.home.lyrics.Lines[0].Time; got != before+0.5 {
-		t.Errorf("输入框聚焦时 alt+l 未全局生效: Lines[0].Time = %v, want %v", got, before+0.5)
+		t.Errorf("输入框聚焦时 ctrl+shift+right 未全局生效: Lines[0].Time = %v, want %v", got, before+0.5)
 	}
 	if got := m.home.lyricOffset; got != 0.5 {
 		t.Errorf("lyricOffset = %v, want 0.5", got)
@@ -4459,6 +4459,6 @@ func TestAdjustLyricOffsetGlobalInSearchInput(t *testing.T) {
 		t.Errorf("RewriteCache 调用次数 = %d, want 1", rc.rewriteCount())
 	}
 	if got := m.searchPage.input.Value(); got != "" {
-		t.Errorf("alt+l 不应被 textinput 消费: input = %q", got)
+		t.Errorf("ctrl+shift+right 不应被 textinput 消费: input = %q", got)
 	}
 }

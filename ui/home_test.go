@@ -1475,7 +1475,7 @@ func TestHomeLyricFileAITrackUpdatesLabel(t *testing.T) {
 	}
 }
 
-// ---- 歌词时间偏移（Alt+L/H 全局键在 home 层的行为） ----
+// ---- 歌词时间偏移（Ctrl+Shift+←/→ 全局键在 home 层的行为） ----
 
 // TestHomeShiftLyricsNoLyrics 无歌词/未同步时 shiftLyrics 原样返回
 // （不偏移、不改变 offset、不 panic）。
