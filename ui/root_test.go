@@ -1744,6 +1744,64 @@ func TestLoadFailAllTracksFailStopsLoop(t *testing.T) {
 	}
 }
 
+// 回归（用户报告）：网络失败重试耗尽停止（ended）后，空格"再次播放"不得
+// 清空队列——restartSameTrack 此前误走 startPlay 的替换语义（queue.Replace =
+// 清空队列 + 单曲入队），失败→停止→重播会把整个队列抹成只剩失败曲一首。
+// 重播应仅重载当前曲，队列结构与指针原样保留。
+func TestRestartAfterLoadFailExhaustedKeepsQueue(t *testing.T) {
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	defer func() { retryBackoff = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m.queue.Add(testTrack("t2")) // 队列 [t1, t2]
+
+	// 全部取流失败：t1 耗尽跳过到 t2，t2 耗尽回绕撞 t1（已在失败集合）→ 停止
+	loadErr := player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}
+	for i := 0; i < 2; i++ {
+		m, cmd = update(m, playerEventMsg{ev: loadErr})
+		m = execRetryBatch(m, cmd, fp)
+	}
+	m, _ = update(m, playerEventMsg{ev: loadErr}) // t1 耗尽 → 跳 t2
+	for i := 0; i < 2; i++ {
+		m, cmd = update(m, playerEventMsg{ev: loadErr})
+		m = execRetryBatch(m, cmd, fp)
+	}
+	m, _ = update(m, playerEventMsg{ev: loadErr}) // t2 耗尽 → 停止
+	if !m.ended || m.state.Playing {
+		t.Fatalf("前置：应停止（ended=true Playing=false），got ended=%v Playing=%v", m.ended, m.state.Playing)
+	}
+	if m.queue.Len() != 2 {
+		t.Fatalf("前置：停止态队列应完好 [t1,t2], Len=%d", m.queue.Len())
+	}
+	beforeIdx := m.queue.CurrentIndex()
+	beforePlays := fp.playCount()
+
+	// 用户"再次播放"（空格）：重播当前曲，队列必须保持 2 首、指针不动
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if m.queue.Len() != 2 {
+		t.Errorf("失败后重播清空了队列: Len=%d, want 2（重播不得改动队列）", m.queue.Len())
+	}
+	if m.queue.CurrentIndex() != beforeIdx {
+		t.Errorf("重播后队列指针 = %d, want %d（保持停止时位置）", m.queue.CurrentIndex(), beforeIdx)
+	}
+	if fp.playCount() != beforePlays+1 {
+		t.Errorf("空格应恰好重播一次: playCount=%d, want %d", fp.playCount(), beforePlays+1)
+	}
+	if m.state.Track == nil || fp.lastPlayed() != m.state.Track.URL {
+		t.Errorf("重播应重载当前曲: lastPlayed=%q", fp.lastPlayed())
+	}
+	if !m.state.Playing || m.ended {
+		t.Errorf("重播后 state.Playing=%v ended=%v, want true/false", m.state.Playing, m.ended)
+	}
+	if fp.resumeCount() != 0 {
+		t.Errorf("停止态空格不应走 Resume, resumeCount=%d", fp.resumeCount())
+	}
+}
+
 // 回归（P1 分支镜像）：重试耗尽跳过时若存在删除解耦标记（queueSkip=true、
 // 指针已顺延），应播放顺延曲目（Current 兜底）而非 Next()——不跳过头
 // （镜像 TrackEnded 的解耦逻辑）。场景：t1 两次重试均失败后删除 t1
@@ -3100,6 +3158,52 @@ func TestCacheFallbackPauseCancels(t *testing.T) {
 	}
 	if fp.lastPlayed() != tr.URL {
 		t.Errorf("取消后不应切本地: lastPlayed=%q", fp.lastPlayed())
+	}
+}
+
+// 回归（用户报告实景）：网络失败 → 缓存兜底等待 → 空格暂停（取消兜底，
+// ended 停止态）→ 空格再次播放 → 队列必须保持原样。与
+// TestRestartAfterLoadFailExhaustedKeepsQueue 同根因：restartSameTrack 误走
+// startPlay 替换语义清空队列；此用例走缓存兜底取消路径（无 yt-dlp 可用的
+// 用户失败后暂停 = 取消兜底 + 停止）。
+func TestRestartAfterFallbackCancelKeepsQueue(t *testing.T) {
+	shrinkDownloadRetries(t)
+	m, fp, _, _ := newCacheTestModelWithYtdlp(t, nil, fakeYtDlpFail(t))
+	m, _ = update(m, trackSelectedMsg{track: testTrack("t1")})
+	m, _ = update(m, trackAppendMsg{track: testTrack("t2")}) // 队列 [t1, t2]
+
+	// 网络取流失败 → 缓存兜底等待
+	m, _ = update(m, playerEventMsg{ev: loadFail()})
+	if !m.fallback.active {
+		t.Fatal("取流失败后应进入缓存兜底等待")
+	}
+	if m.queue.Len() != 2 {
+		t.Fatalf("前置：兜底等待中队列应完好 [t1,t2], Len=%d", m.queue.Len())
+	}
+
+	// 用户暂停（空格）：取消兜底 → 停止态（ended）
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if !m.ended {
+		t.Fatal("空格取消兜底后 ended 应为 true")
+	}
+	if m.queue.Len() != 2 {
+		t.Fatalf("取消兜底不应动队列: Len=%d, want 2", m.queue.Len())
+	}
+	beforePlays := fp.playCount()
+
+	// 用户再次播放（空格）：重播当前曲，队列必须保持 2 首不变
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	if m.queue.Len() != 2 {
+		t.Errorf("再次播放清空了队列: Len=%d, want 2（重播不得改动队列）", m.queue.Len())
+	}
+	if fp.playCount() != beforePlays+1 {
+		t.Errorf("空格应恰好重播一次: playCount=%d, want %d", fp.playCount(), beforePlays+1)
+	}
+	if fp.lastPlayed() != testTrack("t1").URL {
+		t.Errorf("重播应重载当前曲 t1: %q", fp.lastPlayed())
+	}
+	if !m.state.Playing || m.ended {
+		t.Errorf("重播后 state.Playing=%v ended=%v, want true/false", m.state.Playing, m.ended)
 	}
 }
 
