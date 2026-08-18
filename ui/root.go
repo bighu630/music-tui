@@ -1169,7 +1169,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height - 4
 		// 整窗口高度先注入首页：封面隐藏判定按整个窗口尺寸（宽 < 2×封面宽 或
-		// 高 < 2×封面高即隐藏封面，见 home.coverHidden）
+		// 高 < 28 即隐藏封面，见 home.coverHidden/coverHideMinH）
 		m.home.windowHeight = msg.Height
 		m.home = m.home.setSize(msg.Width, msg.Height-4)
 		m.searchPage = m.searchPage.setSize(msg.Width, msg.Height-4)

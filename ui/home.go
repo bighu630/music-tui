@@ -30,6 +30,11 @@ const (
 	coverH = 17
 )
 
+// coverHideMinH 封面隐藏的整终端窗口高度阈值：窗口高小于此值即隐藏封面
+// （用户按实机观感从 2×coverH=34 下调为 28——28 的页面高 24、中间区 22 行仍
+// 可容纳 17 行封面留白充足）；宽度阈值仍为 2×coverW=60。
+const coverHideMinH = 28
+
 // ---- 控制消息（root 消费；root 接线在后续任务，本文件只定义类型与 emit） ----
 
 // prevTrackMsg 上一首请求：root 消费（queue.Prev + beginPlay）。
@@ -190,7 +195,8 @@ type homeModel struct {
 
 	// windowHeight 整个终端窗口高度（root 在 WindowSizeMsg 时注入 msg.Height，
 	// 非页面高度 m.height=窗口高-4）。封面隐藏判定按整个窗口尺寸计算（用户需求：
-	// 窗口尺度不足封面框两倍即隐藏封面）；测试/未初始化（<=0）时回退到页面高度。
+	// 窗口尺度不足以容纳封面区即隐藏封面：宽 < 2×coverW 或 高 < coverHideMinH=28）；
+	// 测试/未初始化（<=0）时回退到页面高度。
 	windowHeight int
 
 	// 中间区渲染缓存（P1-2）：中间区内容仅随封面/歌词/尺寸变化，播放中进度
@@ -615,7 +621,7 @@ func (m homeModel) middleHeight() int {
 }
 
 // lyricsColumnWidth 歌词列宽：封面显示时 = 页面宽 - 封面宽 - gap 2 - 边距 2；
-// 封面隐藏时（窗口不足以容纳封面框两倍）封面列移除，歌词区占满整页宽（直接居中
+// 封面隐藏时（窗口不满足宽 < 60 或 高 < 28）封面列移除，歌词区占满整页宽（直接居中
 // 屏幕，见 renderMiddleView/centerLyrics）。
 func (m homeModel) lyricsColumnWidth() int {
 	if m.coverHidden() {
@@ -628,12 +634,12 @@ func (m homeModel) lyricsColumnWidth() int {
 	return w
 }
 
-// coverHidden 判断封面是否隐藏：窗口尺寸不足以容纳封面框的两倍时（宽 < 2×coverW
-// 或 高 < 2×coverH，任一即隐藏）不显示封面区（用户需求：窗口只有封面宽度/高度
-// 的两倍就不显示）。OR 语义 + 严格小于：恰好等于 2 倍时显示。高度指整个终端窗口
-// 高度（非页面高度）。纯函数，TDD 边界矩阵见 TestCoverHidden。
+// coverHidden 判断封面是否隐藏：窗口尺寸不足以容纳封面区时（宽 < 2×coverW（60）
+// 或 高 < coverHideMinH（28），任一即隐藏）不显示封面区。OR 语义 + 严格小于：
+// 恰好等于阈值时显示。高度指整个终端窗口高度（非页面高度），阈值用户从 2×coverH
+// 下调到 28（见 coverHideMinH）。纯函数，TDD 边界矩阵见 TestCoverHidden。
 func coverHidden(width, height int) bool {
-	return width < coverW*2 || height < coverH*2
+	return width < coverW*2 || height < coverHideMinH
 }
 
 // coverHidden 首页封面隐藏态：高度用整窗口高度（windowHeight，root 注入；
@@ -656,7 +662,7 @@ func (m homeModel) lyricsStartCol() int {
 }
 
 // middleView 中间区（占 height-2 行）：封面显示时 = 封面列与歌词列水平并排
-// （gap 2），整体在页面宽度内水平居中；封面隐藏时（窗口不足以容纳封面框两倍）
+// （gap 2），整体在页面宽度内水平居中；封面隐藏时（窗口不满足宽 < 60 或 高 < 28）
 // 封面列移除，歌词区占满整页宽并直接以屏幕中心居中。
 // 读取渲染缓存：中间区内容仅随封面/歌词/尺寸变化，播放中进度推进（5fps）
 // 每帧直接复用缓存（省去 3 个全屏 Place + 逐行宽度计算）；缓存缺失时现场
