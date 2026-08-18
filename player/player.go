@@ -40,6 +40,15 @@ type TrackEndedEvent struct{}
 
 func (TrackEndedEvent) isEvent() {}
 
+// StalledEvent 播放无进展（卡住）：file-loaded 已到（TrackStarted 已发）但
+// 检测窗口内（stallWindow）未见 position 推进（无 ProgressEvent 且 Position>0）。
+// UI 据此重启 mpv 进程并重播同曲（自动恢复“卡住不播放”）；重试上限与其它兜底
+// 协调在 UI 层。注意与 LoadTimeoutError 互补：后者=一直没 file-loaded（加载看门狗），
+// 前者=已加载但未开始推进。
+type StalledEvent struct{}
+
+func (StalledEvent) isEvent() {}
+
 // ErrorEvent 播放器异常（播放出错、mpv 崩溃或 socket 断开）。
 type ErrorEvent struct {
 	Err error
@@ -82,6 +91,11 @@ type Player interface {
 	Resume() error
 	// Seek 跳转到指定秒数（绝对位置）。
 	Seek(seconds float64) error
+	// Restart 强制重启 mpv 进程并重连（卡住恢复）：kill 旧进程 → 清理 socket →
+	// 重启 mpv（--idle --input-ipc-server）→ 重新连接并注册属性观察。重启后
+	// 事件流（Events()/Subscribe()）自动恢复（同一实例），调用方重新 Play 即可。
+	// 与自动重连共用单飞机制，故意 kill 不触发虚假断开事件。
+	Restart() error
 	// SetLoop 设置单曲循环（mpv loop-file 无缝循环）。loop-file 是 per-file
 	// 属性：换文件（loadfile）自动重置为不循环，无需显式关闭。
 	SetLoop(loop bool) error

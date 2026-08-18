@@ -600,10 +600,23 @@ func TestLoadWatchdogClearedOnFileLoaded(t *testing.T) {
 	if _, ok := waitEvent(t, p, 2*time.Second).(TrackStartedEvent); !ok {
 		t.Fatalf("want TrackStartedEvent")
 	}
-	select {
-	case ev := <-p.Events():
-		t.Fatalf("file-loaded 后不应有超时错误, got %#v", ev)
-	case <-time.After(2 * time.Second):
+	// 加载看门狗已解除：不应再收到 LoadTimeoutError。注意卡住检测（stall watchdog）
+	// 是本实现的另一机制——file-loaded 后 2s 内无 position>0 恰是“已加载未推进”的
+	// 卡住场景，会发一次 StalledEvent（设计行为），断言只盯 ErrorEvent（加载超时）。
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-p.Events():
+			switch ev.(type) {
+			case StalledEvent:
+				// 卡住检测按设计触发（file-loaded 后无推进），非加载看门狗误报，继续等超时
+				// 窗口——若后面仍无 ErrorEvent 则期望满足。
+			case ErrorEvent:
+				t.Fatalf("file-loaded 后不应有加载超时错误, got %#v", ev)
+			}
+		case <-deadline:
+			return
+		}
 	}
 }
 
@@ -1743,4 +1756,172 @@ func TestMpvPlayerDisconnectDuringReconnectRecovers(t *testing.T) {
 		t.Fatalf("重连进行中断开后，Play 应经惰性重连恢复: %v", err)
 	}
 	waitConnected(t, p, 5*time.Second)
+}
+
+// ---- 卡住检测（stall watchdog）与 Restart ----
+
+// stallWindowTest 测试用检测窗口：比产品 2s 小得多，同时 ≥350ms 抗 flaky。
+const stallWindowTest = 350 * time.Millisecond
+
+// setStallWindow 调小卡住检测窗口（t.Cleanup 恢复原值）。
+// 包级变量测试隔离：同包测试顺序执行（无 t.Parallel），串行调整安全。
+func setStallWindow(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := stallWindow
+	stallWindow = d
+	t.Cleanup(func() { stallWindow = orig })
+}
+
+// waitNoStall 在 wait 时间内确认没有 StalledEvent 到达（排空其它事件后等待）。
+func waitNoStall(t *testing.T, p *MpvPlayer, wait time.Duration) {
+	t.Helper()
+	deadline := time.After(wait)
+	for {
+		select {
+		case ev := <-p.Events():
+			if _, ok := ev.(StalledEvent); ok {
+				t.Fatalf("不应收到 StalledEvent，却收到: %#v", ev)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
+// waitStalled 在 timeout 时间内等待一个 StalledEvent（丢弃其它事件）。
+func waitStalled(t *testing.T, p *MpvPlayer, timeout time.Duration) StalledEvent {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case ev := <-p.Events():
+			if se, ok := ev.(StalledEvent); ok {
+				return se
+			}
+		case <-deadline:
+			t.Fatalf("等待 StalledEvent 超时（%s）", timeout)
+			return StalledEvent{}
+		}
+	}
+}
+
+// file-loaded 后窗口内无 progress（position>0）→ 恰好一次 StalledEvent。
+func TestStallWatchdogEmitsOnceWhenNoProgress(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+	setStallWindow(t, stallWindowTest)
+
+	fake.pushEvent(`{"event":"file-loaded"}`)
+	waitEvent(t, p, 2*time.Second) // 消费 TrackStarted
+
+	se := waitStalled(t, p, 3*time.Second)
+	_ = se
+
+	// 只发一次：随后窗口内不再重复
+	for {
+		select {
+		case ev := <-p.Events():
+			if _, ok := ev.(StalledEvent); ok {
+				t.Fatalf("StalledEvent 应只发一次，却再次收到: %#v", ev)
+			}
+		case <-time.After(stallWindowTest * 2):
+			return
+		}
+	}
+}
+
+// 窗口内见到 position>0 → 不触发。
+func TestStallWatchdogSuppressedByProgress(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+	setStallWindow(t, stallWindowTest)
+
+	fake.pushEvent(`{"event":"file-loaded"}`)
+	waitEvent(t, p, 2*time.Second) // TrackStarted
+	fake.pushEvent(`{"event":"property-change","id":1,"name":"time-pos","data":5.0}`)
+	waitEvent(t, p, 2*time.Second) // ProgressEvent{5}
+
+	time.Sleep(stallWindowTest * 2)
+	// 排空确认无 StalledEvent（其它事件如后续 probe 不影响）
+	waitNoStall(t, p, 300*time.Millisecond)
+}
+
+// 窗口内暂停（StateEvent Playing=false）→ disarm，不触发。
+func TestStallWatchdogDisarmedByPause(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+	setStallWindow(t, stallWindowTest)
+
+	fake.pushEvent(`{"event":"file-loaded"}`)
+	waitEvent(t, p, 2*time.Second) // TrackStarted
+	fake.pushEvent(`{"event":"property-change","id":3,"name":"pause","data":true}`)
+	// 消费 StateEvent（pause 处理在 emit 前 disarm：收到事件即已 disarm）
+	waitEvent(t, p, 2*time.Second)
+
+	time.Sleep(stallWindowTest * 2)
+	waitNoStall(t, p, 600*time.Millisecond)
+}
+
+// 窗口内结束（end-file eof → TrackEnded）→ disarm，不触发。
+func TestStallWatchdogDisarmedByEndFile(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+	setStallWindow(t, stallWindowTest)
+
+	fake.pushEvent(`{"event":"file-loaded"}`)
+	waitEvent(t, p, 2*time.Second) // TrackStarted
+	fake.pushEvent(`{"event":"end-file","reason":"eof"}`)
+	waitEvent(t, p, 2*time.Second) // TrackEnded
+
+	time.Sleep(stallWindowTest * 2)
+	waitNoStall(t, p, 600*time.Millisecond)
+}
+
+// 新 TrackStarted 重新 arm：旧一轮不发（已发），新一轮窗口内推进则不触发。
+func TestStallWatchdogRearmsOnNewLoad(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+	setStallWindow(t, stallWindowTest)
+
+	fake.pushEvent(`{"event":"file-loaded"}`)
+	waitEvent(t, p, 2*time.Second) // TrackStarted#1
+	waitStalled(t, p, 3*time.Second)
+
+	// 新一轮加载：窗口内推进 → 不触发
+	fake.pushEvent(`{"event":"file-loaded"}`)
+	waitEvent(t, p, 2*time.Second) // TrackStarted#2
+	fake.pushEvent(`{"event":"property-change","id":1,"name":"time-pos","data":8.2}`)
+	waitEvent(t, p, 2*time.Second) // ProgressEvent
+
+	time.Sleep(stallWindowTest * 2)
+	waitNoStall(t, p, 600*time.Millisecond)
+}
+
+// Restart：杀掉旧进程 → 重启新进程 → 新连接可用（进程级）。
+func TestMpvPlayerRestartRestartsProcess(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := testSockPath(t)
+	logPath := filepath.Join(dir, "starts.log")
+	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
+	script := writeFakeMpvWrapperScript(t, dir)
+
+	p := NewMpvPlayer(script, socketPath, "", nil)
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+
+	if err := p.Restart(); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	waitConnected(t, p, 5*time.Second)
+
+	if got := countLogLines(t, logPath, "started"); got != 2 {
+		t.Errorf("mpv 启动次数 = %d, want 2（初始 + Restart）", got)
+	}
+	// 重启后的新进程可正常使用
+	if err := p.Play("https://example.com/a.mp3"); err != nil {
+		t.Fatalf("Restart 后 Play 应成功: %v", err)
+	}
+	waitForLogLine(t, logPath, `"loadfile"`, 3*time.Second)
 }

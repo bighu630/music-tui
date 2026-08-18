@@ -47,6 +47,8 @@ type fakePlayer struct {
 	loops        []bool // SetLoop 调用记录
 	playErr      bool   // 为 true 时 Play 返回错误（测试注入）
 	loopErr      bool   // 为 true 时 SetLoop 返回错误（测试注入）
+	restarts     int    // Restart 调用计数
+	restartErr   bool   // 为 true 时 Restart 返回错误（测试注入）
 	events       chan player.Event
 }
 
@@ -107,6 +109,24 @@ func (f *fakePlayer) SetLoop(loop bool) error {
 }
 
 func (f *fakePlayer) Events() <-chan player.Event { return f.events }
+
+// Restart 模拟强制重启 mpv 进程（卡住恢复）：记录调用数，可选注入错误。
+func (f *fakePlayer) Restart() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.restarts++
+	if f.restartErr {
+		return errors.New("重启失败")
+	}
+	return nil
+}
+
+// restartCount 返回 Restart 调用次数（卡住自动重启测试）。
+func (f *fakePlayer) restartCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.restarts
+}
 
 func (f *fakePlayer) pauseCount() int {
 	f.mu.Lock()
@@ -3680,5 +3700,491 @@ func TestErrorEventLocalSkipsCacheFallback(t *testing.T) {
 	// 不启动任何下载（兜底分支是唯一会启动下载的路径，已排除）
 	if !m.loadingSince.IsZero() {
 		t.Error("失败后不应处于加载中")
+	}
+}
+
+// ---- 卡住自动重启（StalledEvent → Restart + 重播；上限 + 协调） ----
+
+// execStallBatch 执行 handleStall 返回的 batch（tea.BatchMsg：toast tick +
+// stalledRestartCmd + waitForPlayerEvents）。waitForPlayerEvents 阻塞在事件
+// 通道，须先预推一个普通事件让其返回；toast tick 会阻塞 toastDuration（警告 5s）
+// ——与 execRetryBatch 同款取舍（Update 的 BatchMsg 分支同步执行每个子 cmd）。
+// 返回 batch 处理后的 Model。
+func execStallBatch(t *testing.T, m Model, cmd tea.Cmd, fp *fakePlayer) Model {
+	t.Helper()
+	if cmd == nil {
+		return m
+	}
+	fp.events <- player.ProgressEvent{Position: 0, Duration: 200}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		return m
+	}
+	m2, _ := update(m, batch)
+	return m2
+}
+
+// 卡住 → Restart + 重播同曲（Play 次数 +1，URL 不变）；重启计数保留供上限判定。
+func TestStallRestartReplaysSameTrack(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	if fp.playCount() != 1 || fp.lastPlayed() != tr.URL {
+		t.Fatalf("初始播放: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	// file-loaded → playStarted（stall 前提）
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	if !m.playStarted {
+		t.Fatal("TrackStarted 后 playStarted 应为 true")
+	}
+
+	m, cmd := update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if !strings.Contains(activeToastText(m), "重启播放器") {
+		t.Errorf("toast = %q, want 含“重启播放器”", activeToastText(m))
+	}
+	if m.stallRestarts != 1 {
+		t.Errorf("stallRestarts = %d, want 1", m.stallRestarts)
+	}
+	if cmd == nil {
+		t.Fatal("StalledEvent 后应返回重启 batch")
+	}
+
+	// 执行 batch：Restart 调一次 + 重播同曲
+	m = execStallBatch(t, m, cmd, fp)
+	if fp.restartCount() != 1 {
+		t.Errorf("Restart 应被调用一次: %d", fp.restartCount())
+	}
+	if fp.playCount() != 2 || fp.lastPlayed() != tr.URL {
+		t.Errorf("重播同曲: playCount=%d lastPlayed=%q, want 2/%q", fp.playCount(), fp.lastPlayed(), tr.URL)
+	}
+	if m.stallRestarts != 1 {
+		t.Errorf("重播后 stallRestarts 应保留 1（供上限判定）: %d", m.stallRestarts)
+	}
+	if m.playStarted {
+		t.Error("重播后 playStarted 应复位 false（等待新的 TrackStarted）")
+	}
+}
+
+// 卡住时缓存兜底等待中（fallback.active）→ 不重启（下载完自动切本地更优）。
+func TestStallRestartSkipsWhenFallbackActive(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m.fallback = fallbackState{active: true, trackID: tr.ID, gen: m.playGen}
+
+	m, _ = update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if fp.restartCount() != 0 {
+		t.Errorf("兜底进行中不应重启: restarts=%d", fp.restartCount())
+	}
+	if fp.playCount() != 1 {
+		t.Errorf("兜底进行中不应重播: playCount=%d, want 1", fp.playCount())
+	}
+}
+
+// 恢复（PlayPaused 静默加载）期间卡住 → 不重启（重启发声破坏恢复语义）。
+func TestStallRestartSkipsWhenResuming(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m.resuming = true
+
+	m, _ = update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if fp.restartCount() != 0 || fp.playCount() != 1 {
+		t.Errorf("恢复中不应重启/重播: restarts=%d playCount=%d", fp.restartCount(), fp.playCount())
+	}
+}
+
+// TrackStarted 未到（playStarted=false）→ 忽略（本机制只管“已加载未推进”）。
+func TestStallRestartIgnoredBeforeTrackStarted(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	if m.playStarted {
+		t.Fatal("TrackStarted 未到，playStarted 应为 false")
+	}
+	m, _ = update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if fp.restartCount() != 0 || fp.playCount() != 1 {
+		t.Errorf("playStarted=false 不应重启: restarts=%d playCount=%d", fp.restartCount(), fp.playCount())
+	}
+}
+
+// 重启重播后仍卡（StalledEvent #2）→ 上限（maxStallRestarts=1）→ 标记 hopeless
+// 并直接跳过/停止（单曲队列 = 停止，ended=true；不复用 retry 子路径——retryCount
+// 被每次 TrackStarted 归零，stall 型失败走 retry 永不收敛，审查 P2-2）。
+func TestStallRestartExhaustedStopsSingleTrack(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+
+	// 第一次卡住 → 执行 batch：Restart + 重播
+	m, cmd := update(m, playerEventMsg{ev: player.StalledEvent{}})
+	m = execStallBatch(t, m, cmd, fp)
+	if fp.playCount() != 2 {
+		t.Fatalf("第一次卡住应重播一次: playCount=%d", fp.playCount())
+	}
+	// 重播的 file-loaded（restart 计数保留）
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	if m.stallRestarts != 1 {
+		t.Fatalf("重播后计数应保留: %d", m.stallRestarts)
+	}
+
+	// 第二次卡住 → 上限耗尽 → 标记 hopeless + 停止（ended，单曲无曲可跳）
+	m, _ = update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if fp.restartCount() != 1 {
+		t.Errorf("上限内只重启一次，不应二次重启: %d", fp.restartCount())
+	}
+	if !m.ended {
+		t.Error("单曲队列卡住上限耗尽后应停止（ended=true）")
+	}
+	if !m.stallHopeless[tr.ID] {
+		t.Error("上限耗尽后应标记 hopeless")
+	}
+	if !strings.Contains(activeToastText(m), "播放失败") {
+		t.Errorf("上限耗尽 toast = %q, want 含“播放失败”", activeToastText(m))
+	}
+	if fp.playCount() != 2 {
+		t.Errorf("上限耗尽后不立即 Play: playCount=%d", fp.playCount())
+	}
+	if m.stallRestarts != 0 {
+		t.Errorf("上限耗尽后 stallRestarts 应清零: %d", m.stallRestarts)
+	}
+}
+
+// 重启进行中用户换曲（gen 不匹配）→ 丢弃：不重播旧曲，新曲预算正常。
+func TestStallRestartGenMismatchIgnored(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	tr1 := testTrack("t1")
+	tr2 := testTrack("t2")
+
+	m, _ = update(m, trackSelectedMsg{track: tr1}) // Play t1
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, _ = update(m, playerEventMsg{ev: player.StalledEvent{}}) // 发起重启
+	if m.stallRestarts != 1 {
+		t.Fatalf("卡住后计数 = %d, want 1", m.stallRestarts)
+	}
+	genAtStall := m.playGen
+
+	// 用户换曲（beginPlay t2 自增 playGen，且 beginPlay 清零 stallRestarts）
+	m, _ = update(m, trackSelectedMsg{track: tr2})
+	if fp.playCount() != 2 || fp.lastPlayed() != tr2.URL {
+		t.Fatalf("换曲: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
+	}
+	if m.stallRestarts != 0 {
+		t.Errorf("换曲 beginPlay 应清零 stallRestarts: %d", m.stallRestarts)
+	}
+
+	// 旧重启 done msg（gen 过期）到达 → 丢弃，不重播 t1
+	m, _ = update(m, stalledRestartDoneMsg{gen: genAtStall, track: tr1})
+	if fp.playCount() != 2 {
+		t.Errorf("gen 不匹配不应重播旧曲: playCount=%d, want 2", fp.playCount())
+	}
+}
+
+// 重播后真正推进（ProgressEvent>0）→ stallRestarts 清零（会话健康）。
+func TestStallRestartResetOnProgress(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, cmd := update(m, playerEventMsg{ev: player.StalledEvent{}})
+	m = execStallBatch(t, m, cmd, fp)
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	if m.stallRestarts != 1 {
+		t.Fatalf("重播后计数应保留: %d", m.stallRestarts)
+	}
+
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 5, Duration: 200}})
+	if m.stallRestarts != 0 {
+		t.Errorf("真正推进后 stallRestarts 应清零: %d", m.stallRestarts)
+	}
+}
+
+// 重启失败（player.Restart 返回错误）→ 走统一失败链（不为难重播）。
+func TestStallRestartFailureFallsToRetryChain(t *testing.T) {
+	speedUpRetry(t)
+	fp := newFakePlayer()
+	fp.restartErr = true
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, cmd := update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if cmd == nil {
+		t.Fatal("应发起重启 batch")
+	}
+	m = execStallBatch(t, m, cmd, fp)
+	if !strings.Contains(activeToastText(m), "播放失败") {
+		t.Errorf("重启失败 toast = %q, want 含播放失败", activeToastText(m))
+	}
+	if fp.playCount() != 1 {
+		t.Errorf("重启失败不应重播: playCount=%d, want 1", fp.playCount())
+	}
+}
+
+// 已判定"重启无效"（hopeless）的曲目在队列回绕再次遇到时：不再重启，直接走
+// 统一失败链——否则 RepeatAll/回绕时对同一首永远卡住的曲每轮重启一次
+// （健康曲的 TrackStarted 会重置 stallRestarts，令上限失效 → 重启风暴，审查 P2）。
+func TestStallRestartHopelessTrackNoRestartOnWrap(t *testing.T) {
+	speedUpRetry(t)
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	tr := testTrack("t1")
+
+	// 第一轮：卡住 → 重启一次 → 重播后仍卡 → 上限耗尽，标记 hopeless
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, cmd := update(m, playerEventMsg{ev: player.StalledEvent{}})
+	m = execStallBatch(t, m, cmd, fp)
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, _ = update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if fp.restartCount() != 1 {
+		t.Fatalf("第一轮应恰重启一次: %d", fp.restartCount())
+	}
+	if !m.stallHopeless[tr.ID] {
+		t.Fatal("上限耗尽后应标记 hopeless")
+	}
+
+	// 第二轮（回绕重播同一首，模拟队列回绕：重试/连播再次 beginPlay t1）
+	m, _ = update(m, retryPlayMsg{gen: m.playGen})
+	if fp.playCount() != 3 {
+		t.Fatalf("回绕重播应 Play 一次: playCount=%d", fp.playCount())
+	}
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, _ = update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if fp.restartCount() != 1 {
+		t.Errorf("hopeless 曲目回绕不应再重启: restarts=%d, want 1", fp.restartCount())
+	}
+	if fp.playCount() != 3 {
+		t.Errorf("hopeless 曲目应直接停止（不重试不重播）: playCount=%d", fp.playCount())
+	}
+	if !m.ended {
+		t.Error("hopeless 曲目回绕后应停止（ended=true）——必然收敛")
+	}
+	if !strings.Contains(activeToastText(m), "播放失败") {
+		t.Errorf("hopeless 停止 toast = %q, want 含播放失败", activeToastText(m))
+	}
+}
+
+// 用户手动重选（startPlay）解除 hopeless：给该曲全新预算（尊重用户新意图）。
+func TestStallRestartHopelessClearedByUserIntent(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, cmd := update(m, playerEventMsg{ev: player.StalledEvent{}})
+	m = execStallBatch(t, m, cmd, fp)
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, _ = update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if !m.stallHopeless[tr.ID] {
+		t.Fatal("前提：应已标记 hopeless")
+	}
+
+	// 用户手动重选同一首（startPlay 清空 hopeless）
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	if len(m.stallHopeless) != 0 {
+		t.Errorf("startPlay 应清空 hopeless: %v", m.stallHopeless)
+	}
+	if fp.playCount() != 3 {
+		t.Fatalf("手动重选应 Play: playCount=%d", fp.playCount())
+	}
+	// 新预算：再卡住允许再重启
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, cmd = update(m, playerEventMsg{ev: player.StalledEvent{}})
+	m = execStallBatch(t, m, cmd, fp)
+	if fp.restartCount() != 2 {
+		t.Errorf("手动重选后应允许再次重启: restarts=%d, want 2", fp.restartCount())
+	}
+}
+
+// 真正推进清除 hopeless（该曲自己推进 = 可重新信任）。
+func TestStallRestartHopelessClearedOnProgress(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, cmd := update(m, playerEventMsg{ev: player.StalledEvent{}})
+	m = execStallBatch(t, m, cmd, fp)
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, _ = update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if !m.stallHopeless[tr.ID] {
+		t.Fatal("前提：应已标记 hopeless")
+	}
+
+	// 该曲终于推进 → 标记解除
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 3, Duration: 200}})
+	if m.stallHopeless[tr.ID] {
+		t.Error("真正推进应解除 hopeless")
+	}
+	// 相邻健康曲推进不应误删其它曲的 hopeless（回归护栏）：先标记 t2 再推进 t1
+	m.stallHopeless["t2"] = true
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 4, Duration: 200}})
+	if !m.stallHopeless["t2"] {
+		t.Error("当前曲推进不应解除其它曲目的 hopeless")
+	}
+}
+
+// 多曲队列：hopeless 曲目卡住 → 跳过继续连播（队列推进，不卡死不循环）。
+func TestStallRestartHopelessSkipsToNextInQueue(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	t1 := testTrack("t1")
+	t2 := testTrack("t2")
+
+	m, _ = update(m, trackSelectedMsg{track: t1}) // 队列 [t1]
+	m, _ = update(m, trackAppendMsg{track: t2})   // 队列 [t1, t2]
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, cmd := update(m, playerEventMsg{ev: player.StalledEvent{}})
+	m = execStallBatch(t, m, cmd, fp)
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+
+	// 上限耗尽 → hopeless 标记 → exhaustedOrSkip → 跳过到 t2（继续连播）
+	m, _ = update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if !m.stallHopeless[t1.ID] {
+		t.Error("应标记 t1 hopeless")
+	}
+	if fp.lastPlayed() != t2.URL {
+		t.Errorf("应跳过 t1 播放 t2: lastPlayed=%q, want %q", fp.lastPlayed(), t2.URL)
+	}
+	if fp.restartCount() != 1 {
+		t.Errorf("跳过后不应再重启: restarts=%d, want 1", fp.restartCount())
+	}
+	if m.ended {
+		t.Error("有下一曲可跳时不应停止")
+	}
+}
+
+// 收敛回归（审查 P2-2）：完整循环（卡住 → 重启/重播 → TrackStarted → 再卡住 → …）
+// 迭代有限次后必然终止（单曲队列 ended）——不会无限重试/无限重启。
+func TestStallRestartConvergesToStop(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	tr := testTrack("t1")
+
+	m, _ = update(m, trackSelectedMsg{track: tr})
+	// 模拟连续多轮"卡住"循环，断言收敛（≤3 轮必停止，重启 ≤1 次）。
+	// 注意：cmd 必须在循环外先声明——循环体内 `m, cmd := ...` 会因作用域遮蔽
+	// 新建一份 m（各轮从重播前的旧状态出发，预算永不耗尽 → 永不收敛）。
+	var cmd tea.Cmd
+	for i := 0; i < 6; i++ {
+		if m.ended {
+			break
+		}
+		m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+		m, cmd = update(m, playerEventMsg{ev: player.StalledEvent{}})
+		if cmd == nil {
+			t.Fatal("StalledEvent 后应返回 cmd")
+		}
+		m = execStallBatch(t, m, cmd, fp) // 重启 batch（若预算内）→ 重播或停止
+	}
+	if !m.ended {
+		t.Fatal("卡住循环未收敛到停止（ended）——存在无限循环")
+	}
+	if fp.restartCount() > 1 {
+		t.Errorf("收敛过程中重启不应超过 1 次: %d", fp.restartCount())
+	}
+}
+
+// 两首永久卡住的曲目在回绕队列中：hopeless 候选被否决 → 最终停止（ended=true），
+// 而非无限互相跳过（审查 P2-2 终审场景：≥2 首卡住曲回绕）。收敛 + 重启有界。
+func TestStallRestartTwoHopelessWrapsStop(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	t1 := testTrack("t1")
+	t2 := testTrack("t2")
+
+	m, _ = update(m, trackSelectedMsg{track: t1}) // 队列 [t1]
+	m, _ = update(m, trackAppendMsg{track: t2})   // 队列 [t1, t2]
+
+	// 模拟连续多轮"卡住"循环（两首都会卡），断言收敛到停止。
+	// cmd 预声明避免循环体内 := 遮蔽 m（见 TestStallRestartConvergesToStop 注释）。
+	var cmd tea.Cmd
+	for i := 0; i < 10; i++ {
+		if m.ended {
+			break
+		}
+		m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+		m, cmd = update(m, playerEventMsg{ev: player.StalledEvent{}})
+		if cmd == nil {
+			t.Fatal("StalledEvent 后应返回 cmd")
+		}
+		m = execStallBatch(t, m, cmd, fp)
+	}
+	if !m.ended {
+		t.Fatal("两首永久卡住曲回绕未收敛到停止（ended）——无限互相跳过")
+	}
+	// 每首至多重启一次（上限 maxStallRestarts=1），总重启有界
+	if fp.restartCount() > 2 {
+		t.Errorf("无效重启总次数 = %d, want ≤ 2（每曲上限 1）", fp.restartCount())
+	}
+}
+
+// 混合队列（1 首卡住 + 1 首健康）回绕：卡住曲跳过、健康曲正常播放，不停止（有曲可听）。
+func TestStallRestartMixedQueueSkipsStuckKeepsHealthy(t *testing.T) {
+	fp := newFakePlayer()
+	fa := &fakeSearchAdapter{}
+	m := newTestModel(t, fp, fa, nil)
+	t1 := testTrack("t1") // 卡住
+	t2 := testTrack("t2") // 健康
+
+	m, _ = update(m, trackSelectedMsg{track: t1})
+	m, _ = update(m, trackAppendMsg{track: t2})
+
+	// 第一轮：t1 卡住 → 重启→重播→仍卡 → hopeless + 跳 t2
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, cmd := update(m, playerEventMsg{ev: player.StalledEvent{}})
+	m = execStallBatch(t, m, cmd, fp)
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}})
+	m, _ = update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if m.ended {
+		t.Fatal("有健康曲在前方时不应停止")
+	}
+	if !m.stallHopeless[t1.ID] || fp.lastPlayed() != t2.URL {
+		t.Fatalf("应标记 t1 hopeless 并跳到 t2: hopeless=%v lastPlayed=%q", m.stallHopeless, fp.lastPlayed())
+	}
+	// 第二轮回绕到 t1：hopeless → 跳过（不重启），t2 继续可播
+	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 6, Duration: 200}}) // t2 推进
+	m, _ = update(m, playerEventMsg{ev: player.TrackEndedEvent{}})
+	m, _ = update(m, playerEventMsg{ev: player.TrackStartedEvent{Duration: 200}}) // t1 又加载（回绕）
+	m, _ = update(m, playerEventMsg{ev: player.StalledEvent{}})
+	if fp.restartCount() > 1 {
+		t.Errorf("回绕到 hopeless t1 不应再重启: restarts=%d", fp.restartCount())
+	}
+	if m.ended {
+		t.Error("混合队列回绕不应停止（t2 仍可播）")
 	}
 }
