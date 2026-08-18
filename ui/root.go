@@ -1260,12 +1260,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.plPicker = &picker
 			return m, cmd
 		}
-		// 诊断：Ctrl+Shift+←/→ 是歌词偏移键（bubbletea 仅对方向键区分 Shift，
-		// 依赖终端发送修饰键 CSI 序列）。终端不支持时会被降级（Ctrl+Shift+→ →
-		// Ctrl+→，触发全局下一首）或整序列被丢弃——日志里能看到实际收到的键名。
-		if s := msg.String(); strings.Contains(s, "ctrl+shift") {
-			logger.Info("按键: 收到 %q（歌词偏移用；若终端降级修饰键将显示为 ctrl+left/right）", s)
-		}
 		switch msg.String() {
 		case "tab":
 			return m.switchPage(msg.String()), nil
@@ -1320,14 +1314,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.hoverTab = -1 // 打开选择器时清除悬停高亮（打开期间鼠标事件被忽略，防残留）
 			m.plPicker = newPlPicker(m.pl, track)
 			return m, nil
-		case "ctrl+shift+right":
+		case "ctrl+shift+up":
 			// 全局歌词时间 +0.5s（Ctrl+Shift+← 为 -0.5s）：任意页面生效，输入框聚焦不冲突
 			//（textinput 不占用该键；此键必须在 delegate 前消费，勿移到 delegate 之后）；
 			// 选择器打开时按键交选择器（与现有 ctrl+left/right 全局键行为一致）。
 			// 注意：依赖终端发送修饰键 CSI 序列（\x1b[1;6C/D）——不支持时 Ctrl+Shift+→
 			// 会降级为 Ctrl+→（触发全局下一首）或序列被丢弃，见 Update 的 ctrl+shift 诊断日志。
 			return m.adjustLyricOffset(+0.5)
-		case "ctrl+shift+left":
+		case "ctrl+shift+down":
 			return m.adjustLyricOffset(-0.5)
 		}
 		return m.delegate(msg)
