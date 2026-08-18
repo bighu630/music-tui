@@ -17,6 +17,12 @@ import (
 // 确定性路径与缓存文件本身不携带该标记，读取时按路径重新标注。
 const LyricsSourceAI = "ai"
 
+// CacheRewriter 由支持把歌词写回本地 LRC 缓存文件的服务实现（*EnhancedClient）。
+// UI 层用类型断言检测（不扩展 Fetcher 接口本身，测试 fake 可不实现）。
+type CacheRewriter interface {
+	RewriteCache(title, artist string, ly *Lyrics)
+}
+
 // EnhancedClient 是 AI 增强歌词客户端：先跑确定性匹配（*Client），
 // 未命中且配置了 OpenAI 时，用 AI 清洗标题后重查 lrclib（严格时长
 // 规则），并维护双缓存：
@@ -41,6 +47,17 @@ type EnhancedClient struct {
 // EnableCNSources 启用中文歌词源（main 层调用；测试注入 mock 基地址）。
 func (e *EnhancedClient) EnableCNSources(srcs ...cnLyricSource) {
 	e.cnSources = append(e.cnSources, srcs...)
+}
+
+// RewriteCache 把偏移后的歌词覆盖写回本地 LRC 缓存文件：仅当该键已有
+// 缓存文件（曾落盘，即 AI 增强路径）才改写，否则静默不创建（确定性路径
+// 的真实歌词从不落盘，无需也无法持久化偏移）；lrcCache 为 nil 时安全返回。
+// nil/空 Lines 由 rewriteIfExists 的守卫拦截。实现 lyrics.CacheRewriter 接口。
+func (e *EnhancedClient) RewriteCache(title, artist string, ly *Lyrics) {
+	if e == nil || e.lrcCache == nil {
+		return
+	}
+	e.lrcCache.rewriteIfExists(title, artist, ly)
 }
 
 // NewEnhancedClient 组装增强客户端；cacheDir 存放 ai.jsonl 与 LRC 文件

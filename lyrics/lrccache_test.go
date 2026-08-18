@@ -209,6 +209,97 @@ func mustReadDir(t *testing.T, dir string) []os.DirEntry {
 	return entries
 }
 
+// TestRewriteIfExists 已存在缓存文件时改写内容（毫秒精度，ParseLRC 回读一致）；
+// 文件不存在时绝不创建新文件；nil/空 Lines no-op。
+func TestRewriteIfExists(t *testing.T) {
+	dir := t.TempDir()
+	c, err := newLRCCache(dir)
+	if err != nil {
+		t.Fatalf("newLRCCache: %v", err)
+	}
+	ly1 := &Lyrics{Lines: []LyricLine{
+		{Time: 12.345, Text: "第一版"},
+		{Time: 17.0, Text: "第二版"},
+	}}
+	c.Put("晴天", "周杰伦", ly1)
+
+	// 改写为偏移后的内容
+	ly2 := &Lyrics{Lines: []LyricLine{
+		{Time: 12.845, Text: "第一版"},
+		{Time: 17.5, Text: "第二版"},
+	}}
+	c.rewriteIfExists("晴天", "周杰伦", ly2)
+
+	got, ok := c.Get("晴天", "周杰伦")
+	if !ok {
+		t.Fatal("rewriteIfExists 后 Get 未命中")
+	}
+	if len(got.Lines) != 2 {
+		t.Fatalf("Lines = %d, want 2", len(got.Lines))
+	}
+	for i := range ly2.Lines {
+		if got.Lines[i].Text != ly2.Lines[i].Text {
+			t.Errorf("Lines[%d].Text = %q, want %q", i, got.Lines[i].Text, ly2.Lines[i].Text)
+		}
+		if d := math.Abs(got.Lines[i].Time - ly2.Lines[i].Time); d > 0.001 {
+			t.Errorf("Lines[%d].Time = %v, want %v", i, got.Lines[i].Time, ly2.Lines[i].Time)
+		}
+	}
+
+	// 文件不存在：不得创建新文件
+	c.rewriteIfExists("不存在的歌", "某人", ly2)
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("文件不存在时 rewriteIfExists 不应创建文件: 文件数 = %d, want 1", len(entries))
+	}
+
+	// nil/空 Lyrics no-op（已存在文件不受影响）
+	before := mustReadDir(t, c.dir)
+	c.rewriteIfExists("晴天", "周杰伦", nil)
+	c.rewriteIfExists("晴天", "周杰伦", &Lyrics{})
+	after := mustReadDir(t, c.dir)
+	if len(before) != len(after) {
+		t.Fatalf("nil/空 Lyrics 不应改写文件: 文件数 %d → %d", len(before), len(after))
+	}
+}
+
+// TestEnhancedRewriteCache 通过 EnhancedClient 出口改写缓存：先落盘后
+// RewriteCache 更新内容；未落盘直接 RewriteCache 不创建文件；nil/空 Lyrics no-op。
+func TestEnhancedRewriteCache(t *testing.T) {
+	e, err := NewEnhancedClient(NewClient("music-tui test"), nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewEnhancedClient: %v", err)
+	}
+	ly1 := &Lyrics{Lines: []LyricLine{{Time: 1.0, Text: "原词"}}}
+	ly2 := &Lyrics{Lines: []LyricLine{{Time: 1.5, Text: "原词"}}}
+
+	// 先落盘再改写
+	e.lrcCache.Put("t", "a", ly1)
+	e.RewriteCache("t", "a", ly2)
+	got, ok := e.lrcCache.Get("t", "a")
+	if !ok {
+		t.Fatal("RewriteCache 后 Get 未命中")
+	}
+	if len(got.Lines) != 1 || math.Abs(got.Lines[0].Time-1.5) > 0.001 {
+		t.Errorf("RewriteCache 后时间 = %+v, want 1.5", got.Lines)
+	}
+
+	// 未落盘直接 RewriteCache：不创建文件
+	e.RewriteCache("u", "b", ly2)
+	e.RewriteCache("u", "b", nil)
+	e.RewriteCache("u", "b", &Lyrics{})
+	entries, err := os.ReadDir(e.lrcCache.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("未落盘直接 RewriteCache 不应创建文件: 文件数 = %d, want 1", len(entries))
+	}
+}
+
 // TestLRCCacheRemovesLegacyTXT 启动时清理旧版残留的纯文本缓存
 // （sync-only 规则前的产物）。
 func TestLRCCacheRemovesLegacyTXT(t *testing.T) {

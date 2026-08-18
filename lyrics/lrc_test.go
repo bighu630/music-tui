@@ -128,6 +128,56 @@ func TestLineAtEmpty(t *testing.T) {
 	}
 }
 
+// TestShift 歌词时间整体平移：+0.5 全部平移；-0.5 且首行 0.3s 被 clamp 到 0；
+// 空 Lines 安全；多次调用累加。
+func TestShift(t *testing.T) {
+	// +0.5 全部平移
+	ly := &Lyrics{Lines: []LyricLine{
+		{Time: 5.0, Text: "a"},
+		{Time: 12.5, Text: "b"},
+	}}
+	ly.Shift(0.5)
+	if ly.Lines[0].Time != 5.5 {
+		t.Errorf("Shift(+0.5) Lines[0].Time = %v, want 5.5", ly.Lines[0].Time)
+	}
+	if ly.Lines[1].Time != 13.0 {
+		t.Errorf("Shift(+0.5) Lines[1].Time = %v, want 13.0", ly.Lines[1].Time)
+	}
+
+	// -0.5 且首行 0.3s 被 clamp 到 0
+	ly2 := &Lyrics{Lines: []LyricLine{
+		{Time: 0.3, Text: "a"},
+		{Time: 2.0, Text: "b"},
+	}}
+	ly2.Shift(-0.5)
+	if ly2.Lines[0].Time != 0 {
+		t.Errorf("Shift(-0.5) 首行 .Time = %v, want 0（clamp 到 0）", ly2.Lines[0].Time)
+	}
+	if ly2.Lines[1].Time != 1.5 {
+		t.Errorf("Shift(-0.5) Lines[1].Time = %v, want 1.5", ly2.Lines[1].Time)
+	}
+
+	// 空 Lines 安全
+	empty := &Lyrics{}
+	empty.Shift(-0.5)
+	empty.Shift(+0.5)
+	if empty.Lines != nil {
+		t.Errorf("空 Lyrics 平移后 Lines 应仍为 nil")
+	}
+
+	// 多次调用累加
+	ly3 := &Lyrics{Lines: []LyricLine{{Time: 1.0, Text: "a"}}}
+	ly3.Shift(0.5)
+	ly3.Shift(0.5)
+	if ly3.Lines[0].Time != 2.0 {
+		t.Errorf("两次 Shift(+0.5) = %v, want 2.0", ly3.Lines[0].Time)
+	}
+	ly3.Shift(-0.5)
+	if ly3.Lines[0].Time != 1.5 {
+		t.Errorf("累加后再 -0.5 = %v, want 1.5", ly3.Lines[0].Time)
+	}
+}
+
 func TestParseLRCRejectsOverflowMinutes(t *testing.T) {
 	// 19 位分钟数：超出 int64（Atoi 失败）或超过 MaxInt64/60 守卫，均视为非法时间标签；
 	// 恰好等于 MaxInt64/60 的边界值（mm*60+ss 在 int 下溢出为负）必须由 float64

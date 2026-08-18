@@ -1475,6 +1475,109 @@ func TestHomeLyricFileAITrackUpdatesLabel(t *testing.T) {
 	}
 }
 
+// ---- 歌词时间偏移（Alt+L/H 全局键在 home 层的行为） ----
+
+// TestHomeShiftLyricsNoLyrics 无歌词/未同步时 shiftLyrics 原样返回
+// （不偏移、不改变 offset、不 panic）。
+func TestHomeShiftLyricsNoLyrics(t *testing.T) {
+	m := newHomeModel(nil) // 初始 lyricsState = lyricsNone, lyrics = nil
+	m2 := m.shiftLyrics(0.5)
+	if m2.lyricOffset != 0 {
+		t.Errorf("无歌词 shiftLyrics 不应改变 offset: %v", m2.lyricOffset)
+	}
+	// 加载中（未同步）同样原样
+	m.lyrics = &lyrics.Lyrics{Lines: []lyrics.LyricLine{{Time: 1, Text: "x"}}}
+	m.lyricsState = lyricsLoading
+	m2 = m.shiftLyrics(-0.5)
+	if m2.lyricOffset != 0 {
+		t.Errorf("未同步 shiftLyrics 不应改变 offset: %v", m2.lyricOffset)
+	}
+}
+
+// TestHomeShiftLyricsRecomputeLine 偏移后按新时间重算当前高亮行。构造
+// position 与行边界差 <0.5 的场景（P=10.05，第二行边界 10.1，差仅 0.05）：
+// -0.5 使两行都越过 position，落点从第一行切到第二行；行切换时 lyricFile
+// 写入新行文本。
+func TestHomeShiftLyricsRecomputeLine(t *testing.T) {
+	m, path := lyricFileTestHome(t)
+	m.lyrics = &lyrics.Lyrics{Lines: []lyrics.LyricLine{
+		{Time: 10.0, Text: "第一行"},
+		{Time: 10.1, Text: "第二行"},
+	}}
+	m.lyricsState = lyricsSynced
+	m.currentLine = -1
+	track := &model.Track{Title: "T", Artist: "A", Duration: 100}
+	m = m.syncState(model.PlaybackState{Track: track, Position: 10.05, Duration: 100})
+	if m.currentLine != 0 {
+		t.Fatalf("前置:syncState 后 currentLine = %d, want 0", m.currentLine)
+	}
+	// -0.5：10.0→9.5, 10.1→9.6；LineAt(10.05) → 第二行（9.6≤10.05）
+	m = m.shiftLyrics(-0.5)
+	if m.lyrics.Lines[0].Time != 9.5 {
+		t.Errorf("Shift 后 Lines[0].Time = %v, want 9.5", m.lyrics.Lines[0].Time)
+	}
+	if m.lyrics.Lines[1].Time != 9.6 {
+		t.Errorf("Shift 后 Lines[1].Time = %v, want 9.6", m.lyrics.Lines[1].Time)
+	}
+	if m.currentLine != 1 {
+		t.Errorf("Shift 后 currentLine = %d, want 1（行切换）", m.currentLine)
+	}
+	if got := lyricFileRead(t, path); got != "第二行\n" {
+		t.Errorf("行切换后 lyricFile = %q, want %q", got, "第二行\n")
+	}
+	if m.lyricOffset != -0.5 {
+		t.Errorf("lyricOffset = %v, want -0.5", m.lyricOffset)
+	}
+}
+
+// TestHomeShiftLyricsNoLineChangeKeepsFile 偏移未导致行切换时 lyricFile
+// 不重写；offset 正常累加（多次按键 ±0.5s 累加）。
+func TestHomeShiftLyricsNoLineChangeKeepsFile(t *testing.T) {
+	m, path := lyricFileTestHome(t)
+	m.lyrics = &lyrics.Lyrics{Lines: []lyrics.LyricLine{
+		{Time: 10.0, Text: "第一行"},
+		{Time: 12.0, Text: "第二行"},
+	}}
+	m.lyricsState = lyricsSynced
+	m.currentLine = -1
+	track := &model.Track{Title: "T", Artist: "A", Duration: 100}
+	m = m.syncState(model.PlaybackState{Track: track, Position: 11.0, Duration: 100})
+	if got := lyricFileRead(t, path); got != "第一行\n" {
+		t.Fatalf("前置:lyricFile = %q, want 第一行", got)
+	}
+	// +0.3：10.0→10.3, 12.0→12.3；position 11.0 仍在第一行（10.3≤11.0<12.3）
+	m = m.shiftLyrics(0.3)
+	if m.currentLine != 0 {
+		t.Fatalf("Shift 后 currentLine = %d, want 0（无行切换）", m.currentLine)
+	}
+	if got := lyricFileRead(t, path); got != "第一行\n" {
+		t.Errorf("无行切换不应重写 lyricFile: %q", got)
+	}
+	if m.lyricOffset != 0.3 {
+		t.Errorf("lyricOffset = %v, want 0.3", m.lyricOffset)
+	}
+	// 多次按键累加
+	m = m.shiftLyrics(0.2)
+	if m.lyricOffset != 0.5 {
+		t.Errorf("累加后 lyricOffset = %v, want 0.5", m.lyricOffset)
+	}
+	if m.lyrics.Lines[0].Time != 10.5 {
+		t.Errorf("累加后 Lines[0].Time = %v, want 10.5", m.lyrics.Lines[0].Time)
+	}
+}
+
+// TestHomeShiftLyricsResetOnTrack 换歌（resetForTrack）偏移清零。
+func TestHomeShiftLyricsResetOnTrack(t *testing.T) {
+	m := newHomeModel(nil)
+	m.lyrics = &lyrics.Lyrics{Lines: []lyrics.LyricLine{{Time: 1, Text: "x"}}}
+	m.lyricsState = lyricsSynced
+	m.lyricOffset = 1.5
+	m = m.resetForTrack(&model.Track{Title: "T", Artist: "A", Duration: 100})
+	if m.lyricOffset != 0 {
+		t.Errorf("resetForTrack 后 lyricOffset = %v, want 0", m.lyricOffset)
+	}
+}
+
 // ---- 封面渲染三模式集成（coverrender 包 + 终端能力探测）----
 
 // coverModeEnv 设置 MUSIC_TUI_COVER 并重置 coverrender 缓存（进程级 sync.Once）。

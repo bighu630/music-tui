@@ -61,6 +61,20 @@ func (c *lrcCache) Put(title, artist string, ly *Lyrics) {
 	_ = writeFileIfChanged(filepath.Join(c.dir, base+".lrc"), sb.String())
 }
 
+// rewriteIfExists 把歌词内容的改写写回本地 LRC 缓存文件（时间偏移持久化）：
+// 仅当缓存文件已存在（Get 命中，如曾落盘的 AI 结果）才复用 Put 序列化覆盖；
+// 文件不存在时直接返回，绝不创建新文件（确定性路径的歌词不落盘，偏移只在内存）。
+// nil/空 Lines 由 Put 的既有守卫拦截。
+func (c *lrcCache) rewriteIfExists(title, artist string, ly *Lyrics) {
+	if c == nil || ly == nil || len(ly.Lines) == 0 {
+		return
+	}
+	if _, ok := c.Get(title, artist); !ok {
+		return
+	}
+	c.Put(title, artist, ly)
+}
+
 // millis 取秒的小数部分毫秒（0-999），round 消除浮点噪声。
 func millis(t float64) int {
 	return int(math.Round((t - math.Floor(t)) * 1000))

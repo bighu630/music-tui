@@ -174,6 +174,11 @@ type homeModel struct {
 	lyrics      *lyrics.Lyrics
 	currentLine int // 当前高亮行下标;-1 = 无高亮
 
+	// lyricOffset 当前歌曲歌词时间偏移累计（秒；Alt+L/H 每按 ±0.5s）。
+	// 仅用于 toast 展示与测试断言——偏移已并入 m.lyrics.Lines 的时间戳，
+	// 播放进度按新时间重算高亮行；换歌（resetForTrack）时清零。
+	lyricOffset float64
+
 	// lyricFile 歌词行实时写入器(nil = 不启用;root 经 NewModel 注入)。
 	lyricFile *lyricshm.Writer
 
@@ -341,12 +346,51 @@ func (m homeModel) resetForTrack(track *model.Track) homeModel {
 	m = m.clearSixel() // 切歌：清除已绘制的六像素，等待新封面
 	m.middleCache = "" // 内容全部作废：中间区缓存失效（loading 态读取时也跳过）
 	m.aiTitle, m.aiArtist = "", ""
+	m.lyricOffset = 0 // 换歌：歌词时间偏移清零（新曲从头累计）
 	// 切歌:文件写入新曲目歌名(歌词加载中/无歌词期间 OBS 等展示歌名)。
 	// 注意 trackLabel 在 aiTitle 清空后取原始标题+歌手。
 	if m.lyricFile != nil {
 		m.lyricFile.WriteLine(m.trackLabel())
 	}
 	return m
+}
+
+// shiftLyrics 把当前歌词所有行时间戳整体平移 delta（负值 clamp 到 0），
+// 按新时间重算当前高亮行（行变化时更新 lyricshm 输出、视口与中间区缓存）。
+// 无歌词/未同步时原样返回。
+func (m homeModel) shiftLyrics(delta float64) homeModel {
+	if m.lyricsState != lyricsSynced || m.lyrics == nil {
+		return m
+	}
+	m.lyrics.Shift(delta)
+	m.lyricOffset += delta
+	idx, _ := m.lyrics.LineAt(m.state.Position)
+	if idx == m.currentLine {
+		return m
+	}
+	// 行切换：与 syncState 行切换分支完全镜像（lyricshm 实时行 / 重渲染 /
+	// 滚动定位 / 中间区缓存重建）。
+	m.currentLine = idx
+	if idx >= 0 && m.lyricFile != nil {
+		m.lyricFile.WriteLine(m.lyrics.Lines[idx].Text)
+	}
+	m.rebuildLyrics()
+	if idx >= 0 {
+		m.scrollLyricsTo(idx)
+	}
+	return m.rebuildMiddleCache()
+}
+
+// cacheKey 返回写回 LRC 缓存文件用的 title/artist：AI 清洗结果优先
+// （与拉取时落盘键一致，偏移持久化可被下次播放命中），否则回落原始曲目标题。
+func (m homeModel) cacheKey() (string, string) {
+	if m.aiTitle != "" {
+		return m.aiTitle, m.aiArtist
+	}
+	if m.state.Track == nil {
+		return "", ""
+	}
+	return m.state.Track.Title, m.state.Track.Artist
 }
 
 // setAITrack 应用 AI 识别的清洗后歌名/歌手(展示覆盖,root 在歌词结果

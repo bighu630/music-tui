@@ -1313,6 +1313,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.hoverTab = -1 // 打开选择器时清除悬停高亮（打开期间鼠标事件被忽略，防残留）
 			m.plPicker = newPlPicker(m.pl, track)
 			return m, nil
+		case "alt+l":
+			// 全局歌词时间 +0.5s（Alt+H 为 -0.5s）：任意页面生效，输入框聚焦不冲突
+			//（textinput 不占用 alt+l/alt+h）；选择器打开时按键交选择器（与现有
+			// ctrl+left/right 全局键行为一致）。
+			return m.adjustLyricOffset(+0.5)
+		case "alt+h":
+			return m.adjustLyricOffset(-0.5)
 		}
 		return m.delegate(msg)
 	}
@@ -2476,6 +2483,21 @@ func (m Model) typingText() bool {
 		return m.historyPage.typing()
 	}
 	return false
+}
+
+// adjustLyricOffset 全局歌词时间偏移：同步歌词存在时平移内存行时间戳并
+// 重算当前行，同时写回本地 LRC 缓存文件（无缓存文件不创建）；无歌词
+// 静默忽略（无 toast）；toast 展示累计偏移。
+func (m Model) adjustLyricOffset(delta float64) (Model, tea.Cmd) {
+	if m.home.lyricsState != lyricsSynced || m.home.lyrics == nil {
+		return m, nil // 静默忽略
+	}
+	m.home = m.home.shiftLyrics(delta)
+	if rw, ok := m.lyrics.(lyrics.CacheRewriter); ok {
+		title, artist := m.home.cacheKey()
+		rw.RewriteCache(title, artist, m.home.lyrics)
+	}
+	return m.showToast(fmt.Sprintf("歌词偏移 %+.1fs", m.home.lyricOffset), toastInfo)
 }
 
 // selectedTrack 返回当前页面选中的歌曲（供全局 a 键添加到播放列表）；

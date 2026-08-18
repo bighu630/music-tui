@@ -4188,3 +4188,277 @@ func TestStallRestartMixedQueueSkipsStuckKeepsHealthy(t *testing.T) {
 		t.Error("混合队列回绕不应停止（t2 仍可播）")
 	}
 }
+
+// ---- 歌词时间偏移（全局 Alt+L/H） ----
+
+// rewriteCapturingFetcher 同时实现 lyrics.Fetcher 与 lyrics.CacheRewriter：
+// 记录 RewriteCache 调用参数与次数（偏移测试断言用）。
+type rewriteCapturingFetcher struct {
+	mu       sync.Mutex
+	rewrites []rewriteCall
+}
+
+type rewriteCall struct {
+	title, artist string
+	ly            *lyrics.Lyrics
+}
+
+func (f *rewriteCapturingFetcher) Fetch(ctx context.Context, track model.Track) (lyrics.FetchResult, error) {
+	return lyrics.FetchResult{}, lyrics.ErrNotFound
+}
+
+func (f *rewriteCapturingFetcher) RewriteCache(title, artist string, ly *lyrics.Lyrics) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rewrites = append(f.rewrites, rewriteCall{title: title, artist: artist, ly: ly})
+}
+
+func (f *rewriteCapturingFetcher) rewriteCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.rewrites)
+}
+
+func (f *rewriteCapturingFetcher) lastRewrite() rewriteCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.rewrites) == 0 {
+		return rewriteCall{}
+	}
+	return f.rewrites[len(f.rewrites)-1]
+}
+
+// testLyricOffsetModel 构造歌词已同步的模型：m.lyrics 覆盖为同时实现
+// Fetcher+CacheRewriter 的 fake（记录 RewriteCache 调用），注入
+// lyricsResultMsg 使 home.lyricsState 进入 lyricsSynced。
+func testLyricOffsetModel(t *testing.T, fp *fakePlayer, ly *lyrics.Lyrics) (Model, *rewriteCapturingFetcher) {
+	t.Helper()
+	rc := &rewriteCapturingFetcher{}
+	m := newTestModelBase(t, fp, &fakeSearchAdapter{}, nil, nil)
+	m.lyrics = rc
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	if m.home.lyricsState != lyricsSynced {
+		t.Fatalf("前置:lyricsState = %v, want lyricsSynced", m.home.lyricsState)
+	}
+	return m, rc
+}
+
+// altL 构造 Alt+L 按键（String() == "alt+l"）。
+func altL() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l"), Alt: true}
+}
+
+// altH 构造 Alt+H 按键（String() == "alt+h"）。
+func altH() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h"), Alt: true}
+}
+
+// TestAdjustLyricOffsetAltL Alt+L：歌词时间整体 +0.5s、toast 展示累计偏移、
+// CacheRewriter 收到偏移后的歌词与键。
+func TestAdjustLyricOffsetAltL(t *testing.T) {
+	fp := newFakePlayer()
+	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
+	m, rc := testLyricOffsetModel(t, fp, ly)
+	key := altL()
+	if got := key.String(); got != "alt+l" {
+		t.Fatalf("key.String() = %q, want alt+l", got)
+	}
+	before := m.home.lyrics.Lines[0].Time
+	m, cmd := update(m, key)
+	if cmd == nil {
+		t.Fatal("alt+l 应返回 toast cmd")
+	}
+	if got := m.home.lyrics.Lines[0].Time; got != before+0.5 {
+		t.Errorf("alt+l 后 Lines[0].Time = %v, want %v", got, before+0.5)
+	}
+	if got := m.home.lyrics.Lines[1].Time; got != 20.5 {
+		t.Errorf("alt+l 后 Lines[1].Time = %v, want 20.5", got)
+	}
+	if got := m.home.lyricOffset; got != 0.5 {
+		t.Errorf("lyricOffset = %v, want 0.5", got)
+	}
+	if !strings.Contains(activeToastText(m), "+0.5s") {
+		t.Errorf("toast = %q, want 含 +0.5s", activeToastText(m))
+	}
+	if rc.rewriteCount() != 1 {
+		t.Fatalf("RewriteCache 调用次数 = %d, want 1", rc.rewriteCount())
+	}
+	call := rc.lastRewrite()
+	if call.title != "测试歌曲 t1" || call.artist != "测试歌手" {
+		t.Errorf("RewriteCache 键 = %q/%q, want 测试歌曲 t1/测试歌手", call.title, call.artist)
+	}
+	if len(call.ly.Lines) != 2 || call.ly.Lines[0].Time != before+0.5 {
+		t.Errorf("RewriteCache 收到偏移后歌词: %+v", call.ly.Lines)
+	}
+}
+
+// TestAdjustLyricOffsetAltH Alt+H：歌词时间整体 -0.5s、toast 展示 -0.5s。
+func TestAdjustLyricOffsetAltH(t *testing.T) {
+	fp := newFakePlayer()
+	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
+	m, rc := testLyricOffsetModel(t, fp, ly)
+	key := altH()
+	if got := key.String(); got != "alt+h" {
+		t.Fatalf("key.String() = %q, want alt+h", got)
+	}
+	m, cmd := update(m, key)
+	if cmd == nil {
+		t.Fatal("alt+h 应返回 toast cmd")
+	}
+	if got := m.home.lyrics.Lines[0].Time; got != 9.5 {
+		t.Errorf("alt+h 后 Lines[0].Time = %v, want 9.5", got)
+	}
+	if got := m.home.lyricOffset; got != -0.5 {
+		t.Errorf("lyricOffset = %v, want -0.5", got)
+	}
+	if !strings.Contains(activeToastText(m), "-0.5s") {
+		t.Errorf("toast = %q, want 含 -0.5s", activeToastText(m))
+	}
+	if rc.rewriteCount() != 1 {
+		t.Errorf("RewriteCache 调用次数 = %d, want 1", rc.rewriteCount())
+	}
+}
+
+// TestAdjustLyricOffsetAccumulates 多次按键 ±0.5s 累加（两次 alt+l → +1.0s）；换歌清零。
+func TestAdjustLyricOffsetAccumulates(t *testing.T) {
+	fp := newFakePlayer()
+	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
+	m, rc := testLyricOffsetModel(t, fp, ly)
+	key := altL()
+	m, _ = update(m, key)
+	m, _ = update(m, key)
+	if got := m.home.lyricOffset; got != 1.0 {
+		t.Errorf("两次 alt+l lyricOffset = %v, want 1.0", got)
+	}
+	if got := m.home.lyrics.Lines[0].Time; got != 11.0 {
+		t.Errorf("两次 alt+l Lines[0].Time = %v, want 11.0", got)
+	}
+	if !strings.Contains(activeToastText(m), "+1.0s") {
+		t.Errorf("toast = %q, want 含 +1.0s", activeToastText(m))
+	}
+	if rc.rewriteCount() != 2 {
+		t.Errorf("RewriteCache 调用次数 = %d, want 2", rc.rewriteCount())
+	}
+	// 换歌：偏移清零
+	m, cmd := m.startPlay(testTrack("t2"))
+	_ = execCmds(cmd)
+	if got := m.home.lyricOffset; got != 0 {
+		t.Errorf("换歌后 lyricOffset = %v, want 0", got)
+	}
+}
+
+// TestAdjustLyricOffsetNoLyrics 无歌词（lyricsNone）：静默忽略——无 toast、
+// 无 RewriteCache 调用、不 panic、offset 不变。
+func TestAdjustLyricOffsetNoLyrics(t *testing.T) {
+	fp := newFakePlayer()
+	rc := &rewriteCapturingFetcher{}
+	m := newTestModelBase(t, fp, &fakeSearchAdapter{}, nil, nil)
+	m.lyrics = rc
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", err: lyrics.ErrNotFound})
+	if m.home.lyricsState != lyricsNone {
+		t.Fatalf("state = %v, want lyricsNone", m.home.lyricsState)
+	}
+	m, gotCmd := update(m, altL())
+	if gotCmd != nil {
+		t.Errorf("无歌词 alt+l 不应有 toast cmd: %v", gotCmd)
+	}
+	if activeToastText(m) != "" {
+		t.Errorf("无歌词不应有 toast: %q", activeToastText(m))
+	}
+	if rc.rewriteCount() != 0 {
+		t.Errorf("无歌词不应触发 RewriteCache: %d", rc.rewriteCount())
+	}
+	if got := m.home.lyricOffset; got != 0 {
+		t.Errorf("无歌词 lyricOffset 不应变化: %v", got)
+	}
+}
+
+// TestAdjustLyricOffsetLoading 歌词加载中（lyricsLoading）：同样静默忽略。
+func TestAdjustLyricOffsetLoading(t *testing.T) {
+	fp := newFakePlayer()
+	rc := &rewriteCapturingFetcher{}
+	m := newTestModelBase(t, fp, &fakeSearchAdapter{}, nil, nil)
+	m.lyrics = rc
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	if m.home.lyricsState != lyricsLoading {
+		t.Fatalf("state = %v, want lyricsLoading", m.home.lyricsState)
+	}
+	m, gotCmd := update(m, altH())
+	if gotCmd != nil {
+		t.Errorf("加载中 alt+h 不应有 toast cmd")
+	}
+	if rc.rewriteCount() != 0 {
+		t.Errorf("加载中不应触发 RewriteCache")
+	}
+	if got := m.home.lyricOffset; got != 0 {
+		t.Errorf("加载中 lyricOffset 不应变化: %v", got)
+	}
+}
+
+// TestAdjustLyricOffsetCacheKey 写回键：AI 识别结果（lyricsResultMsg 带
+// title/artist）用清洗名，否则用原始 track 标题/歌手。
+func TestAdjustLyricOffsetCacheKey(t *testing.T) {
+	fp := newFakePlayer()
+	rc := &rewriteCapturingFetcher{}
+	m := newTestModelBase(t, fp, &fakeSearchAdapter{}, nil, nil)
+	m.lyrics = rc
+	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n"))
+
+	// 无 AI 信息：用原始 track 标题/歌手
+	raw := model.Track{ID: "t1", Title: "原始标题", Artist: "原始歌手", Duration: 200, URL: "http://x/1", Source: "youtube"}
+	m, cmd := m.startPlay(raw)
+	_ = execCmds(cmd)
+	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+	m, _ = update(m, altL())
+	call := rc.lastRewrite()
+	if call.title != "原始标题" || call.artist != "原始歌手" {
+		t.Errorf("无 AI 信息 cacheKey = %q/%q, want 原始标题/原始歌手", call.title, call.artist)
+	}
+
+	// AI 识别结果：用清洗名
+	m, cmd = m.startPlay(testTrack("t2"))
+	_ = execCmds(cmd)
+	m, _ = update(m, lyricsResultMsg{trackID: "t2", lyrics: ly, title: "晴天", artist: "周杰伦"})
+	m, _ = update(m, altL())
+	call = rc.lastRewrite()
+	if call.title != "晴天" || call.artist != "周杰伦" {
+		t.Errorf("AI cacheKey = %q/%q, want 晴天/周杰伦", call.title, call.artist)
+	}
+}
+
+// TestAdjustLyricOffsetGlobalInSearchInput 搜索输入框聚焦时 Alt+L 仍全
+// 局生效（不被 textinput 消费，与 ctrl+left/right 全局键行为一致）。
+func TestAdjustLyricOffsetGlobalInSearchInput(t *testing.T) {
+	fp := newFakePlayer()
+	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
+	m, rc := testLyricOffsetModel(t, fp, ly)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 全局切页 → 搜索页
+	if m.current != pageSearch {
+		t.Fatalf("current = %v, want pageSearch", m.current)
+	}
+	if !m.typingText() {
+		t.Fatal("typingText 应为 true（搜索输入框聚焦）")
+	}
+	before := m.home.lyrics.Lines[0].Time
+	m, cmd := update(m, altL())
+	if cmd == nil {
+		t.Fatal("搜索输入框聚焦时 alt+l 仍应全局生效（返回 toast cmd）")
+	}
+	if got := m.home.lyrics.Lines[0].Time; got != before+0.5 {
+		t.Errorf("输入框聚焦时 alt+l 未全局生效: Lines[0].Time = %v, want %v", got, before+0.5)
+	}
+	if got := m.home.lyricOffset; got != 0.5 {
+		t.Errorf("lyricOffset = %v, want 0.5", got)
+	}
+	if rc.rewriteCount() != 1 {
+		t.Errorf("RewriteCache 调用次数 = %d, want 1", rc.rewriteCount())
+	}
+	if got := m.searchPage.input.Value(); got != "" {
+		t.Errorf("alt+l 不应被 textinput 消费: input = %q", got)
+	}
+}

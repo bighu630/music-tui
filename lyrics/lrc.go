@@ -24,6 +24,23 @@ type Lyrics struct {
 	Source string
 }
 
+// Shift 把所有行的起始时间戳整体平移 delta 秒（负增量可产生 <0 的时间戳，
+// 此处 clamp 到 0）。整体平移保持升序——clamp 产生的重复 0 时间戳可接受：
+// LineAt 对重复时间戳值取最后一条（upper_bound 语义），二分查找不依赖严格递增。
+// 空 Lines / nil 接收者安全。
+func (l *Lyrics) Shift(delta float64) {
+	if l == nil {
+		return
+	}
+	for i := range l.Lines {
+		t := l.Lines[i].Time + delta
+		if t < 0 {
+			t = 0
+		}
+		l.Lines[i].Time = t
+	}
+}
+
 // LineAt 返回"时间戳 ≤ pos 的最后一行"（upper_bound 语义）的下标与文本；
 // 时间戳重复时取最后一条；pos 早于第一行或歌词为空时返回 (-1, "")。
 // 二分查找，O(log n)。
