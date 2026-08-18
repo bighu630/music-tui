@@ -1315,7 +1315,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "alt+l":
 			// 全局歌词时间 +0.5s（Alt+H 为 -0.5s）：任意页面生效，输入框聚焦不冲突
-			//（textinput 不占用 alt+l/alt+h）；选择器打开时按键交选择器（与现有
+			//（textinput 会原样插入 alt+l 的 'l'，此键必须在 delegate 前消费，
+			// 勿移到 delegate 之后）；选择器打开时按键交选择器（与现有
 			// ctrl+left/right 全局键行为一致）。
 			return m.adjustLyricOffset(+0.5)
 		case "alt+h":
