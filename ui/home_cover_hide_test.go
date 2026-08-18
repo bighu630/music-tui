@@ -1,15 +1,50 @@
 package ui
 
 import (
+	"bytes"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
+	"music-tui/coverrender"
 	"music-tui/lyrics"
 	"music-tui/player"
 )
+
+// lockedWriter 并发安全 io.Writer（overlayOut 捕获用）：sixel 延迟重画 goroutine
+// 会异步写 overlayOut，-race 下须与断言读取串行。
+type lockedWriter struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.Write(p)
+}
+
+func (w *lockedWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.String()
+}
+
+func (w *lockedWriter) Reset() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.b.Reset()
+}
+
+func (w *lockedWriter) Len() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.Len()
+}
 
 // ---- 首页封面自适应隐藏（需求：窗口尺寸不足以容纳封面框两倍时隐藏封面） ----
 //
@@ -210,5 +245,72 @@ func TestHomeCoverHiddenNoTrack(t *testing.T) {
 	want := m.home.height // 页面高度 = 窗口高 - 4 = 12
 	if got := strings.Count(m.home.view(), "\n") + 1; got != want {
 		t.Errorf("空态 view 行数 = %d, want %d（不因尺寸隐藏逻辑改变）", got, want)
+	}
+}
+
+// TestHomeCoverHideSixelClearsResidual 封面隐藏时清除已画出的六像素（审查 Major
+// #1）：覆盖型终端（konsole/kitty 等）像素驻留——显示态写出载荷 → 缩小到隐藏发出
+// 清除（单发，不重排载荷）→ 放大恢复重绘载荷。
+func TestHomeCoverHideSixelClearsResidual(t *testing.T) {
+	coverModeEnv(t, "sixel")
+	var out lockedWriter
+	old := overlayOut
+	overlayOut = &out
+	defer func() { overlayOut = old }()
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	pngPath := filepath.Join(t.TempDir(), "cover.png")
+	writeTestPNG(t, pngPath)
+	m, _ = update(m, coverResultMsg{trackID: "t1", path: pngPath})
+	payload := m.home.sixelPayload
+	if payload == "" {
+		t.Fatal("sixel 模式应生成 DCS 载荷")
+	}
+
+	// 显示态（大窗口）：view 外带写出载荷 DCS
+	m.home = setWindow(m.home, 120, 40)
+	_ = m.home.view()
+	if !strings.Contains(out.String(), "\x1bPq") {
+		t.Fatalf("显示态应写出 sixel 载荷 DCS: %q", out.String())
+	}
+	if !m.home.sixelSt.drawn {
+		t.Fatal("显示态应记录 drawn=true")
+	}
+
+	// 缩小到隐藏（窗口高 30 < 34）：发出单次背景色清除帧，且不再画图像
+	out.Reset()
+	m.home = setWindow(m.home, 120, 30)
+	_ = m.home.view()
+	cleared := out.String()
+	// 精确断言：隐藏过渡应发出与代码同参的背景色清除帧（纯黑测试图与清除帧
+	// 内容接近，用排除法断言载荷会被均匀图 payload 重叠误报，改用同源比对）
+	cellW, cellH := coverrender.FontCellSize()
+	wantClear := coverrender.SixelClear(coverW, coverH, cellW, cellH)
+	if !strings.Contains(cleared, wantClear) {
+		t.Fatalf("显示→隐藏过渡应发出背景色清除帧: %q", cleared)
+	}
+	if m.home.sixelSt.drawn {
+		t.Error("隐藏后 sixel 状态应复位 drawn=false")
+	}
+	if m.home.sixelSt.token != "" {
+		t.Error("隐藏后 sixel token 应清空")
+	}
+
+	// 连续隐藏帧不重复写（幂等：drawn 已复位，不再发清除）
+	out.Reset()
+	_ = m.home.view()
+	if out.Len() != 0 {
+		t.Errorf("连续隐藏帧不应重复写出, got %q", out.String())
+	}
+
+	// 放大恢复：重绘载荷（payload 未被清除，token 已复位 → 重新写出）
+	out.Reset()
+	m.home = setWindow(m.home, 120, 40)
+	_ = m.home.view()
+	if !strings.Contains(out.String(), payload) {
+		t.Errorf("恢复显示应重绘 sixel 载荷: %q", out.String())
 	}
 }

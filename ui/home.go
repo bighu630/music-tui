@@ -200,7 +200,7 @@ type homeModel struct {
 	middleCache     string
 	middleCacheW    int
 	middleCacheH    int
-	middleCacheHide bool // 建缓存时的封面隐藏态：windowHeight 变化也必须失效（窗口高不在缓存键内）
+	middleCacheHide bool // 建缓存时的封面隐藏态：windowHeight 与页面高非同一路径更新（测试/未来代码直接改 windowHeight 而不经 setSize）时，隐藏态须显式失效才能命中正确分支
 }
 
 func newHomeModel(p player.Player) homeModel {
@@ -675,8 +675,8 @@ func (m homeModel) middleView() string {
 func (m homeModel) renderMiddleView() string {
 	midH := m.middleHeight()
 	if m.coverHidden() {
-		lyricsCol := lipgloss.Place(m.width, midH, lipgloss.Center, lipgloss.Center, m.lyricsColumnView())
-		return lipgloss.Place(m.width, midH, lipgloss.Center, lipgloss.Center, lyricsCol)
+		// 歌词列已 padding 到整页宽（屏幕中心），Place 只需垂直居中到中间区高
+		return lipgloss.Place(m.width, midH, lipgloss.Center, lipgloss.Center, m.lyricsColumnView())
 	}
 	lyricsW := m.lyricsColumnWidth()
 	coverCol := lipgloss.Place(coverW, midH, lipgloss.Center, lipgloss.Center, m.coverView())
