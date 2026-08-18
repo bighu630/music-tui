@@ -148,6 +148,11 @@ func (m homeModel) ensureSixel() {
 			payload := m.sixelPayload
 			rr, cc := row, col
 			logger.Info("sixel 重画: 中间区已重建 (row=%d col=%d payload=%d 字节)", rr, cc, len(payload))
+			// 已知角点（低概率、非阻塞）：异步 45ms 无法取消——若其间窗口缩小到
+			// 封面隐藏触发 sixelClear（drawn 复位），此 goroutine 仍会把载荷画回旧位，
+			// 残留幽灵封面。foot 网格驻留型会被行重写自愈；覆盖型（konsole/kitty）
+			// 需下次 rebuild/重绘覆盖，影响有限。如后续需要，可给 sixelState 加代数计数
+			// 在 goroutine 写出前复查跳过。
 			go func() {
 				time.Sleep(45 * time.Millisecond)
 				overlayMu.Lock()
