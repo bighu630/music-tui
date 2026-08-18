@@ -2319,14 +2319,25 @@ func (m Model) togglePlay() (Model, tea.Cmd) {
 	}
 }
 
-// restartSameTrack 播放结束/出错后空格 → 重播当前歌曲。
-// mpv 存活时正常重载；mpv 已死时 Play 失败会走 startPlay 失败路径
+// restartSameTrack 播放结束/出错后空格 → 重播当前歌曲（不动队列）。
+// 注意：不得复用 startPlay——它是替换语义（清空队列 + 单曲入队），网络失败
+// 停止后重播会把整个队列误抹成只剩当前曲（回归：TestRestartAfterLoadFail
+// ExhaustedKeepsQueue / TestRestartAfterFallbackCancelKeepsQueue）。
+// 重播只重载当前曲：队列结构与指针原样保留，后续连播照常从原位置推进。
+// mpv 存活时正常重载；mpv 已死时 Play 失败会走 beginPlay 失败路径
 // （重置状态并报错），行为自洽。Track 为 nil（如播放失败已重置）时忽略。
 func (m Model) restartSameTrack() (Model, tea.Cmd) {
 	if m.state.Track == nil {
 		return m, nil
 	}
-	return m.startPlay(*m.state.Track)
+	// 手动重播 = 用户新意图：全新重试预算 + 解除删除解耦标记（与 startPlay
+	// 的预算语义一致；queueSkip 残留会让 TrackEnded 重复播放顺延曲目）。
+	m.retryCount = 0
+	m.queueSkip = false
+	m.stallHopeless = map[string]bool{}
+	m2, cmd := m.beginPlay(*m.state.Track)
+	m2.refreshPreload() // 重播同曲：next 候选未变，预载目标槽位按新播放轮重建
+	return m2, cmd
 }
 
 // seekCmd 首页 ←/→ 触发的 seek（绝对位置，UI 侧已 clamp）。

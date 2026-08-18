@@ -590,9 +590,11 @@ func TestAutoAdvancePlayFailure(t *testing.T) {
 	}
 }
 
-// TestSpaceReplayReplacesQueue 锁定既定行为：结束后空格重播走替换语义（清空队列）。
+// TestSpaceReplayKeepsQueue 回归（用户报告）：结束后空格重播 = 仅重载当前曲，
+// 不得改动队列。此前 restartSameTrack 误走 startPlay 替换语义（清空队列 + 单曲
+// 入队），网络失败 → 暂停 → 再次播放后整个队列被抹成只剩重播曲一首。
 // 列表循环下仅空队列播完才置 ended，故先清空队列再触发播完。
-func TestSpaceReplayReplacesQueue(t *testing.T) {
+func TestSpaceReplayKeepsQueue(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
@@ -606,15 +608,18 @@ func TestSpaceReplayReplacesQueue(t *testing.T) {
 		t.Fatalf("播完后 ended=%v Playing=%v, want true/false", m.ended, m.state.Playing)
 	}
 
-	// 追加 t3，空格重播 t1 → 替换语义清空队列
+	// 追加 t3，空格重播 t1 → 仅重载当前曲，队列原样保留（[t3]、指针 -1 不动）
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
 	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t1").URL {
 		t.Fatalf("空格应重播同曲: playCount=%d lastPlayed=%q, want 2 次 t1", fp.playCount(), fp.lastPlayed())
 	}
-	// 设计已确认：手动播放统一替换语义 → 队列只剩重播曲目
-	if m.queue.Len() != 1 || m.queue.CurrentIndex() != 0 {
-		t.Errorf("重播后队列 = %d 条 current=%d, want 1 条 current=0（替换语义）", m.queue.Len(), m.queue.CurrentIndex())
+	// 重播不得改动队列：仍为追加的 [t3]，指针保持 -1（不重建队列）
+	if m.queue.Len() != 1 || m.queue.CurrentIndex() != -1 {
+		t.Errorf("重播后队列 = %d 条 current=%d, want 保持 [t3] current=-1（重播不改队列）", m.queue.Len(), m.queue.CurrentIndex())
+	}
+	if snap := m.queue.Snapshot(); len(snap.Tracks) == 1 && snap.Tracks[0].ID != "t3" {
+		t.Errorf("重播后队列内容 = %s, want t3（未被替换成重播曲）", snap.Tracks[0].ID)
 	}
 }
 
@@ -1271,7 +1276,7 @@ func TestQueueMoveFilterInteraction(t *testing.T) {
 // 全链路（startPlay 建当前曲 + trackAppendMsg 建队列 ≥2 首）进入移动模式后：
 // 空格暂停/继续照常（mpv Pause/Resume 命令发出，StateEvent 回灌后
 // m.state.Playing 翻转）；数字键 1→2 切页往返 moving 保持 true 且移动 hint
-// 仍在；q 照常产生 tea.QuitMsg（先例：TestQuitOnQ/TestSpaceReplayReplacesQueue
+// 仍在；q 照常产生 tea.QuitMsg（先例：TestQuitOnQ/TestSpaceReplayKeepsQueue
 // 均处理 Quit 消息）；Esc 正常退出。
 func TestQueueMoveGlobalKeysNotIntercepted(t *testing.T) {
 	fp := newFakePlayer()
