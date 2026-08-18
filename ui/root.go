@@ -115,6 +115,15 @@ type cacheFallbackTimeoutMsg struct {
 	gen int
 }
 
+// stalledRestartDoneMsg 卡住自动重启结果：stalledRestartCmd 执行 player.Restart
+// 后回投。gen=触发时的播放代际（用户换曲则视为过期丢弃）；err=重启失败原因；
+// track=待重播曲目。重置计数等协调在 update 的 done 分支处理。
+type stalledRestartDoneMsg struct {
+	gen   int
+	track model.Track
+	err   error
+}
+
 // playResultMsg 播放结果（预留：异步播放改造时使用）。
 // 注意：当前实现中 startPlay 同步调用 player.Play（见 startPlay 注释），
 // 因此本消息当前无人生产；保留类型仅为兼容外部消息路由。
@@ -292,6 +301,15 @@ const saveInterval = 5 * time.Second
 // 播放失败自动重试：取流失败（如 YouTube 403 风控）多为瞬态错误，
 // 重试 = 重新 loadfile = 重新取流拿新签名 URL，大概率恢复。
 const maxPlayRetries = 2           // 每首曲目最多自动重试次数
+
+// maxStallRestarts 卡住自动重启上限：file-loaded 后窗口内无推进（StalledEvent）
+// 时重启 mpv 进程并重播，若仍卡住（第二次 StalledEvent）则放弃重启，走统一失败链
+//（URL 重试 → 跳过/停止，toast 明确）——避免无限重启循环。值为“重启次数上限”，
+// 1 = 重启一次后复查；仍卡住即交给失败链。
+const maxStallRestarts = 1
+
+// stallFailHint 卡住重启耗尽后的失败链提示文案。
+const stallFailHint = "播放无进展（mpv 未开始推进）"
 var retryBackoff = 2 * time.Second // 重试间隔（包级变量：测试可调小以缩短等待）
 
 // fallbackWaitTimeout 缓存兜底等待下载完成的上限（包级变量：测试可调小）。
@@ -358,6 +376,15 @@ type Model struct {
 	// fallback 缓存兜底状态：mpv URL 播放失败/未开始 + 缓存下载完成后改用本地文件播放。
 	// 详见 fallbackState 注释。
 	fallback fallbackState
+	// stallRestarts 卡住自动重启已用次数：StalledEvent 递增；beginPlay/真正推进
+	//（ProgressEvent>0）时清零（重启重播保留计数供上限判定，见 handleStall）。
+	stallRestarts int
+	// stallHopeless 卡住重启预算耗尽的曲目 ID 集合（跨播放轮持久）：这类曲目
+	// “file-loaded 能到但永不推进”，对其反复重启纯属徒劳——后续每次遇到它不再重启，
+	// 直接走统一失败链（retry×上限 → 跳过/停止）。清除：仅当该曲自己真正推进
+	//（ProgressEvent>0）或用户手动重选（startPlay 清空）——健康的相邻曲目推进
+	// 不解除（否则队列回绕时被健康曲洗掉标记 → 无限重启风暴，审查 P2）。
+	stallHopeless map[string]bool
 	// failedTracks 本轮取流失败（重试耗尽被跳过）的曲目 ID 集合：
 	// 队列回绕时防止“失败→跳过→回绕→再失败”无限交替重播死循环
 	// （回归：TestLoadFailAllTracksFailStopsLoop）。TrackStartedEvent 清空——
@@ -417,6 +444,7 @@ func NewModel(p player.Player, s search.SearchAdapter, l lyrics.Fetcher, c *cove
 		current:         pageHome,
 		hoverTab:        -1,
 		failedTracks:    map[string]bool{},
+		stallHopeless:   map[string]bool{},
 		home:            newHomeModel(p),
 		searchPage:      newSearchModel(s),
 		historyPage:     newHistoryModel(),
@@ -1016,6 +1044,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fallback.active = false
 		return m.retryOrSkipLoadFailure(m.fallback.hint, m.fallback.isLoadTimeout, []tea.Cmd{waitForPlayerEvents(m.player)})
 
+	case stalledRestartDoneMsg:
+		// 代际不匹配：用户已换曲/重播（beginPlay 自增 playGen）→ 丢弃。
+		// 用户的新 beginPlay 已重置 stallRestarts（新曲预算正常）；重启本身已由
+		// Restart（若已执行）完成，不重播旧曲。
+		if msg.gen != m.playGen {
+			return m, waitForPlayerEvents(m.player)
+		}
+		if msg.err != nil {
+			// 重启失败（mpv 起不来/重连失败）：按加载失败处理，走统一失败链。
+			logger.Warn("播放器重启失败: %v", msg.err)
+			m.stallRestarts = 0
+			return m.retryOrSkipLoadFailure("播放器重启失败", false, []tea.Cmd{waitForPlayerEvents(m.player)})
+		}
+		// 重启成功 → 重播同曲：走 beginPlay 全链路（状态/SetLoop/notifyTrack/缓存监听
+		// 一致）；beginPlay 会清零 stallRestarts，此处回填保留计数供上限判定
+		//（否则重播后再卡永不触发上限，回归：TestStallRestartExhaustedFallsToRetryChain）。
+		kept := m.stallRestarts
+		track := msg.track
+		logger.Info("播放器已重启，重播同曲: %s - %s (id=%s)", track.Title, track.Artist, track.ID)
+		m2, cmd := m.beginPlay(track)
+		if m2.state.Track == nil {
+			// beginPlay 失败路径（Play 报错）：已复位为空态 + 错误 toast，无需回填。
+			return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
+		}
+		m2.stallRestarts = kept
+		return m2, tea.Batch(cmd, waitForPlayerEvents(m.player))
+
 	case resumeResultMsg:
 		// 命中/未命中标记回填（成功分支据此在异步 LoadFailed 时移除损坏缓存）。
 		m.playingFromCache = msg.fromCache
@@ -1427,6 +1482,15 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 	cmds := []tea.Cmd{waitForPlayerEvents(m.player)}
 	switch ev := msg.ev.(type) {
 	case player.ProgressEvent:
+		if ev.Position > 0 {
+			// 真正推进 = mpv 已开始播放：卡住重启计数清零（重启重播后推进的会话
+			// 恢复健康；未推进时计数保留供上限判定）；同时解除本曲“重启无效”标记
+			//（它自己终于推进了 = 可重新信任，下次再卡允许再重启）。
+			m.stallRestarts = 0
+			if m.state.Track != nil {
+				delete(m.stallHopeless, m.state.Track.ID)
+			}
+		}
 		m.state.Position = ev.Position
 		m.state.Duration = ev.Duration
 		m.home = m.home.syncState(m.state)
@@ -1606,8 +1670,63 @@ func (m Model) onPlayerEvent(msg playerEventMsg) (tea.Model, tea.Cmd) {
 		m.state.Playing = false
 		m.home = m.home.syncState(m.state)
 		return m, tea.Batch(append([]tea.Cmd{cmd}, cmds...)...)
+	case player.StalledEvent:
+		// 卡住：file-loaded 已到但窗口内无推进 → 重启 mpv 重播同曲（上限 + 协调）。
+		// 与其它落地机制错峰，详见 handleStall 注释。
+		return m.handleStall(cmds)
 	}
 	return m, tea.Batch(cmds...)
+}
+
+// handleStall 处理卡住（StalledEvent）→ 重启 mpv 并重播同曲，带重试上限与协调。
+//
+// 协调策略（与现有触发机制错峰，避免互相拉扯）：
+//   - 缓存兜底等待中（fallback.active）：下载完成会自动切本地文件，重启会同 mpv
+//     并发访问同一 URL 放大 403 风控（6440188 教训），跳过重启；
+//   - 恢复（PlayPaused 静默加载，resuming）：重启发声破坏恢复语义，跳过；
+//   - 加载看门狗（30s 一直无 file-loaded）：互补，本机制只管“已加载未推进”，不重叠；
+//   - 自动重连（进程死亡）：player.Restart 复用单飞 reconnect，无双双重启。
+//
+// 上限：stallRestarts 达 maxStallRestarts 后放弃重启，走统一失败链
+// retryOrSkipLoadFailure（URL 重试 → 跳过/停止 + 明确 toast）。
+// 计数在 beginPlay（新播放意图）/真正推进（ProgressEvent>0）时清零；重启重播
+// 经 done 分支保留计数供上限判定。
+func (m Model) handleStall(cmds []tea.Cmd) (tea.Model, tea.Cmd) {
+	// 防御：无当前曲 / TrackStarted 未到（playStarted=false）/ 已结束 → 忽略。
+	// StalledEvent 只应在 TrackStarted 后由播放器发出；此处兜底防陈旧/伪造事件。
+	if m.state.Track == nil || !m.playStarted || m.ended {
+		return m, tea.Batch(cmds...)
+	}
+	// 协调：缓存兜底等待中 / 恢复进行中 → 不动（各自机制会处理）。
+	if m.fallback.active || m.resuming {
+		logger.Info("播放无进展但缓存兜底/恢复进行中，跳过重启: %s", m.state.Track.Title)
+		return m, tea.Batch(cmds...)
+	}
+	// 本曲已被判过“重启无效”（预算耗尽）且未再真实推进：不再重启（徒劳），直接
+	// 跳过/停止（放弃对该曲的一切重试）——否则队列回绕/RepeatAll 时每轮对同一首
+	// 永远卡住的曲重启一次（健康曲的 TrackStarted 会重置 stallRestarts 计数，令
+	// 上限失效），形成重启风暴；且 retry 子路径对 stall 型失败永不收敛（retryCount
+	// 被每次 TrackStarted 归零，涨不到上限）→ 必须走 exhaustedOrSkip 终止路径
+	//（回归：TestStallRestartHopelessTrackNoRestartOnWrap/ConvergesToStop）。
+	if m.stallHopeless[m.state.Track.ID] {
+		logger.Warn("播放无进展但该曲已判定重启无效，直接跳过/停止: %s", m.state.Track.Title)
+		return m.exhaustedOrSkip(stallFailHint, cmds)
+	}
+	if m.stallRestarts >= maxStallRestarts {
+		// 重启预算耗尽：标记“重启无效”（本会话内不再对这首重启），并直接跳过/停止
+		//（不复用 retry 子路径——见上方 hopeless 注释的收敛论证）——避免无限循环。
+		logger.Warn("播放无进展，已重启 %d 次仍卡住，标记重启无效并跳过/停止", maxStallRestarts)
+		m.stallRestarts = 0
+		m.stallHopeless[m.state.Track.ID] = true
+		return m.exhaustedOrSkip(stallFailHint, cmds)
+	}
+	// 重启预算内：计数 +1、toast 反馈、发起重启 cmd（Restart 在 cmd 内异步执行，
+	// 成功后再经 done 分支重播同曲，不阻塞事件循环）。
+	m.stallRestarts++
+	track := *m.state.Track
+	gen := m.playGen
+	m, cmd := m.showToast("播放无进展，正在重启播放器…", toastWarning)
+	return m, tea.Batch(cmd, stalledRestartCmd(m.player, track, gen), waitForPlayerEvents(m.player))
 }
 
 // retryOrSkipLoadFailure 播放失败（LoadFailed/LoadTimeout）后的重试/跳过/停止链路：
@@ -1626,6 +1745,14 @@ func (m Model) retryOrSkipLoadFailure(hint string, isLoadTimeout bool, cmds []te
 		m.home = m.home.syncState(m.state)
 		return m, tea.Batch(cmd, waitForPlayerEvents(m.player), retryPlayCmd(m.playGen))
 	}
+	return m.exhaustedOrSkip(hint, cmds)
+}
+
+// exhaustedOrSkip 失败重试预算耗尽（或不再重试）后的跳过/停止链路：队列有可跳
+// 候选（与失败曲不同 ID 且不在本轮失败集合）则跳过继续连播，否则停止等待用户
+// 操作（ended=true）。为极致兜底语义（唯一求必然终止的路径）——供 retryOrSkipLoadFailure
+// 耗尽分支与卡住重启 hopless/上限分支共用。
+func (m Model) exhaustedOrSkip(hint string, cmds []tea.Cmd) (tea.Model, tea.Cmd) {
 	// 重试耗尽：跳过失败曲目继续连播。注意 Next 现为回绕语义——单曲队列/
 	// 重复 ID 会把失败曲目自身送回，继续播放会陷入“失败→重试→耗尽→
 	// 重播失败曲”死循环，故候选与失败曲目同 ID 时视为无曲可跳，保留
@@ -1644,10 +1771,13 @@ func (m Model) retryOrSkipLoadFailure(hint string, isLoadTimeout bool, cmds []te
 	} else if tr, ok := m.queue.Next(); ok {
 		skip = &tr
 	}
-	if skip != nil && (m.state.Track == nil || skip.ID != m.state.Track.ID) && !m.failedTracks[skip.ID] {
+	if skip != nil && (m.state.Track == nil || skip.ID != m.state.Track.ID) && !m.failedTracks[skip.ID] && !m.stallHopeless[skip.ID] {
 		// 跳过失败曲目继续连播（toast 告知用户哪首失败）。
-		// 目标曲目已在本轮失败集合中（队列回绕撞回已失败曲目）：不跳，
-		// 走下方停止路径，避免无限交替重播（回归：TestLoadFailAllTracksFailStopsLoop）。
+		// 目标曲目已在本轮失败集合中（队列回绕撞回已失败曲目）或已被判为卡住
+		// 重启无效（stallHopeless：能加载但永不推进）时不跳——走下方停止路径，
+		// 避免无限交替重播/无限跳过循环（回归：TestLoadFailAllTracksFailStopsLoop
+		// 与 TestStallRestartTwoHopelessWrapsStop——后者若不含 stallHopeless 守卫，
+		// 两首永久卡住曲会在回绕队列里无限互相跳过，永不收敛，审查 P2-2）。
 		logger.Warn("重试耗尽，跳过失败曲目继续连播: %s - %s (id=%s)", skip.Title, skip.Artist, skip.ID)
 		m2, cmd := m.skipFailedTrack(*skip, hint)
 		// 跳过 = 播放状态变更（新当前曲）：立即重算预加载目标，不必等下次
@@ -1707,6 +1837,16 @@ func retryPlayCmd(gen int) tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(retryBackoff)
 		return retryPlayMsg{gen: gen}
+	}
+}
+
+// stalledRestartCmd 卡住自动重启 cmd：异步执行 player.Restart（kill+重启+重连，
+// 最坏约 5s）后回投 stalledRestartDoneMsg。gen/track 为触发时快照——消息在 update
+// 侧校验 gen，用户期间换曲则丢弃（不重播旧曲）。
+func stalledRestartCmd(p player.Player, track model.Track, gen int) tea.Cmd {
+	return func() tea.Msg {
+		err := p.Restart()
+		return stalledRestartDoneMsg{gen: gen, track: track, err: err}
 	}
 }
 
@@ -1794,6 +1934,7 @@ func (m Model) startPlay(track model.Track) (Model, tea.Cmd) {
 	m.queue.Replace(track)
 	m.retryCount = 0    // 手动播放：全新重试预算
 	m.queueSkip = false // 替换即重新对齐，解除删除解耦标记
+	m.stallHopeless = map[string]bool{} // 手动重选 = 用户新意图：解除历史“重启无效”标记，给一首全新预算
 	m.current = pageHome
 	m2, cmd := m.playQueueTrack()
 	m2.refreshPreload() // 替换语义 = 队列形态变更：重新计算预加载目标
@@ -1845,6 +1986,9 @@ func refreshLocalMetadata(track model.Track) model.Track {
 // 永不耗尽（回归：TestLoadFailRetriesExhaustedSkipsInQueue/StopsSingle）；
 // 预算在 TrackStarted/TrackEnded/手动播放入口重置。
 func (m Model) beginPlay(track model.Track) (Model, tea.Cmd) {
+	// 新播放意图（用户/连播/重试/重播）：卡住重启计数清零（重播经 beginPlay 保留计数
+	// 的逻辑不在本方法内——done 分支先 beginPlay 再回填 stallRestarts，见 update）。
+	m.stallRestarts = 0
 	// 本地曲目元数据刷新：持久化快照可能带陈旧 Duration=0（时长解析上线前
 	// 扫描），刷新后后续 fetchLyricsCmd 携带真实时长，防 lrclib /api/get 400。
 	// 失败沿用原 track 不阻断播放。

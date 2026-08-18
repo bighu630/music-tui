@@ -35,6 +35,14 @@ const (
 // 包级变量：测试可调小以缩短等待。
 var loadWatchdogTimeout = 30 * time.Second
 
+// stallWindow 卡住检测窗口：file-loaded（TrackStarted）后此窗口内未见 position
+// 推进（position>0）即判定“已加载但未开始播放”（卡住），emit StalledEvent，
+// UI 据此重启 mpv 进程重播。从 file-loaded 起算而非 Play：网络取流天然需数秒
+// 才 file-loaded，从 Play 起算会把“正常缓冲中”误判为卡住；一直不 file-loaded
+// 由加载看门狗（loadWatchdogTimeout）覆盖，两者互补不冲突。
+// 包级变量：测试可调小以缩短等待。
+var stallWindow = 2 * time.Second
+
 // MpvPlayer 通过 JSON IPC 控制 mpv 进程，并把 mpv 事件转换为
 // player.Event 推送到 Events() 通道。进程启动与 socket 连接解耦：
 // Start() = 启动进程 + connect()；测试直接调用 connect()。
@@ -82,6 +90,16 @@ type MpvPlayer struct {
 	loadDeadline time.Time // 看门狗截止时刻；零值 = 无活跃加载
 	loadResolved bool      // 当前加载是否已有结论（file-loaded/end-file 到达）
 	watchdogSeq  int       // 看门狗循环代际：每次 connect 自增；旧循环发现代际不符即退出
+
+	// 卡住检测（stall watchdog）状态（stateMu 保护）：TrackStarted（file-loaded）
+	// 后启动 stallWindow 计时，窗口内未见 position>0 判定卡住（emit StalledEvent）。
+	// stallArmed：当前一轮是否已武装（pause/end-file/disconnect 会 disarm）；
+	// stallSawProgress：窗口内是否见到推进；stallArmSeq：每轮 arm 自增的代际，
+	// stall 计时 goroutine 捕获它，过期时校验——仅当前一轮能 emit，旧一轮/重连后
+	// 残留计时器自动失效（防误发）。
+	stallArmed       bool
+	stallSawProgress bool
+	stallArmSeq      int
 
 	events   chan Event
 	mu       sync.Mutex
@@ -287,6 +305,7 @@ func (p *MpvPlayer) pump(conn *mpvipc.Connection) {
 			p.handlePropertyChange(ev)
 		case "file-loaded":
 			p.disarmWatchdog() // 加载成功：看门狗解除（限时等待结束）
+			p.armStallWatchdog() // 卡住检测武装：file-loaded 后窗口内未见推进即判定卡住
 			// 真实 mpv 中 duration property-change 晚于 file-loaded 到达，
 			// 此时同步 Get 兜底。Get 响应走 mpvipc checkResult 路由（不经过
 			// 事件通道），pump 内调用不会死锁；但若 mpv 恰在此刻崩溃/卡死，
@@ -317,6 +336,7 @@ func (p *MpvPlayer) pump(conn *mpvipc.Connection) {
 			switch ev.Reason {
 			case "eof":
 				p.disarmWatchdog() // 播放结束：加载已有结论，看门狗解除
+				p.disarmStallWatchdog() // 播放结束：卡住检测解除（不再等推进）
 				p.emit(TrackEndedEvent{})
 			case "error":
 				// 陈旧事件过滤：end-file error 不携带曲目身份，mpv ≥0.33 的
@@ -328,6 +348,7 @@ func (p *MpvPlayer) pump(conn *mpvipc.Connection) {
 					continue
 				}
 				p.disarmWatchdog() // 当前曲加载失败：加载已有结论，看门狗解除（陈旧错误不 disarm——见过滤）
+				p.disarmStallWatchdog() // 加载失败：卡住检测解除（错误走现有失败链，无需重启）
 				// 提取 mpv IPC file_error 字段的诊断文本（如 "no audio or video data played"）；
 				// mpvipc 的 Event.ExtraData 已保留该字段，旧版 mpv 可能缺失（空串兜底）。
 				fileErr := ""
@@ -361,7 +382,8 @@ func (p *MpvPlayer) onDisconnect(conn *mpvipc.Connection) {
 	// 重连后新 watchdogLoop 继承旧 deadline（最多还有 30s）到期误报
 	// LoadTimeoutError → UI 无用户操作自动重播断线前曲目（审查 P1）。
 	p.loadDeadline = time.Time{}
-	p.loadResolved = true // 无活跃加载：不存在"加载结论未定"状态
+	p.loadResolved = true  // 无活跃加载：不存在“加载结论未定”状态
+	p.stallArmed = false   // 断线：在途卡住检测作废（重连后新加载会重新 arm）
 	waitCh := p.waitCh
 	current := p.conn
 	p.stateMu.Unlock()
@@ -476,6 +498,16 @@ func (p *MpvPlayer) doReconnect() error {
 // client 字段，与断线时库内部 Close 的写入并发即触发数据竞争（pre-existing，
 // 本实现只是不再触发它）。连接的"已断开"状态由 pump 退出后的 onDisconnect
 // 清理（置 nil）传递，本方法只读 stateMu 保护的 p.conn。
+// Restart 强制重启 mpv 进程并重连（卡住恢复）：kill 旧进程 → 清理死状态 →
+// 重启 mpv（--idle --input-ipc-server）→ 连接 + 注册属性观察 + 事件泵。
+// 复用单飞 reconnect：与自动重连/并发命令合并为同一次重启（不双重拉起新进程）；
+// 单飞期间 onDisconnect 见 reconnecting=true 即退出，故意 kill 不会触发虚假
+// “连接断开”事件或再次 autoReconnect。重启成功后调用方重新 Play 即可恢复播放。
+func (p *MpvPlayer) Restart() error {
+	logger.Info("Restart: 重启 mpv 进程（播放无进展恢复）")
+	return p.reconnect()
+}
+
 func (p *MpvPlayer) ensureConnected() error {
 	p.stateMu.Lock()
 	if p.conn != nil {
@@ -529,6 +561,48 @@ func (p *MpvPlayer) disarmWatchdog() {
 	p.stateMu.Unlock()
 }
 
+// armStallWatchdog 武装卡住检测：file-loaded 后启动 stallWindow 计时，窗口内
+// 未见 position>0 由 stall 计时 goroutine 判定卡住并 emit StalledEvent。每轮
+// arm 自增 stallArmSeq 代际：旧一轮残留计时器过期时发现代际不符自行失效，
+// 不会把新一轮判定为卡住（回归：TestStallWatchdogRearmsOnNewLoad）。
+func (p *MpvPlayer) armStallWatchdog() {
+	p.stateMu.Lock()
+	p.stallArmed = true
+	p.stallSawProgress = false
+	p.stallArmSeq++
+	seq := p.stallArmSeq
+	p.stateMu.Unlock()
+	// 捕获窗口值传给 goroutine：避免 goroutine 异步读包级变量 stallWindow
+	//（测试 setStallWindow 写入与它无 happens-before → -race 数据竞争）。
+	win := stallWindow
+	go p.stallTimer(seq, win)
+}
+
+// disarmStallWatchdog 解除卡住检测（pause/end-file/disconnect/Close）：
+// 后续 stall 计时器发现未武装即失效，不再判定卡住。
+func (p *MpvPlayer) disarmStallWatchdog() {
+	p.stateMu.Lock()
+	p.stallArmed = false
+	p.stateMu.Unlock()
+}
+
+// stallTimer 卡住检测计时 goroutine：睡眠 win 后检查当前一轮（代际匹配、仍武装、
+// 未见推进）→ 判定卡住并发一次 StalledEvent。任一条不满足即静默退出
+//（正常推进/已暂停/已结束/已重连/已关闭都不触发）。win 为 arm 时捕获的窗口值
+//（避免异步读包级 stallWindow 的测试竞态）。
+func (p *MpvPlayer) stallTimer(seq int, win time.Duration) {
+	time.Sleep(win)
+	p.stateMu.Lock()
+	if p.closed.Load() || !p.stallArmed || p.stallArmSeq != seq || p.stallSawProgress {
+		p.stateMu.Unlock()
+		return
+	}
+	p.stallArmed = false // 只发一次：本轮判定完解除
+	p.stateMu.Unlock()
+	logger.Warn("mpv 播放无进展（%s 窗口内 position 未推进），判定卡住", win)
+	p.emit(StalledEvent{})
+}
+
 // watchdogLoop 加载看门狗：周期检查 loadDeadline，到期且仍无 file-loaded/
 // end-file 结论认领 → emit LoadTimeoutError（UI 走重试/跳过链路，不再无限期
 // 静默卡住）。到期清 deadline 认领本次超时防重复触发。锁内先查代际：seq 与
@@ -575,6 +649,13 @@ func (p *MpvPlayer) handlePropertyChange(ev *mpvipc.Event) {
 		if !ok {
 			return
 		}
+		// 卡住检测推进信号：position>0 即时间在走（首播从 0 起，>0 即推进），
+		// 置 stallSawProgress 供 stallTimer 判定“已开始播放”不误发 StalledEvent。
+		if pos > 0 {
+			p.stateMu.Lock()
+			p.stallSawProgress = true
+			p.stateMu.Unlock()
+		}
 		d := p.getDuration() // 取一次局部变量：过滤与 emit 用同一值
 		if d > 0 && pos > d {
 			return // 异常进度值（Position > Duration）过滤丢弃
@@ -586,6 +667,11 @@ func (p *MpvPlayer) handlePropertyChange(ev *mpvipc.Event) {
 		}
 	case obsPause:
 		if paused, ok := toBool(ev.Data); ok {
+			// 暂停 = 用户主动不会继续播放：卡住检测解除（暂停窗口内位置不推进属正常，
+			// 不误判卡住——回归：TestStallWatchdogDisarmedByPause）。
+			if paused {
+				p.disarmStallWatchdog()
+			}
 			p.emit(StateEvent{Playing: !paused})
 		}
 	}
