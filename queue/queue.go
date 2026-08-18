@@ -5,6 +5,7 @@ package queue
 import (
 	"errors"
 	"math/rand"
+	"strings"
 	"sync"
 
 	"music-tui/model"
@@ -48,19 +49,36 @@ func New() *Queue {
 	return &Queue{currentIdx: -1}
 }
 
+// isEmpty 判定"全空死条目"：无标题、无歌手、且无时长（Title/Artist 去空白为空、
+// Duration==0）。三者全空才算死条目（AND），只有标题/歌手/任一时长的正常歌曲
+// 一律保留（本地音乐 Title 恒为文件名基名非空，天然不受影响）。
+func isEmpty(t model.Track) bool {
+	return strings.TrimSpace(t.Title) == "" &&
+		strings.TrimSpace(t.Artist) == "" &&
+		t.Duration == 0
+}
+
 // Add 追加到队尾。不改变当前曲目；队列从未播放过时仅入队、不自动播放。
+// 全空死条目（无标题+无歌手+无时长）直接跳过，不入队。
 func (q *Queue) Add(t model.Track) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if isEmpty(t) {
+		return
+	}
 	q.tracks = append(q.tracks, t)
 }
 
 // InsertNext 插入到当前曲目之后（下一首播放）。不改变当前曲目、不自动开播；
 // 无当前曲目（currentIdx=-1，如从未播放/清空后）时插入到队首（index 0）。
 // 随机模式不重洗牌：插入位即实际下一首（"下一首播放"语义优先）。
+// 全空死条目直接跳过，不入队。
 func (q *Queue) InsertNext(t model.Track) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if isEmpty(t) {
+		return
+	}
 	pos := 0
 	if q.currentIdx >= 0 {
 		pos = q.currentIdx + 1
@@ -72,9 +90,15 @@ func (q *Queue) InsertNext(t model.Track) {
 
 // Replace 替换语义：清空队列后把 t 作为唯一曲目并设为当前。
 // 手动播放（搜索/历史/队列页）统一走此语义。
+// t 为全空死条目时等价于清空队列（不入队、无当前曲目）。
 func (q *Queue) Replace(t model.Track) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if isEmpty(t) {
+		q.tracks = nil
+		q.currentIdx = -1
+		return
+	}
 	q.tracks = []model.Track{t}
 	q.currentIdx = 0
 }
@@ -87,18 +111,38 @@ func (q *Queue) Replace(t model.Track) {
 func (q *Queue) ReplaceAll(tracks []model.Track, startIdx int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.tracks = append([]model.Track(nil), tracks...)
+	// 先过滤全空死条目再替换（保持相对顺序，不改调用方切片）。
+	// deadBefore 记录 startIdx 之前被过滤的条数：startIdx 指向正常曲时，
+	// 过滤后下标平移该量，仍命中用户选中的同一首（选中曲为当前）；
+	// startIdx 越界/指向死条目时沿用现有 clamp 到合法区间。
+	kept := make([]model.Track, 0, len(tracks))
+	deadBefore := 0
+	for i, t := range tracks {
+		if isEmpty(t) {
+			if i < startIdx {
+				deadBefore++
+			}
+			continue
+		}
+		kept = append(kept, t)
+	}
+	q.tracks = kept
 	q.currentIdx = -1
 	if len(q.tracks) == 0 {
 		return
 	}
-	if startIdx < 0 {
-		startIdx = 0
+	idx := startIdx - deadBefore
+	validSel := startIdx >= 0 && startIdx < len(tracks) && !isEmpty(tracks[startIdx])
+	if !validSel {
+		idx = startIdx
 	}
-	if startIdx >= len(q.tracks) {
-		startIdx = len(q.tracks) - 1
+	if idx < 0 {
+		idx = 0
 	}
-	q.currentIdx = startIdx
+	if idx >= len(q.tracks) {
+		idx = len(q.tracks) - 1
+	}
+	q.currentIdx = idx
 	// 随机模式：复用 SetMode 的 tail-shuffle 语义——选中曲及之前的曲目
 	// 保持原序（不打断刚选中的曲目），只洗牌其后的尾部。
 	if q.mode == Shuffle {
@@ -275,18 +319,33 @@ func (q *Queue) Snapshot() Snapshot {
 	}
 }
 
-// Restore 用快照覆盖当前队列状态。CurrentIdx 越界（损坏/手改数据）
+// Restore 用快照覆盖当前队列状态。先过滤全空死条目（保持相对顺序）。
+// 当前曲位置按 ID 保留（ID 唯一性：youtube video id / 本地绝对路径）：
+// 过滤会平移下标，故依 s.Tracks[s.CurrentIdx].ID 在新列表重新定位；
+// 当前曲恰是死条目被过滤（找不到）或 CurrentIdx 越界（损坏/手改数据）
 // 时降级为无当前曲目（-1），避免恢复出不可用状态。
 func (q *Queue) Restore(s Snapshot) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.tracks = append([]model.Track(nil), s.Tracks...)
+	kept := make([]model.Track, 0, len(s.Tracks))
+	for _, t := range s.Tracks {
+		if !isEmpty(t) {
+			kept = append(kept, t)
+		}
+	}
+	q.tracks = kept
 	q.mode = s.Mode
-	if s.CurrentIdx < 0 || s.CurrentIdx >= len(q.tracks) {
-		q.currentIdx = -1
+	q.currentIdx = -1
+	if s.CurrentIdx < 0 || s.CurrentIdx >= len(s.Tracks) {
 		return
 	}
-	q.currentIdx = s.CurrentIdx
+	curID := s.Tracks[s.CurrentIdx].ID
+	for i, t := range q.tracks {
+		if t.ID == curID {
+			q.currentIdx = i
+			return
+		}
+	}
 }
 
 // Current 返回当前曲目；无当前曲目时返回 false。

@@ -1151,3 +1151,288 @@ func TestConcurrentAccess(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// ---- 全空死条目过滤（无标题+无歌手+无时长 AND 条件） ----
+
+// 连续 Add 死条目（三字段全空）→ 都不入队；正常曲目照常入队。
+func TestAddFiltersFullDeadEntry(t *testing.T) {
+	q := New()
+	for i := 0; i < 3; i++ {
+		q.Add(model.Track{ID: fmt.Sprintf("dead%d", i)}) // Title/Artist/Duration 全空
+	}
+	if q.Len() != 0 {
+		t.Errorf("连续 Add 死条目后 Len = %d, want 0", q.Len())
+	}
+	if _, ok := q.Current(); ok {
+		t.Error("死条目不应成为当前曲")
+	}
+	q.Add(testTrack("a"))
+	q.Add(testTrack("b"))
+	if q.Len() != 2 {
+		t.Errorf("正常曲目 Add 后 Len = %d, want 2", q.Len())
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"a", "b"}) {
+		t.Errorf("Tracks = %v, want [a b]", got)
+	}
+}
+
+// 部分字段缺失 → 保留（反误删：只任一字段有值的正常歌曲一律不过滤）。
+func TestAddKeepsPartialFields(t *testing.T) {
+	// 只 Title 有值（Artist="", Duration=0）
+	titleOnly := testTrack("title")
+	titleOnly.Artist = ""
+	titleOnly.Duration = 0
+	// 只 Artist 有值（Title="", Duration=0）
+	artistOnly := testTrack("artist")
+	artistOnly.Title = ""
+	artistOnly.Duration = 0
+	// 只时长 >0（Title=Artist=""）
+	durationOnly := testTrack("dur")
+	durationOnly.Title = ""
+	durationOnly.Artist = ""
+
+	q := New()
+	q.Add(titleOnly)
+	q.Add(artistOnly)
+	q.Add(durationOnly)
+	if q.Len() != 3 {
+		t.Errorf("部分字段缺失应保留: Len = %d, want 3", q.Len())
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"title", "artist", "dur"}) {
+		t.Errorf("Tracks = %v, want [title artist dur]", got)
+	}
+}
+
+// 本地音乐风格：Title=文件名（非空）、Artist="", Duration=0 → 保留（核心场景）。
+func TestAddKeepsLocalTrackStyle(t *testing.T) {
+	local := model.Track{
+		ID:     "/home/user/Music/Blessed.mp3",
+		Title:  "Blessed",
+		Artist: "",
+		Source: "local",
+	}
+	q := New()
+	q.Add(local)
+	q.Add(model.Track{ID: "dead"})
+	if q.Len() != 1 {
+		t.Errorf("本地音乐风格应保留、死条目应过滤: Len = %d, want 1", q.Len())
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"/home/user/Music/Blessed.mp3"}) {
+		t.Errorf("Tracks = %v, want 仅本地曲", got)
+	}
+}
+
+// 空白串视为缺失：Title/Artist 全空白且时长 0 → 过滤；去空白后非空 → 保留。
+func TestAddTrimsWhitespaceBeforeFiltering(t *testing.T) {
+	q := New()
+	wsOnly := model.Track{ID: "ws", Title: "   ", Artist: " \t ", Duration: 0}
+	q.Add(wsOnly)
+	if q.Len() != 0 {
+		t.Errorf("全空白串应视为缺失并过滤: Len = %d, want 0", q.Len())
+	}
+	// 标题带首尾空白但去空白非空 → 与全空不同，保留
+	padded := model.Track{ID: "pad", Title: "  歌名  ", Artist: " ", Duration: 0}
+	q.Add(padded)
+	if q.Len() != 1 {
+		t.Errorf("去空白非空的标题应保留: Len = %d, want 1", q.Len())
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"pad"}) {
+		t.Errorf("Tracks = %v, want [pad]", got)
+	}
+}
+
+// InsertNext 死条目 → 跳过（队列不变）；正常曲照常插入当前之后。
+func TestInsertNextFiltersDeadEntry(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.InsertNext(model.Track{ID: "dead"})
+	if got := ids(q.Tracks()); !eq(got, []string{"a", "b"}) {
+		t.Errorf("InsertNext 死条目应被过滤: %v, want [a b]", got)
+	}
+	if q.Len() != 2 {
+		t.Errorf("Len = %d, want 2", q.Len())
+	}
+	q.InsertNext(testTrack("x"))
+	if got := ids(q.Tracks()); !eq(got, []string{"a", "x", "b"}) {
+		t.Errorf("正常 InsertNext = %v, want [a x b]", got)
+	}
+	if next, _ := q.Next(); next.ID != "x" {
+		t.Errorf("Next = %s, want x", next.ID)
+	}
+}
+
+// Replace 死条目 → 等价清空队列（Len 0 + 无当前曲目）。
+func TestReplaceDeadEntryClearsQueue(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.Add(testTrack("b"))
+	q.Replace(model.Track{ID: "dead"})
+	if q.Len() != 0 {
+		t.Errorf("Replace 死条目后 Len = %d, want 0（等价清空）", q.Len())
+	}
+	if q.CurrentIndex() != -1 {
+		t.Errorf("Replace 死条目后 CurrentIndex = %d, want -1", q.CurrentIndex())
+	}
+	if _, ok := q.Current(); ok {
+		t.Error("Replace 死条目后不应有当前曲目")
+	}
+	// 之后正常曲恢复照常
+	q.Replace(testTrack("c"))
+	if q.Len() != 1 || q.CurrentIndex() != 0 {
+		t.Errorf("Replace 正常曲后 Len/CurrentIndex = %d/%d, want 1/0", q.Len(), q.CurrentIndex())
+	}
+	if cur, _ := q.Current(); cur.ID != "c" {
+		t.Errorf("Current = %s, want c", cur.ID)
+	}
+}
+
+// ReplaceAll 过滤死条目、保持其余相对顺序、不修改调用方切片。
+func TestReplaceAllFiltersDeadKeepingOrder(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("old"))
+	tracks := []model.Track{
+		testTrack("a"),
+		model.Track{ID: "d1"},
+		testTrack("b"),
+		model.Track{ID: "d2"},
+		testTrack("c"),
+	}
+	q.ReplaceAll(tracks, 0)
+	if got := ids(q.Tracks()); !eq(got, []string{"a", "b", "c"}) {
+		t.Errorf("ReplaceAll 应过滤死条目保持顺序: %v, want [a b c]", got)
+	}
+	if q.Len() != 3 {
+		t.Errorf("Len = %d, want 3", q.Len())
+	}
+	if got := ids(tracks); !eq(got, []string{"a", "d1", "b", "d2", "c"}) {
+		t.Errorf("调用方切片不应被修改: %v", got)
+	}
+	// 连播顺序 = 过滤后顺序（顺序模式不洗牌）：当前 a → b → c → 回绕 a
+	if tr, ok := q.Next(); !ok || tr.ID != "b" {
+		t.Errorf("Next = %v/%v, want b", tr.ID, ok)
+	}
+	if tr, ok := q.Next(); !ok || tr.ID != "c" {
+		t.Errorf("Next = %v/%v, want c", tr.ID, ok)
+	}
+	if tr, ok := q.Next(); !ok || tr.ID != "a" {
+		t.Errorf("回绕 Next = %v/%v, want a", tr.ID, ok)
+	}
+}
+
+// startIdx 选中正常曲且其前有死条目：过滤后当前曲下标平移，仍是同一首为当前。
+func TestReplaceAllStartIdxPreservesSelectedTrack(t *testing.T) {
+	q := New()
+	tracks := []model.Track{
+		model.Track{ID: "d1"},
+		testTrack("a"),
+		model.Track{ID: "d2"},
+		testTrack("b"),
+		testTrack("c"),
+	}
+	// startIdx=3 选中 b（其前 2 个死条目 → 过滤后 b 移到下标 1，仍为当前）
+	q.ReplaceAll(tracks, 3)
+	if q.Len() != 3 {
+		t.Fatalf("Len = %d, want 3", q.Len())
+	}
+	if q.CurrentIndex() != 1 {
+		t.Errorf("CurrentIndex = %d, want 1（平移后的 b）", q.CurrentIndex())
+	}
+	if cur, ok := q.Current(); !ok || cur.ID != "b" {
+		t.Errorf("Current = %s/%v, want b（选中曲仍为当前）", cur.ID, ok)
+	}
+}
+
+// startIdx 在过滤后列表上仍生效：超大/负数照常 clamp 到合法区间。
+func TestReplaceAllStartIdxClampAfterFilter(t *testing.T) {
+	q := New()
+	tracks := []model.Track{model.Track{ID: "d1"}, testTrack("a"), testTrack("b")}
+	q.ReplaceAll(tracks, 99)
+	if q.CurrentIndex() != 1 {
+		t.Errorf("超大 startIdx 应 clamp 到过滤后末位: %d, want 1", q.CurrentIndex())
+	}
+	if cur, _ := q.Current(); cur.ID != "b" {
+		t.Errorf("Current = %s, want b", cur.ID)
+	}
+	q2 := New()
+	q2.ReplaceAll(tracks, -5)
+	if q2.CurrentIndex() != 0 {
+		t.Errorf("负 startIdx 应 clamp 到 0: %d", q2.CurrentIndex())
+	}
+	if cur, _ := q2.Current(); cur.ID != "a" {
+		t.Errorf("Current = %s, want a", cur.ID)
+	}
+}
+
+// ReplaceAll 全部死条目 → 空队列、无当前曲目。
+func TestReplaceAllAllDeadClears(t *testing.T) {
+	q := New()
+	q.Replace(testTrack("a"))
+	q.ReplaceAll([]model.Track{{ID: "d1"}, {ID: "d2"}}, 1)
+	if q.Len() != 0 || q.CurrentIndex() != -1 {
+		t.Errorf("全部死条目应清空: Len/CurrentIndex = %d/%d, want 0/-1", q.Len(), q.CurrentIndex())
+	}
+	if _, ok := q.Next(); ok {
+		t.Error("空队列 Next 应 false")
+	}
+}
+
+// Restore 过滤死条目、当前曲按 ID 保留（过滤平移下标后重新定位同一首）。
+func TestRestoreFiltersDeadAndPreservesCurrentByID(t *testing.T) {
+	src := Snapshot{
+		Tracks: []model.Track{
+			testTrack("a"),
+			model.Track{ID: "d1"},
+			testTrack("b"),
+			model.Track{ID: "d2"},
+		},
+		CurrentIdx: 2, // 指向 b（其前有一死条目）
+		Mode:       Sequential,
+	}
+	q := New()
+	q.Restore(src)
+	if q.Len() != 2 {
+		t.Errorf("Restore 过滤死条目后 Len = %d, want 2", q.Len())
+	}
+	if got := ids(q.Tracks()); !eq(got, []string{"a", "b"}) {
+		t.Errorf("Tracks = %v, want [a b]", got)
+	}
+	if q.CurrentIndex() != 1 {
+		t.Errorf("CurrentIndex = %d, want 1（b 平移后仍为当前）", q.CurrentIndex())
+	}
+	if cur, ok := q.Current(); !ok || cur.ID != "b" {
+		t.Errorf("Current = %s/%v, want b", cur.ID, ok)
+	}
+	// 恢复后连播正常：b → 回绕 a
+	if tr, _ := q.Next(); tr.ID != "a" {
+		t.Errorf("Restore 后 Next = %s, want a（回绕）", tr.ID)
+	}
+}
+
+// 当前曲恰是死条目（被过滤）或 CurrentIdx 非法 → 降级 -1，其余正常曲保留。
+func TestRestoreDeadOrInvalidCurrentDegrades(t *testing.T) {
+	// 当前曲是死条目 → 过滤后按 ID 找不到 → -1
+	q := New()
+	q.Restore(Snapshot{
+		Tracks:     []model.Track{testTrack("a"), model.Track{ID: "d1"}},
+		CurrentIdx: 1, // 指向死条目
+	})
+	if q.Len() != 1 {
+		t.Errorf("Len = %d, want 1（正常曲保留）", q.Len())
+	}
+	if q.CurrentIndex() != -1 {
+		t.Errorf("当前曲为死条目应降级 -1: %d", q.CurrentIndex())
+	}
+	// CurrentIdx 越界（快照损坏）→ 降级 -1
+	q2 := New()
+	q2.Restore(Snapshot{
+		Tracks:     []model.Track{testTrack("a")},
+		CurrentIdx: 5,
+	})
+	if q2.Len() != 1 || q2.CurrentIndex() != -1 {
+		t.Errorf("越界 CurrentIdx 应降级 -1 且正常曲保留: Len/CurrentIndex = %d/%d", q2.Len(), q2.CurrentIndex())
+	}
+	if _, ok := q2.Current(); ok {
+		t.Error("降级后不应有当前曲")
+	}
+}
