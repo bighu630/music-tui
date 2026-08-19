@@ -1802,6 +1802,122 @@ func TestRestartAfterLoadFailExhaustedKeepsQueue(t *testing.T) {
 	}
 }
 
+// 回归（mpv pause 残留"有曲目不发声"的 UI 侧保障）：播放失败后（LoadFailedError
+// 重试耗尽 → 停止）用户到队列页按 Enter 选曲，beginPlay 链路必须照常触发
+// player.Play() 并把状态置为播放中（Track 置位 + Playing=true）——这是"可出声"
+// 的 UI 前提；实际消除 pause 残留由 player 层 Play() 重置 pause 保证（另一 worker）。
+// 两个场景覆盖失败后的两类状态：
+//   场景 1：真实失败链路——全部取流失败回绕撞失败集合 → 停止（ended=true、
+//           Playing=false，state.Track 保留——beginPlay 全量覆盖状态）；
+//   场景 2：空态——state 直接重置为 PlaybackState{}（Track==nil、Playing=false），
+//           等价于恢复播放失败（TestResumeLoadFailNoAutoRetry 的落点）与 Play
+//           命令被拒（beginPlay 失败分支 reset）后的空态；全新空态模型上该断言
+//           即任务规格中的 playCount()==1（本测试场景 1 已产生播放，用增量断言）。
+// 两类状态下队列 Enter 的跳转播放语义必须一致：JumpTo → playQueueTrack → beginPlay。
+func TestPlayAfterFailQueueEnterAudible(t *testing.T) {
+	old := retryBackoff
+	retryBackoff = 10 * time.Millisecond
+	defer func() { retryBackoff = old }()
+	// 快进 toast 定时器：失败链路每次重试批次（execRetryBatch）会执行
+	// showToast 的 tea.Tick（默认 5s/3s）——不覆盖会让单测空耗 20s+。
+	// （与 root_test.go 既有失败系列测试同款做法：toastErrorDuration=1ms。）
+	oldErrDur, oldOkDur := toastErrorDuration, toastSuccessDuration
+	toastErrorDuration, toastSuccessDuration = time.Millisecond, time.Millisecond
+	defer func() { toastErrorDuration, toastSuccessDuration = oldErrDur, oldOkDur }()
+
+	// 队列页按键序列（与真实用户一致）：数字 2 切到队列页 → ↓ 移动选中 →
+	// Enter 发出 queuePlayMsg（root 收到后走 JumpTo→playQueueTrack→beginPlay）。
+	enterQueueTrack := func(m Model, listIndex int) (Model, queuePlayMsg) {
+		t.Helper()
+		m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 队列页
+		for i := 0; i < listIndex; i++ {
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+		}
+		m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+		var play queuePlayMsg
+		found := false
+		for _, msg := range execCmds(cmd) {
+			if pm, ok := msg.(queuePlayMsg); ok {
+				play = pm
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("队列页 Enter 未产出 queuePlayMsg（listIndex=%d）", listIndex)
+		}
+		return m, play
+	}
+
+	fp := newFakePlayer()
+	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, cmd := m.startPlay(testTrack("t1"))
+	_ = execCmds(cmd)
+	m.queue.Add(testTrack("t2")) // 队列 [t1, t2]
+	m = m.syncQueueViews()
+
+	// ---- 场景 1：真实失败链路（LoadFailedError 重试耗尽 → 停止）----
+	loadErr := player.ErrorEvent{Err: &player.LoadFailedError{FileError: "no audio or video data played"}}
+	for i := 0; i < 2; i++ {
+		m, cmd = update(m, playerEventMsg{ev: loadErr})
+		m = execRetryBatch(m, cmd, fp)
+	}
+	m, _ = update(m, playerEventMsg{ev: loadErr}) // t1 耗尽 → 跳 t2
+	for i := 0; i < 2; i++ {
+		m, cmd = update(m, playerEventMsg{ev: loadErr})
+		m = execRetryBatch(m, cmd, fp)
+	}
+	m, _ = update(m, playerEventMsg{ev: loadErr}) // t2 耗尽回绕撞 t1（失败集合）→ 停止
+	if !m.ended || m.state.Playing {
+		t.Fatalf("场景1 前置：应停止（ended=true Playing=false），got ended=%v Playing=%v", m.ended, m.state.Playing)
+	}
+
+	// 用户到队列页按 Enter 选中第一首 t1（选中默认在首项，原始下标 0）
+	m, play := enterQueueTrack(m, 0)
+	if play.index != 0 {
+		t.Fatalf("场景1：队列页 Enter 应产出原始下标 0（t1），got %d", play.index)
+	}
+	before := fp.playCount()
+	m, cmd = update(m, play) // root 处理 queuePlayMsg → beginPlay 链
+	if fp.playCount() != before+1 || fp.lastPlayed() != testTrack("t1").URL {
+		t.Errorf("场景1：失败停止后队列 Enter 应触发一次 Play(t1): playCount=%d→%d lastPlayed=%q",
+			before, fp.playCount(), fp.lastPlayed())
+	}
+	if m.state.Track == nil || m.state.Track.ID != "t1" || !m.state.Playing {
+		t.Errorf("场景1：失败停止后队列 Enter 应置 t1 播放中: %+v", m.state)
+	}
+	if m.ended {
+		t.Error("场景1：队列 Enter 播放后 ended 应复位为 false")
+	}
+	if m.current != pageHome {
+		t.Errorf("场景1：队列 Enter 播放后应回到首页, current=%v", m.current)
+	}
+	_ = execCmds(cmd) // 消费歌词/封面/历史等异步 cmd，保证无 panic
+
+	// ---- 场景 2：空态（state.Track==nil、Playing=false）----
+	// 等价性：恢复播放失败 / Play 命令被拒路径的落点均为 state=PlaybackState{}；
+	// 队列 Enter 的 beginPlay 链与场景 1 完全一致，不受失败残留影响。
+	m.state = model.PlaybackState{}
+
+	// 队列页 Enter 选中第二首 t2（↓ 移动选中 → 原始下标 1）
+	m, play = enterQueueTrack(m, 1)
+	if play.index != 1 {
+		t.Fatalf("场景2：队列页 Enter 应产出原始下标 1（t2），got %d", play.index)
+	}
+	before = fp.playCount()
+	m, cmd = update(m, play)
+	if fp.playCount() != before+1 || fp.lastPlayed() != testTrack("t2").URL {
+		t.Errorf("场景2：空态下队列 Enter 应触发一次 Play(t2): playCount=%d→%d lastPlayed=%q",
+			before, fp.playCount(), fp.lastPlayed())
+	}
+	if m.state.Track == nil || m.state.Track.ID != "t2" || !m.state.Playing {
+		t.Errorf("场景2：空态下队列 Enter 应置 t2 播放中: %+v", m.state)
+	}
+	if m.ended {
+		t.Error("场景2：空态下队列 Enter 播放后 ended 应为 false")
+	}
+	_ = execCmds(cmd) // 消费异步 cmd，保证无 panic
+}
+
 // 回归（P1 分支镜像）：重试耗尽跳过时若存在删除解耦标记（queueSkip=true、
 // 指针已顺延），应播放顺延曲目（Current 兜底）而非 Next()——不跳过头
 // （镜像 TrackEnded 的解耦逻辑）。场景：t1 两次重试均失败后删除 t1
