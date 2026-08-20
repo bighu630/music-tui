@@ -114,8 +114,11 @@ func run() error {
 	// 4. 启动 mpv（defer 保证退出时清理进程与 socket）
 	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("music-tui-%d.sock", os.Getpid()))
 	mpv := player.NewMpvPlayer(mpvPath, sockPath, cookieFile, ytdlpHeaders)
-	// 取流附加配置（自定义 yt-dlp 路径/代理）必须在 Start 之前设置
-	mpv.SetYtdlpOptions(ytdlpPath, cfg.Ytdlp.Proxy)
+	// 取流附加配置（自定义 yt-dlp 路径/代理）必须在 Start 之前设置。
+	// 传 cfg.Ytdlp.Path 原始配置值而非 requireYtdlp 解析后的路径：
+	// 未配置（空）时保持 mpv 启动参数与现状逐字节一致（不附加 script-opts）；
+	// 自定义时该值已被 requireYtdlp 校验存在且可执行。
+	mpv.SetYtdlpOptions(cfg.Ytdlp.Path, cfg.Ytdlp.Proxy)
 	if err := mpv.Start(); err != nil {
 		return fmt.Errorf("启动 mpv 失败: %w", err)
 	}
