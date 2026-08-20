@@ -178,6 +178,52 @@ func TestShift(t *testing.T) {
 	}
 }
 
+func TestParseLRCSkipsEmptyTextLines(t *testing.T) {
+	ly, err := ParseLRC([]byte("[03:32.00]\n[00:10.00]有词\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ly.Lines) != 1 {
+		t.Fatalf("lines = %d, want 1（空文本行应被过滤）", len(ly.Lines))
+	}
+	if ly.Lines[0].Text != "有词" || ly.Lines[0].Time != 10.0 {
+		t.Errorf("Lines[0] = %+v, want 有词@10s", ly.Lines[0])
+	}
+}
+
+func TestParseLRCSkipsEmptyTextWithMultiTimestamps(t *testing.T) {
+	// 多时间戳一行若文本为空则所有对应时间戳均跳过
+	lrc := "[00:10.00][00:20.00]\n[00:30.00]有词\n"
+	ly, err := ParseLRC([]byte(lrc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ly.Lines) != 1 {
+		t.Fatalf("lines = %d, want 1", len(ly.Lines))
+	}
+	if ly.Lines[0].Text != "有词" {
+		t.Errorf("text = %q, want 有词", ly.Lines[0].Text)
+	}
+	// 仅空白字符同样视为空文本
+	lrc2 := "[00:10.00]   \n[00:20.00]有词\n"
+	ly2, err := ParseLRC([]byte(lrc2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ly2.Lines) != 1 {
+		t.Fatalf("lines = %d, want 1（空白文本行应被过滤）", len(ly2.Lines))
+	}
+	// 重复空行被过滤
+	lrc3 := "[03:32.00]\n[03:32.00]   \n[00:10.00]有词\n"
+	ly3, err := ParseLRC([]byte(lrc3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ly3.Lines) != 1 {
+		t.Fatalf("lines = %d, want 1（重复空行均应被过滤）", len(ly3.Lines))
+	}
+}
+
 func TestParseLRCRejectsOverflowMinutes(t *testing.T) {
 	// 19 位分钟数：超出 int64（Atoi 失败）或超过 MaxInt64/60 守卫，均视为非法时间标签；
 	// 恰好等于 MaxInt64/60 的边界值（mm*60+ss 在 int 下溢出为负）必须由 float64

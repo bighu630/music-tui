@@ -9,8 +9,9 @@ const (
 )
 
 // lyricViewportHeight 歌词视口行数（动态）：min(21, midH−上下留白 2*lyricPadLines)，
-// 至少 1 行。窗口大时 21 行封顶；窗口小时按留白收缩（例如 midH=24 → 20 行，
-// 视口外上下各 2 行留白）。
+// 至少 1 行，且强制为奇数以保证视口中心对称（偶数时视口中心在两行之间，
+// 当前行无法精确居中，滚动时会偶发上下一行的抖动）。窗口大时 21 行封顶；
+// 窗口小时按留白收缩（例如 midH=24 → 20→19 行，取奇数）。
 func lyricViewportHeight(midH int) int {
 	h := midH - lyricPadLines*2
 	if h > lyricMaxLines {
@@ -18,6 +19,10 @@ func lyricViewportHeight(midH int) int {
 	}
 	if h < 1 {
 		h = 1
+	}
+	// 保证视口中心对称：奇数时 H/2 上下各 (H-1)/2 行对称；偶数时中心在缝隙。
+	if h%2 == 0 && h > 1 {
+		h--
 	}
 	return h
 }
@@ -32,8 +37,9 @@ func lyricViewportHeight(midH int) int {
 //	结尾（idx=N−1）→ top=N−1−H/2，末行停在视口中央，下方可空白。
 //
 // 偏移与视口高 H 无关：padding 前导 H/2 行恰好抵消 H/2 的居中需求，故不依赖 H。
-// viewport 侧 maxYOffset：content 行数 = N + 2·(H/2)，maxYOffset = (N+2·(H/2)) − H
-// = N − (H%2)（H 偶 = N，H 奇 = N−1）；故返回 N−1 恒合法。
+// viewport 侧 maxYOffset：H 恒为奇数（见 lyricViewportHeight），content 行数
+// = N + 2·(H/2) = N + H − 1（奇数时 H/2 向下取整），maxYOffset = (N+H−1) − H
+// = N−1 恰好，无富余；故返回 N−1 恒合法且不越界。
 func lyricScrollOffset(idx, n int) int {
 	if n <= 0 {
 		return 0
