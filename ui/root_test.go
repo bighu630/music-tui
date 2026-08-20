@@ -2498,7 +2498,7 @@ func TestTrackStartedTriggersCacheWarmup(t *testing.T) {
 	fp := newFakePlayer()
 	fa := &fakeSearchAdapter{}
 	logPath := filepath.Join(t.TempDir(), "ytdlp.log")
-	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, writeFakeYtDlpScript(t, logPath), "", nil)
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, writeFakeYtDlpScript(t, logPath), "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3605,7 +3605,7 @@ func TestTrackStartedLocalSkipsCacheWarmup(t *testing.T) {
 	fp := newFakePlayer()
 	fa := &fakeSearchAdapter{}
 	logPath := filepath.Join(t.TempDir(), "ytdlp.log")
-	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, writeFakeYtDlpScript(t, logPath), "", nil)
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: filepath.Join(t.TempDir(), "cache")}, writeFakeYtDlpScript(t, logPath), "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
