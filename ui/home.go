@@ -587,8 +587,10 @@ func (m homeModel) setSize(width, height int) homeModel {
 	// 封面字符画固定 30×17、与终端尺寸无关：setSize 不清缓存不重渲。
 	// 歌词 viewport 尺寸 = 中间区歌词列尺寸：宽 = width-coverW-4（gap 2 + 边距 2），
 	// 高 = 动态视口行数 min(21, 中间区高−上下各 2 行留白)（见 lyricsHeight），
-	// 窄窗口下自动收缩。
-	m.lyricView.SetWidth(m.lyricsColumnWidth())
+	// 窄窗口下自动收缩。视口高度强制奇数，保证中心对称。
+	// 使用同一 coverHidden 快照计算列宽，避免中间状态不一致导致抖动。
+	hide := m.coverHidden()
+	m.lyricView.SetWidth(m.lyricsColumnWidthWithHide(hide))
 	m.lyricView.SetHeight(m.lyricsHeight())
 	// 视口高度可能已变化（留白/上限动态计算），先重建 padding 内容再重算
 	// 滚动偏移：此前基于未知尺寸（Height=1）的 scrollLyricsTo 会留下越界
@@ -616,12 +618,13 @@ var lyricActiveStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(
 
 // rebuildLyrics 用当前高亮行重渲染歌词内容：内容 = H/2 行空白 + 歌词行
 // + H/2 行空白（padding 模型，配合 scrollLyricsTo 使当前行恒在视口中央；
+// H 恒为奇数，故上下 padding 对称，H/2 向下取整即 (H-1)/2 行空白，中心对称；
 // H 变化后必须重调本函数，padding 行数随 H/2 变化）。
 func (m *homeModel) rebuildLyrics() {
 	if m.lyrics == nil {
 		return
 	}
-	pad := m.lyricView.Height() / 2
+	pad := m.lyricView.Height() / 2 // H 奇数时 pad = (H-1)/2，对称
 	var sb strings.Builder
 	sb.WriteString(strings.Repeat("\n", pad))
 	for i, line := range m.lyrics.Lines {
@@ -675,7 +678,14 @@ func (m homeModel) middleHeight() int {
 // 封面隐藏时（窗口不满足宽 < 60 或 高 < 28）封面列移除，歌词区占满整页宽（直接居中
 // 屏幕，见 renderMiddleView/centerLyrics）。
 func (m homeModel) lyricsColumnWidth() int {
-	if m.coverHidden() {
+	return m.lyricsColumnWidthWithHide(m.coverHidden())
+}
+
+// lyricsColumnWidthWithHide 按给定隐藏态计算歌词列宽（setSize 内与
+// lyricView.Width 使用同一 hide 快照，避免中间状态不一致导致列宽与
+// centerLyrics 的 lyricsW 不一致而抖动）。
+func (m homeModel) lyricsColumnWidthWithHide(hide bool) int {
+	if hide {
 		return m.width
 	}
 	w := m.width - coverW - 4
@@ -797,10 +807,12 @@ func (m homeModel) lyricsColumnView() string {
 	return ""
 }
 
-// centerLyrics 把每行文本水平居中到屏幕中心（歌词列起点 = coverW+2），
-// 并补尾空格到歌词列宽——外层 Place(lyricsW, ...) 对满宽行不再重新水平
-// 居中（否则短行/提示文本会被推回歌词列中心，回归：暂无歌词偏右）。
-// viewport 填充的行尾空格先剔除，避免宽度计算失真；超宽行保持原样。
+// centerLyrics 把每行文本水平居中到歌词列内，并补尾空格到歌词列宽——
+// 外层 Place(lyricsW, ...) 对满宽行不再重新水平居中（否则短行/提示文本
+// 会被推回歌词列中心，回归：暂无歌词偏右）。尾空格填充使每行占满 lyricsW，
+// 防止外层 Place 对短行再次居中导致偶发一列抖动。
+// viewport 填充的行尾空格先 TrimRight 剔除，再用 ansi.StringWidth 计宽，
+// 避免宽度计算失真；超宽行 vis>lyricsW 时 pad=0 tail=0 退化为左对齐。
 func (m homeModel) centerLyrics(s string) string {
 	lyricsW := m.lyricsColumnWidth()
 	lines := strings.Split(s, "\n")
@@ -818,6 +830,7 @@ func (m homeModel) centerLyrics(s string) string {
 		if tail < 0 {
 			tail = 0
 		}
+		// 防 Place 重新居中：每行补尾空格至 lyricsW，使外层 Place 视其为满宽行
 		lines[i] = strings.Repeat(" ", pad) + trimmed + strings.Repeat(" ", tail)
 	}
 	return strings.Join(lines, "\n")

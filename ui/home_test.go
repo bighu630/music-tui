@@ -1276,6 +1276,9 @@ func TestHomeLyricsMinWhitespace(t *testing.T) {
 		if wantH < 1 {
 			wantH = 1
 		}
+		if wantH%2 == 0 && wantH > 1 {
+			wantH--
+		}
 		if got := m.home.lyricView.Height(); got != wantH {
 			t.Errorf("%dx%d 视口高 = %d, want %d", sz[0], sz[1], got, wantH)
 		}
@@ -1300,12 +1303,12 @@ func TestHomeLyricsResizeRepads(t *testing.T) {
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
 	m.home = m.home.setSize(120, 39) // H=21，首行在中央行
-	m.home = m.home.setSize(80, 20)  // midH=18 → H=14，padding 7
+	m.home = m.home.setSize(80, 20)  // midH=18 → H=13（18-4=14→13 奇数），padding 6
 
-	if got := m.home.lyricView.Height(); got != 14 {
-		t.Fatalf("resize 后视口高 = %d, want 14", got)
+	if got := m.home.lyricView.Height(); got != 13 {
+		t.Fatalf("resize 后视口高 = %d, want 13", got)
 	}
-	centerRow := (18-14)/2 + 7 // view 内坐标：2（留白）+ 7（H/2）= 9（页面行 12）
+	centerRow := (18-13)/2 + 6 // view 内坐标：2（留白）+ 6（H/2）= 8（页面行 11）
 	lines := strings.Split(m.home.view(), "\n")
 	if !strings.Contains(stripAnsiForTest(lines[centerRow]), "第一行") {
 		t.Errorf("resize 后首行应显示在新中央行 %d: %q", centerRow, lines[centerRow])

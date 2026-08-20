@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -194,7 +195,7 @@ func TestHomeCoverHiddenWheelRegion(t *testing.T) {
 
 	var sb strings.Builder
 	for i := 0; i < 40; i++ {
-		sb.WriteString("[00:10.00]歌词行A\n")
+		sb.WriteString(fmt.Sprintf("[%02d:%02d.00]歌词行A\n", (10+i*5)/60, (10+i*5)%60))
 	}
 	ly, _ := lyrics.ParseLRC([]byte(sb.String()))
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
