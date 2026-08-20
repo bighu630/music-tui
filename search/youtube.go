@@ -69,6 +69,9 @@ type YouTubeAdapter struct {
 	// 按键排序附加 --add-header。未设置（零值）时行为与现状完全一致。
 	cookieFile string
 	headers    map[string]string
+	// proxy 是全局附加的代理参数（SetGlobalProxy 设置）：非空 → 每次调用
+	// 附加 --proxy <url>；空 = 不附加，行为与现状完全一致。
+	proxy string
 }
 
 // NewYouTubeAdapter 创建 YouTube 搜索适配器，limit 固定 searchLimit 条。
@@ -89,6 +92,13 @@ func NewYouTubeAdapter(ytdlpPath string) *YouTubeAdapter {
 func (a *YouTubeAdapter) SetGlobalYTDlp(cookieFile string, headers map[string]string) {
 	a.cookieFile = cookieFile
 	a.headers = headers
+}
+
+// SetGlobalProxy 设置全局附加的 yt-dlp 代理参数，对 Search / FetchPlaylist
+// 均生效：proxy 非空时每次调用附加 --proxy <url>；空 = 不附加，行为与现状
+// 完全一致。与 SetGlobalYTDlp 配对使用（代理与 cookie/headers 独立）。
+func (a *YouTubeAdapter) SetGlobalProxy(proxy string) {
+	a.proxy = proxy
 }
 
 // headerArgs 返回按键排序的 --add-header 参数序列；值 TrimSpace 后为空的键
@@ -118,7 +128,7 @@ func (a *YouTubeAdapter) headerArgs() []string {
 // 超时与 yt-dlp 报错均返回错误：超时（DeadlineExceeded）与父 ctx
 // 取消（Canceled）分别给出不同消息；非超时失败携带截断的 stderr
 // 诊断文本，便于用户看到 yt-dlp 的真实报错。
-// 参数 = 全局附加参数（--cookies + 排序后的 --add-header）+ 原有搜索参数。
+// 参数 = 全局附加参数（--cookies + 排序后的 --add-header + --proxy）+ 原有搜索参数。
 func (a *YouTubeAdapter) Search(ctx context.Context, query string) ([]model.Track, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
@@ -128,6 +138,9 @@ func (a *YouTubeAdapter) Search(ctx context.Context, query string) ([]model.Trac
 		args = append(args, "--cookies", a.cookieFile)
 	}
 	args = append(args, a.headerArgs()...)
+	if a.proxy != "" {
+		args = append(args, "--proxy", a.proxy)
+	}
 	args = append(args, "--dump-json", "--no-warnings", "--flat-playlist", arg)
 	logger.Debug("yt-dlp 搜索: %s", query)
 	cmd := exec.CommandContext(ctx, a.ytdlpPath, args...)
@@ -188,8 +201,11 @@ func (a *YouTubeAdapter) FetchPlaylist(ctx context.Context, playlistURL string, 
 		// 参数全空：回落全局 cookie 文件
 		args = append(args, "--cookies", a.cookieFile)
 	}
-	// 全局 headers 总是附加（与 CookieArgs 是否指定无关）
+	// 全局 headers 总是附加（与 CookieArgs 是否指定无关）；全局 proxy 同样总是附加
 	args = append(args, a.headerArgs()...)
+	if a.proxy != "" {
+		args = append(args, "--proxy", a.proxy)
+	}
 	// yt-dlp 2026.07+ 对私有歌单默认执行网页 authcheck 验证，失败即报错并建议
 	// 跳过；这里显式跳过（youtubetab:skip=authcheck），私有歌单（如 LM）
 	// 直接凭 cookie 拉取，公开歌单不受影响。

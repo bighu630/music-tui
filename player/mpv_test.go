@@ -1174,6 +1174,81 @@ func TestMpvStartProcessYtdlRawOptionsQuotesCommaCookiePath(t *testing.T) {
 	}
 }
 
+// SetYtdlpOptions 配置自定义 yt-dlp 路径与代理后：--ytdl-raw-options 值内追加
+// proxy=<proxy>（单一参数），并新增 --script-opts=ytdl_hook-ytdl_path=<path>
+// 参数（mpv 官方 ytdl_hook.lua 的 script-opt 键名，注意是下划线）。
+func TestSetYtdlpOptionsAddsProxyAndPath(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := testSockPath(t)
+	logPath := filepath.Join(dir, "starts.log")
+	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
+	script := writeFakeMpvWrapperScript(t, dir)
+
+	p := NewMpvPlayer(script, socketPath, "", nil)
+	p.SetYtdlpOptions("/custom/yt-dlp", "socks5://127.0.0.1:1080")
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取日志: %v", err)
+	}
+	// 无 cookie/headers 时 proxy 追加后仍是单一 --ytdl-raw-options 参数
+	wantOpts := "--ytdl-raw-options=socket-timeout=15,retries=2,proxy=socks5://127.0.0.1:1080"
+	if n := strings.Count(string(data), "--ytdl-raw-options="); n != 1 {
+		t.Errorf("--ytdl-raw-options 出现次数 = %d, want 1（单一参数）:\n%s", n, data)
+	}
+	if !strings.Contains(string(data), wantOpts) {
+		t.Errorf("mpv 启动参数应含 %s:\n%s", wantOpts, data)
+	}
+	if !strings.Contains(string(data), "--script-opts=ytdl_hook-ytdl_path=/custom/yt-dlp") {
+		t.Errorf("mpv 启动参数应含 --script-opts=ytdl_hook-ytdl_path=/custom/yt-dlp:\n%s", data)
+	}
+}
+
+// SetYtdlpOptions("", "") 与未调用时行为完全一致：启动参数逐字节相同
+// （不出现 proxy= / ytdl_hook-ytdl_path；两次运行用同一 socket 路径，
+// 日志仅剩 args 行可整体比对）。
+func TestSetYtdlpOptionsEmptyNoChange(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := testSockPath(t)
+	script := writeFakeMpvWrapperScript(t, dir)
+
+	// 基线：未调用 SetYtdlpOptions
+	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", filepath.Join(dir, "baseline.log"))
+	p1 := NewMpvPlayer(script, socketPath, "", nil)
+	if err := p1.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := p1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	baseline, err := os.ReadFile(filepath.Join(dir, "baseline.log"))
+	if err != nil {
+		t.Fatalf("读取基线日志: %v", err)
+	}
+
+	// SetYtdlpOptions("", "") 后启动参数应与基线逐字节一致
+	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", filepath.Join(dir, "empty.log"))
+	p2 := NewMpvPlayer(script, socketPath, "", nil)
+	p2.SetYtdlpOptions("", "")
+	if err := p2.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := p2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "empty.log"))
+	if err != nil {
+		t.Fatalf("读取日志: %v", err)
+	}
+	if string(got) != string(baseline) {
+		t.Errorf("SetYtdlpOptions(\"\", \"\") 后启动参数与未调用不一致:\n--- baseline ---\n%s--- got ---\n%s", baseline, got)
+	}
+}
+
 // Close 后 pump 停止分发：再推事件不应收到任何 Event。
 func TestMpvPlayerNoEventsAfterClose(t *testing.T) {
 	fake := newFakeMpvServer(t)

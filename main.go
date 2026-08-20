@@ -1,5 +1,5 @@
 // music-tui 是一个基于 YouTube 的终端音乐播放器。
-// 依赖检测 → 启动 mpv → 组装服务 → 启动 TUI → 退出清理。
+// 配置加载 → 依赖检测 → 启动 mpv → 组装服务 → 启动 TUI → 退出清理。
 package main
 
 import (
@@ -49,17 +49,30 @@ func run() error {
 	// config 加载成功后调整级别
 	logger.Init(logger.LevelInfo)
 
-	// 1. 运行时依赖检测（缺失即报错退出，附平台安装命令）
+	// 1. 配置加载：依赖检测需用配置的 ytdlp.path，故提前到依赖检测之前。
+	// 首次运行会在此生成默认配置文件（原子写+rename，无并发问题）。
+	cfgRoot, err := os.UserConfigDir()
+	if err != nil {
+		return fmt.Errorf("获取用户配置目录失败: %w", err)
+	}
+	cfg, err := loadConfig(filepath.Join(cfgRoot, "music-tui", "config.json"))
+	if err != nil {
+		return fmt.Errorf("加载配置失败: %w", err)
+	}
+	logger.SetLevel(logger.ParseLevel(cfg.Log.Level))
+
+	// 2. 运行时依赖检测（缺失即报错退出，附平台安装命令）；yt-dlp 优先用
+	// 配置的 ytdlp.path（配置了则只检测该路径，失败不回落 PATH）
 	mpvPath, err := requireTool("mpv")
 	if err != nil {
 		return err
 	}
-	ytdlpPath, err := requireTool("yt-dlp")
+	ytdlpPath, err := requireYtdlp(cfg.Ytdlp.Path)
 	if err != nil {
 		return err
 	}
 
-	// 1.5 单实例检测：已有实例在运行则报错退出（Unix: flock，内核自动释放；
+	// 2.5 单实例检测：已有实例在运行则报错退出（Unix: flock，内核自动释放；
 	// 非 Unix: pid 文件 + 陈旧检测）。锁持有至 run 返回。
 	lock, err := singleinstance.Acquire(filepath.Join(os.TempDir(), "music-tui.lock"))
 	if err != nil {
@@ -67,11 +80,7 @@ func run() error {
 	}
 	defer lock.Close()
 
-	// 2. 数据目录准备
-	cfgRoot, err := os.UserConfigDir()
-	if err != nil {
-		return fmt.Errorf("获取用户配置目录失败: %w", err)
-	}
+	// 3. 数据目录准备（config 已在步骤 1 加载）
 	hist, err := loadHistory(filepath.Join(cfgRoot, "music-tui", "history.json"))
 	if err != nil {
 		return fmt.Errorf("加载历史记录失败: %w", err)
@@ -96,26 +105,26 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("初始化封面缓存失败: %w", err)
 	}
-	cfg, err := loadConfig(filepath.Join(cfgRoot, "music-tui", "config.json"))
-	if err != nil {
-		return fmt.Errorf("加载配置失败: %w", err)
-	}
-	logger.SetLevel(logger.ParseLevel(cfg.Log.Level))
 	// yt-dlp 全局 cookie：复用 YT Music 登录配置（未登录则无 cookie）。
 	// 启动时快照：浏览器 cookie 过期需重启应用刷新（与 mpv 取流参数限制一致）。
 	cookieFile, _ := ytStore.CookieFile() // 未登录/不可读 → 无 cookie，不阻止启动
 	ytdlpHeaders := cfg.Ytdlp.Headers
-	cm := loadCache(cfg.Cache, ytdlpPath, cookieFile, ytdlpHeaders)
+	cm := loadCache(cfg.Cache, ytdlpPath, cfg.Ytdlp.Proxy, cookieFile, ytdlpHeaders)
 
-	// 3. 启动 mpv（defer 保证退出时清理进程与 socket）
+	// 4. 启动 mpv（defer 保证退出时清理进程与 socket）
 	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("music-tui-%d.sock", os.Getpid()))
 	mpv := player.NewMpvPlayer(mpvPath, sockPath, cookieFile, ytdlpHeaders)
+	// 取流附加配置（自定义 yt-dlp 路径/代理）必须在 Start 之前设置。
+	// 传 cfg.Ytdlp.Path 原始配置值而非 requireYtdlp 解析后的路径：
+	// 未配置（空）时保持 mpv 启动参数与现状逐字节一致（不附加 script-opts）；
+	// 自定义时该值已被 requireYtdlp 校验存在且可执行。
+	mpv.SetYtdlpOptions(cfg.Ytdlp.Path, cfg.Ytdlp.Proxy)
 	if err := mpv.Start(); err != nil {
 		return fmt.Errorf("启动 mpv 失败: %w", err)
 	}
 	defer mpv.Close()
 
-	// 3.5 MPRIS 服务（仅 Linux 有效；非 Linux 为 no-op 桩）。
+	// 4.5 MPRIS 服务（仅 Linux 有效；非 Linux 为 no-op 桩）。
 	// 连接/注册失败仅警告，绝不影响播放器主功能。
 	mprisSrv := mpris.NewServer(mpv)
 	// 封面缓存目录注入：metadataFor 命中缓存时 artUrl 用 file:// 本地路径
@@ -128,9 +137,10 @@ func run() error {
 		defer mprisSrv.Close()
 	}
 
-	// 4. 组装服务并启动 TUI（退出后 run 返回，defer 清理 mpv）
+	// 5. 组装服务并启动 TUI（退出后 run 返回，defer 清理 mpv）
 	searchAdapter := search.NewYouTubeAdapter(ytdlpPath)
 	searchAdapter.SetGlobalYTDlp(cookieFile, ytdlpHeaders)
+	searchAdapter.SetGlobalProxy(cfg.Ytdlp.Proxy)
 	lc := lyrics.NewClient(userAgent)
 	var lyClient lyrics.Fetcher = lc
 	if cfg.OpenAI.APIKey != "" {
@@ -270,8 +280,8 @@ func loadConfig(path string) (*config.Config, error) {
 
 // loadCache 初始化音频缓存：索引文件损坏（崩溃/断电截断）时备份后重试一次；
 // 仍失败仅警告并降级为禁用态缓存——缓存绝不影响播放主功能（不阻止启动）。
-func loadCache(opts cache.Options, ytdlpPath, cookieFile string, headers map[string]string) *cache.Manager {
-	cm, err := cache.New(opts, ytdlpPath, cookieFile, headers)
+func loadCache(opts cache.Options, ytdlpPath, proxy, cookieFile string, headers map[string]string) *cache.Manager {
+	cm, err := cache.New(opts, ytdlpPath, proxy, cookieFile, headers)
 	if err == nil {
 		return cm
 	}
@@ -283,7 +293,7 @@ func loadCache(opts cache.Options, ytdlpPath, cookieFile string, headers map[str
 			if berr := os.Rename(idxPath, backup); berr == nil {
 				fmt.Fprintf(os.Stderr, "music-tui: 警告：缓存索引损坏，已备份至 %s 并重建\n", backup)
 				logger.Warn("缓存索引损坏，已备份至 %s 并重建", backup)
-				if cm, retryErr := cache.New(opts, ytdlpPath, cookieFile, headers); retryErr == nil {
+				if cm, retryErr := cache.New(opts, ytdlpPath, proxy, cookieFile, headers); retryErr == nil {
 					return cm
 				}
 			}
@@ -331,6 +341,24 @@ func loadYTM(path string) (*ytm.Store, error) {
 		return nil, retryErr
 	}
 	return store, nil
+}
+
+// requireYtdlp 解析 yt-dlp 可执行文件路径：配置了 ytdlp.path 时只检测该
+// 路径是否存在且可执行（失败即报错，不回落 PATH 查找）；未配置时与
+// requireTool 一致，走 PATH 查找 "yt-dlp"。
+func requireYtdlp(cfgPath string) (string, error) {
+	if cfgPath == "" {
+		path, err := exec.LookPath("yt-dlp")
+		if err != nil {
+			return "", fmt.Errorf("缺少依赖 yt-dlp，请先安装：\n%s", installHint("yt-dlp"))
+		}
+		return path, nil
+	}
+	path, err := exec.LookPath(cfgPath)
+	if err != nil {
+		return "", fmt.Errorf("yt-dlp 路径无效（config.json 的 ytdlp.path = %q）：\n请检查该配置项，或移除它以回落 PATH 查找：\n%s", cfgPath, installHint("yt-dlp"))
+	}
+	return path, nil
 }
 
 // requireTool 在 PATH 中查找依赖；缺失时返回带平台安装命令的错误。

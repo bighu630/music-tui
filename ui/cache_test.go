@@ -64,7 +64,7 @@ func newCacheTestModelWithYtdlp(t *testing.T, st *session.State, ytdlpPath strin
 		t.Fatal(err)
 	}
 	cacheDir := filepath.Join(t.TempDir(), "cache")
-	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: cacheDir}, ytdlpPath, "", nil)
+	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: cacheDir}, ytdlpPath, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
