@@ -5,11 +5,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"music-tui/model"
 	"music-tui/search"
@@ -59,7 +59,13 @@ type searchModel struct {
 func newSearchModel(adapter search.SearchAdapter) searchModel {
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = false // 单行条目（标题 - 作者 · 时长）
+	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.Foreground(lipgloss.Color("252"))
+	delegate.Styles.DimmedTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Padding(0, 0, 0, 2)
 	l := list.New(nil, delegate, 80, 24)
+	s := l.Styles
+	s.ActivePaginationDot = s.ActivePaginationDot.Foreground(lipgloss.Color("212"))
+	s.InactivePaginationDot = s.InactivePaginationDot.Foreground(lipgloss.Color("240"))
+	l.Styles = s
 	l.Title = "搜索结果"
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false)
@@ -98,7 +104,7 @@ func (s searchModel) selectedTrack() (model.Track, bool) {
 // Update 处理搜索页局部按键。
 func (s searchModel) Update(msg tea.Msg) (searchModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "enter":
 			if s.state == searchLoading {
@@ -195,9 +201,9 @@ func (s searchModel) withResults(msg searchResultsMsg) searchModel {
 // setSize 响应窗口尺寸变化。
 func (s searchModel) setSize(width, height int) searchModel {
 	s.width, s.height = width, height
-	s.input.Width = width - 6
-	if s.input.Width < 10 {
-		s.input.Width = 10
+	s.input.SetWidth(width - 6)
+	if s.input.Width() < 10 {
+		s.input.SetWidth(10)
 	}
 	s.list.SetSize(width, height-5)
 	return s

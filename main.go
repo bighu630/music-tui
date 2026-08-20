@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"music-tui/cache"
 	"music-tui/config"
@@ -211,7 +211,7 @@ func run() error {
 	if w, h, rows, ok := coverrender.CalibrateCellSize(250 * time.Millisecond); ok {
 		logger.Info("cell 自校准: %dx%d（测试图 %dpx 占用 %d 行）", w, h, 96, rows)
 	}
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(model)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI 运行失败: %w", err)
 	}

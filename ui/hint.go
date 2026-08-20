@@ -3,7 +3,7 @@ package ui
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // bottomHint 把 hint 放到第 h 行（页面内容区最后一行）：content 顶部对齐，

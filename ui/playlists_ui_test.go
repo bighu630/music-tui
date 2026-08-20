@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"music-tui/model"
 	"music-tui/player"
@@ -26,7 +26,7 @@ import (
 // 空态渲染：无任何列表时显示提示与新建引导。
 func TestPlaylistsEmptyView(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
 	if m.current != pagePlaylists {
 		t.Fatalf("按 3 后 current = %v, want pagePlaylists", m.current)
 	}
@@ -44,8 +44,8 @@ func TestPlaylistDetailEmptyState(t *testing.T) {
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 进入详情
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 进入详情
 	if m.plPage.mode != plDetail {
 		t.Fatalf("mode = %v, want plDetail", m.plPage.mode)
 	}
@@ -78,13 +78,13 @@ func TestPlaylistOverviewItem(t *testing.T) {
 // n 新建：命名输入 → Enter → plCreateMsg → store 持久化，命名模式退出。
 func TestPlaylistCreateFlow(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "n", Code: 'n'})
 	if !m.plPage.typing() {
 		t.Fatal("按 n 后应进入命名输入模式")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("我的歌单")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "我的歌单"})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var pc plCreateMsg
 	for _, msg := range execCmds(cmd) {
 		if cm, ok := msg.(plCreateMsg); ok {
@@ -115,8 +115,8 @@ func TestPlaylistRenameFlow(t *testing.T) {
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "r", Code: 'r'})
 	if !m.plPage.typing() {
 		t.Fatal("按 r 后应进入命名输入模式")
 	}
@@ -125,10 +125,10 @@ func TestPlaylistRenameFlow(t *testing.T) {
 	}
 	// 删掉旧名后输入新名
 	for i := 0; i < 3; i++ {
-		m, _ = update(m, tea.KeyMsg{Type: tea.KeyBackspace})
+		m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyBackspace})
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("新名字")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "新名字"})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var pr plRenameMsg
 	for _, msg := range execCmds(cmd) {
 		if rm, ok := msg.(plRenameMsg); ok {
@@ -156,8 +156,8 @@ func TestPlaylistDeleteFlow(t *testing.T) {
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, cmd := update(m, tea.KeyPressMsg{Text: "d", Code: 'd'})
 	var pd plDeleteMsg
 	for _, msg := range execCmds(cmd) {
 		if dm, ok := msg.(plDeleteMsg); ok {
@@ -187,8 +187,8 @@ func TestPlaylistSetListsKeepsSelection(t *testing.T) {
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 B
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 选中 B
 	if it, ok := m.plPage.overview.SelectedItem().(overviewItem); !ok || it.list.Name != "B" {
 		t.Fatalf("选中 = %+v, want B", it)
 	}
@@ -218,8 +218,8 @@ func TestPlaylistDetailRemoveAndAppend(t *testing.T) {
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 进入详情
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 进入详情
 	if m.plPage.mode != plDetail {
 		t.Fatalf("mode = %v, want plDetail", m.plPage.mode)
 	}
@@ -228,11 +228,11 @@ func TestPlaylistDetailRemoveAndAppend(t *testing.T) {
 	}
 
 	// a 弹选择器 → Enter 默认项"下一首播放"（插入 t1；空队列无当前曲 → 队首）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker == nil {
 		t.Fatal("按 a 应打开选择器")
 	}
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var tin trackInsertNextMsg
 	for _, msg := range execCmds(cmd) {
 		if im, ok := msg.(trackInsertNextMsg); ok {
@@ -251,7 +251,7 @@ func TestPlaylistDetailRemoveAndAppend(t *testing.T) {
 	}
 
 	// d 移除选中歌曲（t1）
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "d", Code: 'd'})
 	var pr plRemoveTrackMsg
 	for _, msg := range execCmds(cmd) {
 		if rm, ok := msg.(plRemoveTrackMsg); ok {
@@ -287,10 +287,10 @@ func TestPlaylistDetailEnterPlaysList(t *testing.T) {
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 进入详情
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})  // 选中 t2（下标 1）
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 进入详情
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})  // 选中 t2（下标 1）
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var pl plLoadMsg
 	for _, msg := range execCmds(cmd) {
 		if lm, ok := msg.(plLoadMsg); ok {
@@ -321,24 +321,24 @@ func TestPlaylistDetailEnterPlaysList(t *testing.T) {
 // 命名输入聚焦时 a/p/空格 是输入字符（root 让位，同搜索输入框模式）。
 func TestNamingInputConsumesGlobalKeys(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}) // a 应输入而非打开选择器
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "n", Code: 'n'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'}) // a 应输入而非打开选择器
 	if m.plPicker != nil {
 		t.Fatal("命名输入聚焦时 a 不应打开选择器")
 	}
 	if got := m.plPage.input.Value(); got != "a" {
 		t.Errorf("input = %q, want %q", got, "a")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")}) // p 应输入而非播放
+	m, _ = update(m, tea.KeyPressMsg{Text: "p", Code: 'p'}) // p 应输入而非播放
 	if got := m.plPage.input.Value(); got != "ap" {
 		t.Errorf("input = %q, want %q", got, "ap")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace}) // 空格应输入而非切换播放
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeySpace}) // 空格应输入而非切换播放
 	if got := m.plPage.input.Value(); got != "ap " {
 		t.Errorf("input = %q, want %q", got, "ap ")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}) // q 应输入而非退出程序
+	m, _ = update(m, tea.KeyPressMsg{Text: "q", Code: 'q'}) // q 应输入而非退出程序
 	if got := m.plPage.input.Value(); got != "ap q" {
 		t.Errorf("input = %q, want %q", got, "ap q")
 	}
@@ -366,7 +366,7 @@ func TestPickTrackFromSearchAddsToPlaylist(t *testing.T) {
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker == nil {
 		t.Fatal("按 a 应打开选择器")
 	}
@@ -380,9 +380,9 @@ func TestPickTrackFromSearchAddsToPlaylist(t *testing.T) {
 	if _, ok := m.plPicker.list.SelectedItem().(pickerQueueNextItem); !ok {
 		t.Fatalf("默认选中项 = %+v, want pickerQueueNextItem", m.plPicker.list.SelectedItem())
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	// cmd 为 toast 消失定时器（成功提示走 toast 通道）：执行后仅产生过期消息
 	for _, msg := range execCmds(cmd) {
 		if _, ok := msg.(toastExpireMsg); !ok {
@@ -407,7 +407,7 @@ func TestPickTrackFromSearchAddsToPlaylist(t *testing.T) {
 		t.Errorf("picker 关闭后列表页未刷新, Title = %q", m.plPage.overview.Title)
 	}
 	// View 渲染绿色成功横幅
-	if !strings.Contains(m.View(), lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("✔ 已添加到「收藏」")) {
+	if !strings.Contains(m.View().Content, lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render("✔ 已添加到「收藏」")) {
 		t.Error("View 应渲染绿色成功横幅")
 	}
 }
@@ -427,7 +427,7 @@ func TestPickerOpenStillProcessesPlayerEvents(t *testing.T) {
 	}
 	// 搜索页流程选中歌曲按 p 打开选择器
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker == nil {
 		t.Fatal("按 a 应打开选择器")
 	}
@@ -449,19 +449,19 @@ func TestPickerCreateNewListFlow(t *testing.T) {
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1")}}
 	m := newTestModel(t, newFakePlayer(), fa, nil)
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker == nil {
 		t.Fatal("按 a 应打开选择器")
 	}
 	// 无既有列表：首项"下一首播放" + "当前播放队列" + 末尾"＋ 新建列表"；下移 2 次选中新建项
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.plPicker == nil || !m.plPicker.naming {
 		t.Fatal("Enter 后应进入命名输入模式")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("新歌单")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "新歌单"})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.plPicker != nil {
 		t.Fatal("创建成功后选择器应关闭")
 	}
@@ -488,16 +488,16 @@ func TestPickerCreateDuplicateShowsError(t *testing.T) {
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 下一首播放 → 当前播放队列
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 当前播放队列 → 收藏
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 收藏 → "＋ 新建列表"
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 下一首播放 → 当前播放队列
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 当前播放队列 → 收藏
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 收藏 → "＋ 新建列表"
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.plPicker == nil || !m.plPicker.naming {
 		t.Fatal("应进入命名输入模式")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("收藏")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "收藏"})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.plPicker == nil || !m.plPicker.naming {
 		t.Fatal("创建失败后选择器应保持命名输入")
 	}
@@ -522,26 +522,26 @@ func TestPickerEscCancels(t *testing.T) {
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker == nil {
 		t.Fatal("按 a 应打开选择器")
 	}
 	// 下移到"＋ 新建列表"（跳过"下一首播放"、"当前播放队列"与"收藏"）→ Enter 进入命名输入
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.plPicker == nil || !m.plPicker.naming {
 		t.Fatal("应进入命名输入模式")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("废名")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "废名"})
 	// 命名输入内 Esc：回到选择态（选择器不关闭）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.plPicker == nil || m.plPicker.naming {
 		t.Fatal("命名输入 Esc 应返回选择态")
 	}
 	// 选择态 Esc：关闭选择器
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.plPicker != nil {
 		t.Fatal("Esc 应关闭选择器")
 	}
@@ -559,7 +559,7 @@ func TestPickerEscCancels(t *testing.T) {
 // 首页无选中歌曲：按 a 提示错误，不打开选择器；按 p 静默无操作（delegate 到首页）。
 func TestAToastWhenNoSelection(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker != nil {
 		t.Error("无选中歌曲不应打开选择器")
 	}
@@ -571,7 +571,7 @@ func TestAToastWhenNoSelection(t *testing.T) {
 	}
 	// p 无选中时静默：不弹选择器、不产生 cmd、不改 toast
 	before := m.toast
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, cmd := update(m, tea.KeyPressMsg{Text: "p", Code: 'p'})
 	if m.plPicker != nil {
 		t.Error("p 不应打开选择器")
 	}
@@ -586,15 +586,15 @@ func TestAToastWhenNoSelection(t *testing.T) {
 // 搜索输入框聚焦时 a/p 是输入字符（不打开选择器/不触发播放）。
 func TestPickKeyTypesWhenSearchInputFocused(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("aaa")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "4", Code: '4'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "aaa"})
 	if m.plPicker != nil {
 		t.Error("输入框聚焦时 a 不应打开选择器")
 	}
 	if got := m.searchPage.input.Value(); got != "aaa" {
 		t.Errorf("input = %q, want aaa", got)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "p", Code: 'p'})
 	if got := m.searchPage.input.Value(); got != "aaap" {
 		t.Errorf("input = %q, want aaap", got)
 	}
@@ -616,14 +616,14 @@ func TestPickTrackFromHistory(t *testing.T) {
 	}
 	m = m.refreshHistory()
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 历史页
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "5", Code: '5'}) // 历史页
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker == nil {
 		t.Fatal("历史页选中记录按 a 应打开选择器")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 下一首播放 → 当前播放队列
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 当前播放队列 → "收藏"
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 下一首播放 → 当前播放队列
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 当前播放队列 → "收藏"
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.plPicker != nil {
 		t.Fatal("Enter 后选择器应关闭")
 	}
@@ -645,7 +645,7 @@ func TestPickerQueueItemAppendsToQueue(t *testing.T) {
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker == nil {
 		t.Fatal("按 a 应打开选择器")
 	}
@@ -661,7 +661,7 @@ func TestPickerQueueItemAppendsToQueue(t *testing.T) {
 		t.Errorf("下一首项 Description = %q, want 插入到当前曲之后", it0.Description())
 	}
 	// 第二项"当前播放队列"（追加到队尾）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	it, ok := m.plPicker.list.SelectedItem().(pickerQueueItem)
 	if !ok {
 		t.Fatalf("Down 后选中项 = %+v, want pickerQueueItem", m.plPicker.list.SelectedItem())
@@ -673,7 +673,7 @@ func TestPickerQueueItemAppendsToQueue(t *testing.T) {
 		t.Errorf("队列项 Description = %q, want 追加到队尾", it.Description())
 	}
 
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var ta trackAppendMsg
 	for _, msg := range execCmds(cmd) {
 		if am, ok := msg.(trackAppendMsg); ok {
@@ -708,8 +708,8 @@ func TestPPlaysSelectedInSearch(t *testing.T) {
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1"), testTrack("t2")}}
 	m := newTestModel(t, fp, fa, nil)
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t2
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 选中 t2
+	m, cmd := update(m, tea.KeyPressMsg{Text: "p", Code: 'p'})
 	var sel trackSelectedMsg
 	for _, msg := range execCmds(cmd) {
 		if sm, ok := msg.(trackSelectedMsg); ok {
@@ -743,9 +743,9 @@ func TestPPlaysSelectedInHistory(t *testing.T) {
 	}
 	m = m.refreshHistory()
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 历史页
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})                      // 选中 t1（列表新项在前）
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "5", Code: '5'}) // 历史页
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})                      // 选中 t1（列表新项在前）
+	m, cmd := update(m, tea.KeyPressMsg{Text: "p", Code: 'p'})
 	var sel trackSelectedMsg
 	for _, msg := range execCmds(cmd) {
 		if sm, ok := msg.(trackSelectedMsg); ok {
@@ -781,10 +781,10 @@ func TestPPlaysPlaylistFromDetail(t *testing.T) {
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 进入详情
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})  // 选中 t2（下标 1）
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 进入详情
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})  // 选中 t2（下标 1）
+	m, cmd := update(m, tea.KeyPressMsg{Text: "p", Code: 'p'})
 	var pl plLoadMsg
 	for _, msg := range execCmds(cmd) {
 		if lm, ok := msg.(plLoadMsg); ok {
@@ -820,8 +820,8 @@ func TestPPlaysPlaylistFromOverview(t *testing.T) {
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, cmd := update(m, tea.KeyPressMsg{Text: "p", Code: 'p'})
 	var pl plLoadMsg
 	for _, msg := range execCmds(cmd) {
 		if lm, ok := msg.(plLoadMsg); ok {
@@ -855,10 +855,10 @@ func TestPPlaysSelectedInQueue(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t3（下标 2）
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 选中 t3（下标 2）
+	m, cmd = update(m, tea.KeyPressMsg{Text: "p", Code: 'p'})
 	var qp queuePlayMsg
 	for _, msg := range execCmds(cmd) {
 		if qm, ok := msg.(queuePlayMsg); ok {
@@ -895,7 +895,7 @@ func TestPlaylistsPageReceivesWindowSize(t *testing.T) {
 	fa := &fakeSearchAdapter{tracks: []model.Track{testTrack("t1")}}
 	m2 := newTestModel(t, newFakePlayer(), fa, nil)
 	m2 = searchAndPick(t, m2, fa)
-	m2, _ = update(m2, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m2, _ = update(m2, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	m2, _ = update(m2, tea.WindowSizeMsg{Width: 100, Height: 40})
 	if m2.plPicker.width != 100 || m2.plPicker.height != 36 {
 		t.Errorf("picker 尺寸 = %dx%d, want 100x36", m2.plPicker.width, m2.plPicker.height)
@@ -912,15 +912,15 @@ func TestToastNotClearedByKeyDispatch(t *testing.T) {
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 	m = searchAndPick(t, m, fa)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 下一首播放 → 当前播放队列
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 当前播放队列 → "收藏"
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 下一首播放 → 当前播放队列
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 当前播放队列 → "收藏"
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if activeToastText(m) == "" {
 		t.Fatal("前置失败: 应有成功 toast")
 	}
 	// 按键分发不再清除 toast（生命周期只由定时器管理）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	if activeToastText(m) == "" {
 		t.Error("按键分发不应清除 toast（生命周期只由定时器管理）")
 	}
@@ -940,7 +940,7 @@ func TestToastNotClearedByKeyDispatch(t *testing.T) {
 func TestYTStatusLineStates(t *testing.T) {
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m := env.m
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
 
 	// 未登录 + 空列表：状态区与空态提示同时显示
 	got := stripANSI(m.plPage.view())
@@ -979,8 +979,8 @@ func TestYTStatusLineStates(t *testing.T) {
 // s 登录设置：主菜单四项 → 浏览器二级列表 → Esc 逐层返回概览。
 func TestYTSyncSetupBrowserFlow(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
 	if m.plPage.mode != plSyncSetup || m.plPage.setupSub != setupMain {
 		t.Fatalf("s 后 mode=%v sub=%v, want plSyncSetup/setupMain", m.plPage.mode, m.plPage.setupSub)
 	}
@@ -992,7 +992,7 @@ func TestYTSyncSetupBrowserFlow(t *testing.T) {
 	}
 
 	// Enter 浏览器读取 → 二级浏览器列表
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.plPage.setupSub != setupBrowser {
 		t.Fatalf("Enter 后 sub=%v, want setupBrowser", m.plPage.setupSub)
 	}
@@ -1002,11 +1002,11 @@ func TestYTSyncSetupBrowserFlow(t *testing.T) {
 	}
 
 	// Esc → 主菜单；再 Esc → 概览
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.plPage.setupSub != setupMain {
 		t.Fatalf("Esc 后 sub=%v, want setupMain", m.plPage.setupSub)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.plPage.mode != plOverview {
 		t.Fatalf("Esc 后 mode=%v, want plOverview", m.plPage.mode)
 	}
@@ -1017,13 +1017,13 @@ func TestYTSyncSetupBrowserFlow(t *testing.T) {
 func TestYTBrowserLoginEmitsAndSaves(t *testing.T) {
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m := env.m
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 浏览器读取
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 浏览器读取
 	if m.plPage.setupSub != setupBrowser {
 		t.Fatal("应进入浏览器二级列表")
 	}
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 默认选中 Google Chrome
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 默认选中 Google Chrome
 	var lg ytLoginMsg
 	for _, msg := range execCmds(cmd) {
 		if lm, ok := msg.(ytLoginMsg); ok {
@@ -1060,18 +1060,18 @@ func TestYTCookiesFileLoginFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := env.m
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 浏览器读取 → cookies.txt 文件路径
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 浏览器读取 → cookies.txt 文件路径
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.plPage.setupSub != setupCookiesInput || !m.plPage.typing() {
 		t.Fatalf("应进入 cookies 路径输入: sub=%v typing=%v", m.plPage.setupSub, m.plPage.typing())
 	}
-	if !strings.Contains(stripANSI(m.plPage.view()), "输入 cookies.txt 完整路径") {
-		t.Error("输入框占位应为 cookies.txt 路径提示")
+	if m.plPage.input.Placeholder != "输入 cookies.txt 完整路径" && !strings.Contains(stripANSI(m.plPage.view()), "输入 cookies.txt 完整路径") {
+		t.Errorf("输入框占位应为 cookies.txt 路径提示, got placeholder=%q view=%q", m.plPage.input.Placeholder, stripANSI(m.plPage.view()))
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(cookiesFile)})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: cookiesFile})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var lf ytLoginFileMsg
 	for _, msg := range execCmds(cmd) {
 		if lm, ok := msg.(ytLoginFileMsg); ok {
@@ -1107,12 +1107,12 @@ func TestYTCookiesFileLoginFlow(t *testing.T) {
 // cookies.txt 路径不可读：root 直接报错，不保存配置。
 func TestYTCookiesFileUnreadable(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/nonexistent/cookies.txt")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/nonexistent/cookies.txt"})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var lf ytLoginFileMsg
 	for _, msg := range execCmds(cmd) {
 		if lm, ok := msg.(ytLoginFileMsg); ok {
@@ -1137,19 +1137,19 @@ func TestYTPasteLoginFlow(t *testing.T) {
 	defer func() { toastSuccessDuration = 3 * time.Second }()
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m := env.m
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // → 粘贴 Cookie 字符串
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // → 粘贴 Cookie 字符串
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.plPage.setupSub != setupPasteInput || !m.plPage.typing() {
 		t.Fatalf("应进入粘贴输入: sub=%v typing=%v", m.plPage.setupSub, m.plPage.typing())
 	}
 	if !strings.Contains(stripANSI(m.plPage.view()), "粘贴 Cookie 字符串") {
 		t.Error("输入框占位应为粘贴提示")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("SAPISID=abc; __Secure-3PAPISID=xyz")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "SAPISID=abc; __Secure-3PAPISID=xyz"})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var lp ytLoginPasteMsg
 	for _, msg := range execCmds(cmd) {
 		if pm, ok := msg.(ytLoginPasteMsg); ok {
@@ -1203,14 +1203,14 @@ func TestYTPasteLoginVerifyFailures(t *testing.T) {
 			env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 			env.client.SetHTTPClient(&http.Client{Transport: tc.rt})
 			m := env.m
-			m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-			m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+			m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+			m, _ = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
 			for i := 0; i < 2; i++ {
-				m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+				m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
 			}
-			m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
-			m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("SAPISID=bad")})
-			m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+			m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			m, _ = update(m, tea.KeyPressMsg{Text: "SAPISID=bad"})
+			m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 			var lp ytLoginPasteMsg
 			for _, msg := range execCmds(cmd) {
 				if pm, ok := msg.(ytLoginPasteMsg); ok {
@@ -1244,14 +1244,14 @@ func TestYTVerifyFailureDegradesStatus(t *testing.T) {
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	env.client.SetHTTPClient(&http.Client{Transport: ytRoundTripper{code: 403, body: ""}})
 	m := env.m
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
 	for i := 0; i < 2; i++ {
-		m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+		m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("SAPISID=bad")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "SAPISID=bad"})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var lp ytLoginPasteMsg
 	for _, msg := range execCmds(cmd) {
 		if pm, ok := msg.(ytLoginPasteMsg); ok {
@@ -1270,21 +1270,21 @@ func TestYTVerifyFailureDegradesStatus(t *testing.T) {
 		t.Errorf("状态区应显示已登录（验证失败）: %q", got)
 	}
 	// 设置页当前状态行一致降级
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
 	if got := stripANSI(m.plPage.view()); !strings.Contains(got, "当前状态：已登录（验证失败）") {
 		t.Errorf("设置页应显示已登录（验证失败）: %q", got)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 
 	// 重新登录（成功验证）→ 恢复已登录（用粘贴方式：不触碰真实浏览器配置）
 	env.client.SetHTTPClient(&http.Client{Transport: ytRoundTripper{code: 200, body: ytBrowseOK}})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
 	for i := 0; i < 2; i++ {
-		m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+		m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("SAPISID=good")})
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "SAPISID=good"})
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var lp2 ytLoginPasteMsg
 	for _, msg := range execCmds(cmd) {
 		if pm, ok := msg.(ytLoginPasteMsg); ok {
@@ -1310,7 +1310,7 @@ func TestYTInitialUnverifiedShowsLoggedIn(t *testing.T) {
 	}
 	env.refreshYTStatus()
 	m := env.m
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
 	got := stripANSI(m.plPage.view())
 	if !strings.Contains(got, "YT Music · 已登录") || strings.Contains(got, "验证失败") {
 		t.Errorf("初始未验证应显示已登录: %q", got)
@@ -1338,16 +1338,16 @@ func TestYTVerifyErrorText(t *testing.T) {
 // 设置输入子层 Esc：返回主菜单而非直接退出设置。
 func TestYTSetupInputEscBackToMenu(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // cookies.txt
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("随便")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // cookies.txt
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "随便"})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.plPage.setupSub != setupMain || m.plPage.typing() {
 		t.Fatalf("Esc 后应回主菜单且输入失焦: sub=%v typing=%v", m.plPage.setupSub, m.plPage.typing())
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.plPage.mode != plOverview {
 		t.Fatalf("主菜单 Esc 后应回概览: mode=%v", m.plPage.mode)
 	}
@@ -1361,12 +1361,12 @@ func TestYTLogoutFlow(t *testing.T) {
 	}
 	env.refreshYTStatus()
 	m := env.m
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
 	for i := 0; i < 3; i++ {
-		m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+		m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 退出登录
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 退出登录
 	var lo ytLogoutMsg
 	for _, msg := range execCmds(cmd) {
 		if om, ok := msg.(ytLogoutMsg); ok {
@@ -1398,16 +1398,16 @@ func TestYTURLImportSuccess(t *testing.T) {
 		Tracks: []model.Track{testTrack("v1"), testTrack("v2")},
 	}
 	m := env.m
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "u", Code: 'u'})
 	if m.plPage.mode != plURLImport || !m.plPage.typing() {
 		t.Fatalf("u 后应进入 URL 导入: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
 	}
-	if !strings.Contains(stripANSI(m.plPage.view()), "粘贴 YouTube Music 歌单链接，Enter 导入") {
-		t.Error("URL 导入占位缺失")
+	if m.plPage.input.Placeholder != "粘贴 YouTube Music 歌单链接，Enter 导入" && !strings.Contains(stripANSI(m.plPage.view()), "粘贴 YouTube Music 歌单链接，Enter 导入") {
+		t.Errorf("URL 导入占位缺失, got placeholder=%q", m.plPage.input.Placeholder)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(url)})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: url})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var im ytImportMsg
 	for _, msg := range execCmds(cmd) {
 		if imsg, ok := msg.(ytImportMsg); ok {
@@ -1456,9 +1456,9 @@ func TestYTURLImportSuccess(t *testing.T) {
 // u URL 导入：空输入 Enter 忽略（不产生消息、不退出输入）。
 func TestYTURLImportEmptyIgnored(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "u", Code: 'u'})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		t.Errorf("空 URL Enter 不应产生消息: %v", cmd)
 	}
@@ -1472,10 +1472,10 @@ func TestYTURLImportFailure(t *testing.T) {
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	env.fetcher.err = errors.New("yt-dlp 拉取失败")
 	m := env.m
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(ytTrackURL("PLIMP"))})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "u", Code: 'u'})
+	m, _ = update(m, tea.KeyPressMsg{Text: ytTrackURL("PLIMP")})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var im ytImportMsg
 	for _, msg := range execCmds(cmd) {
 		if imsg, ok := msg.(ytImportMsg); ok {
@@ -1508,21 +1508,21 @@ func TestYTURLImportFailure(t *testing.T) {
 func TestPlaylistLocalAddFlow(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "l", Code: 'l'})
 	if m.plPage.mode != plLocalAdd || !m.plPage.typing() {
 		t.Fatalf("l 后应进入本地路径输入: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
 	}
 	got := stripANSI(m.plPage.view())
-	if !strings.Contains(got, "输入本地音乐目录路径，Enter 扫描") {
-		t.Error("本地路径输入占位缺失")
+	if m.plPage.input.Placeholder != "输入本地音乐目录路径，Enter 扫描" && !strings.Contains(got, "输入本地音乐目录路径，Enter 扫描") {
+		t.Errorf("本地路径输入占位缺失, placeholder=%q", m.plPage.input.Placeholder)
 	}
 	if !strings.Contains(got, "Enter 扫描 · Esc 返回") {
 		t.Error("本地路径输入提示行缺失")
 	}
 	dir := t.TempDir()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(dir)})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: dir})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var lm plLocalAddMsg
 	for _, msg := range execCmds(cmd) {
 		if imsg, ok := msg.(plLocalAddMsg); ok {
@@ -1543,10 +1543,10 @@ func TestPlaylistLocalAddFlow(t *testing.T) {
 // l 本地路径导入：空输入 Enter 忽略（不产生消息、不退出输入）。
 func TestPlaylistLocalAddEmptyIgnored(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("   ")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "l", Code: 'l'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "   "})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		t.Errorf("空路径 Enter 不应产生消息: %v", cmd)
 	}
@@ -1558,10 +1558,10 @@ func TestPlaylistLocalAddEmptyIgnored(t *testing.T) {
 // l 本地路径导入：Esc 取消回概览。
 func TestPlaylistLocalAddEscCancels(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/tmp/x")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "l", Code: 'l'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/tmp/x"})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.plPage.mode != plOverview || m.plPage.typing() {
 		t.Fatalf("Esc 后应回概览: mode=%v typing=%v", m.plPage.mode, m.plPage.typing())
 	}
@@ -1570,14 +1570,14 @@ func TestPlaylistLocalAddEscCancels(t *testing.T) {
 // 本地路径输入聚焦时 a/空格/q 是输入字符（root 让位，同 URL 导入/命名输入）。
 func TestPlaylistLocalAddConsumesGlobalKeys(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "l", Code: 'l'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker != nil {
 		t.Fatal("本地路径输入聚焦时 a 不应打开选择器")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
+	m, _ = update(m, tea.KeyPressMsg{Text: "q", Code: 'q'})
 	if got := m.plPage.input.Value(); got != "a q" {
 		t.Errorf("input = %q, want %q", got, "a q")
 	}
@@ -1602,8 +1602,8 @@ func TestYTSyncAllFlow(t *testing.T) {
 		Tracks: []model.Track{testTrack("v3"), testTrack("v4")},
 	}
 	m := env.m
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, cmd := update(m, tea.KeyPressMsg{Text: "y", Code: 'y'})
 	var sa ytSyncAllMsg
 	for _, msg := range execCmds(cmd) {
 		if am, ok := msg.(ytSyncAllMsg); ok {
@@ -1619,7 +1619,7 @@ func TestYTSyncAllFlow(t *testing.T) {
 	}
 
 	// 同步中重复按 y：emit 的消息回灌后被 root 忽略（不产生新同步 cmd）
-	m2, dup := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m2, dup := update(m, tea.KeyPressMsg{Text: "y", Code: 'y'})
 	var sa2 ytSyncAllMsg
 	for _, msg := range execCmds(dup) {
 		if am, ok := msg.(ytSyncAllMsg); ok {
@@ -1670,8 +1670,8 @@ func TestYTSyncAllFlow(t *testing.T) {
 func TestYTSyncAllNotLoggedIn(t *testing.T) {
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m := env.m
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, cmd := update(m, tea.KeyPressMsg{Text: "y", Code: 'y'})
 	var sa ytSyncAllMsg
 	for _, msg := range execCmds(cmd) {
 		if am, ok := msg.(ytSyncAllMsg); ok {
@@ -1824,15 +1824,15 @@ func TestYTRefreshSyncList(t *testing.T) {
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 	m.plPage = m.plPage.setYTSyncs(env.store.SyncEntries())
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 进入详情
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 进入详情
 	if !m.plPage.ytSyncNames["YT: 我的最爱"] {
 		t.Fatal("同步列表应标记在页面")
 	}
 	if !strings.Contains(stripANSI(m.plPage.view()), "r 刷新") {
 		t.Error("同步列表详情应提示 r 刷新")
 	}
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m, cmd := update(m, tea.KeyPressMsg{Text: "r", Code: 'r'})
 	var rm ytRefreshMsg
 	for _, msg := range execCmds(cmd) {
 		if rmsg, ok := msg.(ytRefreshMsg); ok {
@@ -1873,9 +1873,9 @@ func TestYTRefreshNonSyncList(t *testing.T) {
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 进入详情
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 进入详情
+	m, cmd := update(m, tea.KeyPressMsg{Text: "r", Code: 'r'})
 	var rm ytRefreshMsg
 	for _, msg := range execCmds(cmd) {
 		if rmsg, ok := msg.(ytRefreshMsg); ok {
@@ -1900,13 +1900,13 @@ func TestYTSyncKeysScopedToMode(t *testing.T) {
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 详情
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 详情
 	if m.plPage.mode != plDetail {
 		t.Fatal("应进入详情")
 	}
 	for _, k := range []rune{'s', 'y', 'u'} {
-		m2, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{k}})
+		m2, cmd := update(m, tea.KeyPressMsg{Text: string(k), Code: k})
 		if cmd != nil {
 			t.Errorf("详情模式 %c 不应产生 cmd: %v", k, cmd)
 		}
@@ -1915,8 +1915,8 @@ func TestYTSyncKeysScopedToMode(t *testing.T) {
 		}
 	}
 	// 概览模式 r：重命名（原有语义，非刷新）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc}) // 回概览
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc}) // 回概览
+	m, cmd := update(m, tea.KeyPressMsg{Text: "r", Code: 'r'})
 	if m.plPage.mode != plNaming {
 		t.Errorf("概览 r 应仍为重命名: mode=%v", m.plPage.mode)
 	}
@@ -1935,7 +1935,7 @@ func TestPlaylistsHintOnLastLine(t *testing.T) {
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m := env.m
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
 
 	// 概览（1 个列表）
 	if _, err := m.pl.Create("收藏"); err != nil {
@@ -1964,8 +1964,8 @@ func TestPlaylistsHintOnLastLine(t *testing.T) {
 func TestPlaylistsHintOnLastLineBrowserSub(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
 	m.plPage = m.plPage.enterSetupBrowser()
 	assertHintOnLastLine(t, m, "↑↓ 选择 · Enter 确认")
 }
@@ -1974,7 +1974,7 @@ func TestPlaylistsHintOnLastLineBrowserSub(t *testing.T) {
 func TestPlaylistsHintOnLastLineManyLists(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
 	for i := 0; i < 9; i++ {
 		if _, err := m.pl.Create(fmt.Sprintf("列表%d", i)); err != nil {
 			t.Fatal(err)
@@ -1989,7 +1989,7 @@ func TestPlaylistsEmptyHintOnLastLine(t *testing.T) {
 	env := newYTTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m := env.m
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
 
 	// 概览空态（无列表）
 	assertHintOnLastLine(t, m, "Enter 查看")
@@ -2001,14 +2001,14 @@ func TestPlaylistsEmptyHintOnLastLine(t *testing.T) {
 
 func TestYTURLImportConsumesGlobalKeys(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "u", Code: 'u'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker != nil {
 		t.Fatal("URL 导入输入聚焦时 a 不应打开选择器")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
+	m, _ = update(m, tea.KeyPressMsg{Text: "q", Code: 'q'})
 	if got := m.plPage.input.Value(); got != "a q" {
 		t.Errorf("input = %q, want %q", got, "a q")
 	}
