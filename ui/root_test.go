@@ -15,11 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/muesli/termenv"
 
 	"music-tui/cache"
 	"music-tui/cover"
@@ -505,23 +503,23 @@ func TestTabSwitchesPages(t *testing.T) {
 	fa := &fakeSearchAdapter{}
 	m := newTestModel(t, fp, fa, nil)
 
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	m = runProgram(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
 	if m.current != pageQueue {
 		t.Errorf("Tab 后 current = %v, want pageQueue", m.current)
 	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m = runProgram(t, m, tea.KeyPressMsg{Text: "3", Code: '3'})
 	if m.current != pagePlaylists {
 		t.Errorf("按 3 后 current = %v, want pagePlaylists", m.current)
 	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	m = runProgram(t, m, tea.KeyPressMsg{Text: "4", Code: '4'})
 	if m.current != pageSearch {
 		t.Errorf("按 4 后 current = %v, want pageSearch", m.current)
 	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
+	m = runProgram(t, m, tea.KeyPressMsg{Text: "5", Code: '5'})
 	if m.current != pageHistory {
 		t.Errorf("按 5 后 current = %v, want pageHistory", m.current)
 	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	m = runProgram(t, m, tea.KeyPressMsg{Text: "1", Code: '1'})
 	if m.current != pageHome {
 		t.Errorf("按 1 后 current = %v, want pageHome", m.current)
 	}
@@ -535,10 +533,10 @@ func TestCtrlArrowGlobalPrevNext(t *testing.T) {
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // 首页 → 队列（非首页验证“全局”+“不切页”）
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyTab}) // 首页 → 队列（非首页验证“全局”+“不切页”）
 
 	// Ctrl+Right → nextTrackMsg，页面留在队列
-	got, cmd := update(m, tea.KeyMsg{Type: tea.KeyCtrlRight})
+	got, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModCtrl})
 	msgs := execCmds(cmd)
 	if len(msgs) != 1 {
 		t.Fatalf("Ctrl+Right 消息数 = %d, want 1", len(msgs))
@@ -551,7 +549,7 @@ func TestCtrlArrowGlobalPrevNext(t *testing.T) {
 	}
 
 	// Ctrl+Left → prevTrackMsg，页面留在队列
-	got, cmd = update(got, tea.KeyMsg{Type: tea.KeyCtrlLeft})
+	got, cmd = update(got, tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModCtrl})
 	msgs = execCmds(cmd)
 	if len(msgs) != 1 {
 		t.Fatalf("Ctrl+Left 消息数 = %d, want 1", len(msgs))
@@ -569,33 +567,33 @@ func TestShiftTabSwitchesPagesReverse(t *testing.T) {
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 
 	// Shift+Tab：反向循环 首页→历史→搜索→播放列表→队列→首页
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = runProgram(t, m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	if m.current != pageHistory {
 		t.Errorf("Shift+Tab 后 current = %v, want pageHistory", m.current)
 	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = runProgram(t, m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	if m.current != pageSearch {
 		t.Errorf("Shift+Tab 后 current = %v, want pageSearch", m.current)
 	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = runProgram(t, m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	if m.current != pagePlaylists {
 		t.Errorf("Shift+Tab 后 current = %v, want pagePlaylists", m.current)
 	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = runProgram(t, m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	if m.current != pageQueue {
 		t.Errorf("Shift+Tab 后 current = %v, want pageQueue", m.current)
 	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = runProgram(t, m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	if m.current != pageHome {
 		t.Errorf("Shift+Tab 循环后 current = %v, want pageHome", m.current)
 	}
 
 	// Tab 与 Shift+Tab 互逆：Tab 一步后 Shift+Tab 回到原页
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyTab}) // home → queue
+	m = runProgram(t, m, tea.KeyPressMsg{Code: tea.KeyTab}) // home → queue
 	if m.current != pageQueue {
 		t.Fatalf("Tab 后 current = %v, want pageQueue", m.current)
 	}
-	m = runProgram(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = runProgram(t, m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	if m.current != pageHome {
 		t.Errorf("Tab 后 Shift+Tab 应回到原页: current = %v, want pageHome", m.current)
 	}
@@ -609,13 +607,13 @@ func TestCtrlArrowGlobalPrevNextWhenSearchInputFocused(t *testing.T) {
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // → 队列
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // → 播放列表
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // → 搜索页，输入框聚焦
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyTab}) // → 队列
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyTab}) // → 播放列表
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyTab}) // → 搜索页，输入框聚焦
+	m, _ = update(m, tea.KeyPressMsg{Text: "晴天"})
 
 	// Ctrl+Left → prevTrackMsg；页面留在搜索页，输入框内容保留
-	got, cmd := update(m, tea.KeyMsg{Type: tea.KeyCtrlLeft})
+	got, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModCtrl})
 	msgs := execCmds(cmd)
 	if len(msgs) != 1 {
 		t.Fatalf("Ctrl+Left 消息数 = %d, want 1", len(msgs))
@@ -631,7 +629,7 @@ func TestCtrlArrowGlobalPrevNextWhenSearchInputFocused(t *testing.T) {
 	}
 
 	// Ctrl+Right → nextTrackMsg；页面仍在搜索页
-	got, cmd = update(got, tea.KeyMsg{Type: tea.KeyCtrlRight})
+	got, cmd = update(got, tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModCtrl})
 	msgs = execCmds(cmd)
 	if len(msgs) != 1 {
 		t.Fatalf("Ctrl+Right 消息数 = %d, want 1", len(msgs))
@@ -651,12 +649,12 @@ func TestSpaceTogglesPlayback(t *testing.T) {
 	m.state = model.PlaybackState{Track: &tr, Playing: true}
 	m.home = m.home.syncState(m.state)
 
-	runProgram(t, m, tea.KeyMsg{Type: tea.KeySpace})
+	runProgram(t, m, tea.KeyPressMsg{Code: tea.KeySpace})
 	waitFor(t, 2*time.Second, func() bool { return fp.pauseCount() == 1 })
 
 	m.state.Playing = false
 	m.home = m.home.syncState(m.state)
-	runProgram(t, m, tea.KeyMsg{Type: tea.KeySpace})
+	runProgram(t, m, tea.KeyPressMsg{Code: tea.KeySpace})
 	waitFor(t, 2*time.Second, func() bool { return fp.resumeCount() == 1 })
 }
 
@@ -664,12 +662,12 @@ func TestSpaceTypesWhenSearchInputFocused(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m = runProgram(t, m,
-		tea.KeyMsg{Type: tea.KeyTab},
-		tea.KeyMsg{Type: tea.KeyTab},
-		tea.KeyMsg{Type: tea.KeyTab}, // 切到搜索页，输入框聚焦
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")},
-		tea.KeyMsg{Type: tea.KeySpace},
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("杰倫")},
+		tea.KeyPressMsg{Code: tea.KeyTab},
+		tea.KeyPressMsg{Code: tea.KeyTab},
+		tea.KeyPressMsg{Code: tea.KeyTab}, // 切到搜索页，输入框聚焦
+		tea.KeyPressMsg{Text: "晴天"},
+		tea.KeyPressMsg{Code: tea.KeySpace},
+		tea.KeyPressMsg{Text: "杰倫"},
 	)
 	if got := m.searchPage.input.Value(); got != "晴天 杰倫" {
 		t.Errorf("input = %q, want %q", got, "晴天 杰倫")
@@ -690,7 +688,7 @@ func TestQuitOnQ(t *testing.T) {
 			t.Errorf("run: %v", err)
 		}
 	}()
-	p.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	p.Send(tea.KeyPressMsg{Text: "q", Code: 'q'})
 	select {
 	case <-done:
 		// 按 q 后程序正常退出
@@ -707,12 +705,12 @@ func TestPlayFlow(t *testing.T) {
 	m := newTestModel(t, fp, fa, nil)
 
 	// 搜索页输入关键词并 Enter
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 数字键直达搜索页
+	m, _ = update(m, tea.KeyPressMsg{Text: "4", Code: '4'}) // 数字键直达搜索页
 	if m.current != pageSearch {
 		t.Fatal("按 4 后应在搜索页")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "晴天"})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.searchPage.state != searchLoading {
 		t.Fatalf("state = %v, want searchLoading", m.searchPage.state)
 	}
@@ -729,7 +727,7 @@ func TestPlayFlow(t *testing.T) {
 	}
 
 	// Enter 播放第一项
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	msgs = execCmds(cmd)
 	var sel trackSelectedMsg
 	for _, msg := range msgs {
@@ -954,7 +952,7 @@ func TestPlayFailureShowsError(t *testing.T) {
 		t.Errorf("home.view 应显示未在播放，got %q", got)
 	}
 	// 失败后空格应被忽略（无 Track 可重播，也不走暂停/继续）
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
 	if cmd != nil || fp.playCount() != 0 {
 		t.Error("播放失败后空格应被忽略且不触发任何播放操作")
 	}
@@ -1004,7 +1002,7 @@ func TestErrorEventSetsEndedAndSpaceReplays(t *testing.T) {
 	}
 
 	// 出错后空格 = 重播同曲（而非 Resume）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
 	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t1").URL {
 		t.Errorf("空格应重播同曲: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
 	}
@@ -1036,7 +1034,7 @@ func TestSpaceAfterTrackEndedReplaysSameTrack(t *testing.T) {
 	}
 
 	// 结束态空格 → 重播同曲（Track 仍在，走 startPlay 而非 Resume）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
 	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t1").URL {
 		t.Errorf("空格应重播同曲: playCount=%d lastPlayed=%q", fp.playCount(), fp.lastPlayed())
 	}
@@ -1127,13 +1125,13 @@ func TestPrevNextKeysHomeOnly(t *testing.T) {
 	_ = execCmds(cmd)
 
 	// 切到队列页（非首页）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyTab})
 	if m.current != pageQueue {
 		t.Fatalf("前置: current=%v, want pageQueue", m.current)
 	}
 
 	for _, k := range []string{",", ".", "，", "。"} {
-		got, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+		got, cmd := update(m, tea.KeyPressMsg{Text: k})
 		msgs := execCmds(cmd)
 		if len(msgs) != 0 {
 			t.Errorf("%q 在非首页不应产生命令消息: %v", k, msgs)
@@ -1301,23 +1299,23 @@ func TestTabWrapsAround(t *testing.T) {
 	if m.current != pageHome {
 		t.Fatalf("初始 current = %v, want pageHome", m.current)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // home → queue
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyTab}) // home → queue
 	if m.current != pageQueue {
 		t.Fatalf("current = %v, want pageQueue", m.current)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // queue → playlists
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyTab}) // queue → playlists
 	if m.current != pagePlaylists {
 		t.Fatalf("current = %v, want pagePlaylists", m.current)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // playlists → search
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyTab}) // playlists → search
 	if m.current != pageSearch {
 		t.Fatalf("current = %v, want pageSearch", m.current)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // search → history
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyTab}) // search → history
 	if m.current != pageHistory {
 		t.Fatalf("current = %v, want pageHistory", m.current)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab}) // history → home（循环 wrap）
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyTab}) // history → home（循环 wrap）
 	if m.current != pageHome {
 		t.Errorf("tab 循环后 current = %v, want pageHome", m.current)
 	}
@@ -1781,7 +1779,7 @@ func TestRestartAfterLoadFailExhaustedKeepsQueue(t *testing.T) {
 	beforePlays := fp.playCount()
 
 	// 用户"再次播放"（空格）：重播当前曲，队列必须保持 2 首、指针不动
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
 	if m.queue.Len() != 2 {
 		t.Errorf("失败后重播清空了队列: Len=%d, want 2（重播不得改动队列）", m.queue.Len())
 	}
@@ -1829,11 +1827,11 @@ func TestPlayAfterFailQueueEnterAudible(t *testing.T) {
 	// Enter 发出 queuePlayMsg（root 收到后走 JumpTo→playQueueTrack→beginPlay）。
 	enterQueueTrack := func(m Model, listIndex int) (Model, queuePlayMsg) {
 		t.Helper()
-		m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 队列页
+		m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'}) // 队列页
 		for i := 0; i < listIndex; i++ {
-			m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+			m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
 		}
-		m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+		m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 		var play queuePlayMsg
 		found := false
 		for _, msg := range execCmds(cmd) {
@@ -2131,7 +2129,7 @@ func TestRootViewToastLayoutStable(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	plain := m.View()
+	plain := m.View().Content
 	if got := len(strings.Split(plain, "\n")); got != 24 {
 		t.Fatalf("空态无 toast View 行数 = %d, want 24", got)
 	}
@@ -2140,7 +2138,7 @@ func TestRootViewToastLayoutStable(t *testing.T) {
 	}
 
 	m, _ = m.showToast("恢复播放失败: 测试错误", toastError)
-	withToast := m.View()
+	withToast := m.View().Content
 	if got := len(strings.Split(withToast, "\n")); got != 24 {
 		t.Errorf("有 toast 时 View 行数 = %d, want 24", got)
 	}
@@ -2165,7 +2163,7 @@ func TestRootViewToastLayoutStable(t *testing.T) {
 	}
 	// 过期消息命中后 toast 消失，View 与无 toast 时完全一致（状态栏行恢复）
 	m, _ = update(m, toastExpireMsg{id: m.toast.id})
-	if got := m.View(); got != plain {
+	if got := m.View().Content; got != plain {
 		t.Errorf("toast 过期后 View 应与无 toast 时完全一致:\n无 toast: %q\n过期后: %q", plain, got)
 	}
 
@@ -2176,15 +2174,15 @@ func TestRootViewToastLayoutStable(t *testing.T) {
 	_ = execCmds(cmd)
 	m2, _ = update(m2, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m2 = m2.switchPage("2") // 队列页，状态栏有内容
-	if got := len(strings.Split(m2.View(), "\n")); got != 24 {
+	if got := len(strings.Split(m2.View().Content, "\n")); got != 24 {
 		t.Errorf("播放态 View 行数 = %d, want 24", got)
 	}
-	before := m2.View()
+	before := m2.View().Content
 	if bar := strings.Split(before, "\n")[23]; !strings.Contains(bar, "顺序") {
 		t.Fatalf("队列页状态栏应含 顺序（覆盖基准）, got %q", bar)
 	}
 	m2, _ = m2.showToast("播放失败: 测试错误", toastError)
-	l2 := strings.Split(m2.View(), "\n")
+	l2 := strings.Split(m2.View().Content, "\n")
 	if !strings.Contains(l2[23], "播放失败") {
 		t.Errorf("播放态 toast 应覆盖在最后一行（状态栏行）, got %q", l2[23])
 	}
@@ -2193,7 +2191,7 @@ func TestRootViewToastLayoutStable(t *testing.T) {
 	}
 	// 过期恢复：toast 消失后状态栏内容恢复，View 与无 toast 时完全一致
 	m2, _ = update(m2, toastExpireMsg{id: m2.toast.id})
-	if got := m2.View(); got != before {
+	if got := m2.View().Content; got != before {
 		t.Errorf("toast 过期后播放态 View 应恢复与无 toast 时一致:\n无 toast: %q\n过期后: %q", before, got)
 	}
 }
@@ -2207,7 +2205,7 @@ func TestRootViewWideToastStaysWithinWidth(t *testing.T) {
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	long := "「这是一首名字特别特别特别特别特别特别特别特别特别特别长的歌」播放失败：YouTube 拒绝访问（风控/限流），可稍后重试，已重试 2 次，跳过继续播放"
 	m, _ = m.showToast(long, toastWarning)
-	out := m.View()
+	out := m.View().Content
 	if got := len(strings.Split(out, "\n")); got != 24 {
 		t.Fatalf("超宽 toast View 行数 = %d, want 24（不超屏）", got)
 	}
@@ -2230,7 +2228,7 @@ func TestStatusBarEmptyStateOtherPage(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 40, Height: 24})
 	m = m.switchPage("2") // 队列页
-	lines := strings.Split(m.View(), "\n")
+	lines := strings.Split(m.View().Content, "\n")
 	bar := lines[len(lines)-1]
 	if !strings.Contains(bar, "未在播放") {
 		t.Errorf("非首页空态状态栏应显示 未在播放, got %q", bar)
@@ -2252,7 +2250,7 @@ func TestStatusBarLayout(t *testing.T) {
 	m, _ = update(m, tea.WindowSizeMsg{Width: 40, Height: 24})
 
 	// 首页：状态栏行留空（布局行恒在）
-	homeLines := strings.Split(m.View(), "\n")
+	homeLines := strings.Split(m.View().Content, "\n")
 	if got := len(homeLines); got != 24 {
 		t.Fatalf("首页 View 行数 = %d, want 24", got)
 	}
@@ -2262,7 +2260,7 @@ func TestStatusBarLayout(t *testing.T) {
 
 	// 队列页：左 = 歌曲名（截断含 …），右 = 播放顺序（⏵ 顺序 · 1/1）
 	m = m.switchPage("2")
-	lines := strings.Split(m.View(), "\n")
+	lines := strings.Split(m.View().Content, "\n")
 	bar := lines[len(lines)-1]
 	if !strings.Contains(bar, "…") {
 		t.Errorf("队列页状态栏左侧名称应截断含省略号, got %q", bar)
@@ -2291,7 +2289,7 @@ func TestStatusBarPinnedToBottom(t *testing.T) {
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	// 切到搜索页空态（内容仅 4 行，远不满屏）
 	m = m.switchPage("4")
-	lines := strings.Split(m.View(), "\n")
+	lines := strings.Split(m.View().Content, "\n")
 	if got := len(lines); got != 24 {
 		t.Fatalf("搜索页空态 View 行数 = %d, want 24（body 填充到页面高度）", got)
 	}
@@ -2300,7 +2298,7 @@ func TestStatusBarPinnedToBottom(t *testing.T) {
 	}
 	// 队列页空态同样贴底
 	m = m.switchPage("2")
-	lines = strings.Split(m.View(), "\n")
+	lines = strings.Split(m.View().Content, "\n")
 	if got := len(lines); got != 24 {
 		t.Fatalf("队列页空态 View 行数 = %d, want 24", got)
 	}
@@ -2327,7 +2325,7 @@ func TestStatusBarNarrowWindowFits(t *testing.T) {
 		t.Errorf("极窄窗口(10)状态栏行宽 = %d, want ≤ 10", w)
 	}
 	// 经 View 渲染的末行也不得超出窗口宽度（折行残片会出现在末行）
-	lines := strings.Split(m.View(), "\n")
+	lines := strings.Split(m.View().Content, "\n")
 	if last := lines[len(lines)-1]; ansi.StringWidth(last) > 10 {
 		t.Errorf("View 末行行宽 = %d, want ≤ 10", ansi.StringWidth(last))
 	}
@@ -2344,7 +2342,7 @@ func TestStatusBarLyricCenter(t *testing.T) {
 	m = m.switchPage("2") // 队列页（首页状态栏留空）
 
 	// 无歌词：中间留空，左右仍在
-	bar := strings.Split(m.View(), "\n")
+	bar := strings.Split(m.View().Content, "\n")
 	last := bar[len(bar)-1]
 	if !strings.Contains(last, "t1") || !strings.Contains(last, "顺序") {
 		t.Errorf("无歌词时状态栏应含左名称右顺序, got %q", last)
@@ -2356,14 +2354,13 @@ func TestStatusBarLyricCenter(t *testing.T) {
 	}
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12}})
-	last = strings.Split(m.View(), "\n")[len(strings.Split(m.View(), "\n"))-1]
+	last = strings.Split(m.View().Content, "\n")[len(strings.Split(m.View().Content, "\n"))-1]
 	if !strings.Contains(last, "第一行歌词文本") {
 		t.Errorf("状态栏应显示当前歌词行, got %q", last)
 	}
 	// 高亮样式与首页歌词区一致：加粗 + 粉色 212。lipgloss 将 bold+颜色合并
 	// 渲染为单序列 \x1b[1;38;5;212m（实测输出），故按实际形式断言：
 	// SGR 参数 1（加粗）+ 256 色索引 212（粉色）。
-	lipgloss.SetColorProfile(termenv.TrueColor)
 	if !strings.Contains(last, "\x1b[1;") {
 		t.Errorf("状态栏歌词行应加粗高亮, got %q", last)
 	}
@@ -2398,7 +2395,7 @@ func TestStatusBarLyricCenter(t *testing.T) {
 	}
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly2})
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12}})
-	last = strings.Split(m.View(), "\n")[len(strings.Split(m.View(), "\n"))-1]
+	last = strings.Split(m.View().Content, "\n")[len(strings.Split(m.View().Content, "\n"))-1]
 	if !strings.Contains(stripAnsiForTest(last), "…") {
 		t.Errorf("超长歌词行应中间截断含省略号, got %q", last)
 	}
@@ -2595,21 +2592,21 @@ func TestStatusBarShowsAITitle(t *testing.T) {
 	m, cmd := m.startPlay(raw)
 	_ = execCmds(cmd)
 	// 首页状态栏留空（master 布局），切到队列页：状态栏左侧显示曲目标题
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyTab})
 	if m.current != pageQueue {
 		t.Fatalf("Tab 后 current = %v, want pageQueue", m.current)
 	}
 
-	if got := m.View(); !strings.Contains(got, "T1 - A") {
+	if got := m.View().Content; !strings.Contains(got, "T1 - A") {
 		t.Errorf("AI 到达前状态栏应显示原始标题, got %q", got)
 	}
 	ly, _ := lyrics.ParseLRC([]byte("[00:01.00]行\n"))
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly, title: "晴天", artist: "周杰伦"})
-	if got := m.View(); !strings.Contains(got, "晴天 - 周") {
+	if got := m.View().Content; !strings.Contains(got, "晴天 - 周") {
 		t.Errorf("状态栏应显示 AI 清洗标题, got %q", got)
 	}
-	if strings.Contains(m.View(), "T1 - A") {
-		t.Errorf("状态栏不应再显示原始标题: %q", m.View())
+	if strings.Contains(m.View().Content, "T1 - A") {
+		t.Errorf("状态栏不应再显示原始标题: %q", m.View().Content)
 	}
 }
 
@@ -2652,32 +2649,32 @@ func TestGlobalKeysYieldToFilter(t *testing.T) {
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m.queue.Add(testTrack("t1"))
 	m = m.syncQueueViews()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
 
 	// 空格 → 过滤词而非播放/暂停
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
 	if m.queuePage.filterInput.Value() != " " {
 		t.Errorf("空格应输入过滤词, got %q", m.queuePage.filterInput.Value())
 	}
 	// a → 过滤词而非选择器
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker != nil {
 		t.Fatal("过滤聚焦时 a 不应打开选择器")
 	}
 	// q → 过滤词而非退出
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m, cmd := update(m, tea.KeyPressMsg{Text: "q", Code: 'q'})
 	for _, msg := range execCmds(cmd) {
 		if _, ok := msg.(tea.QuitMsg); ok {
 			t.Fatal("过滤聚焦时 q 不应退出")
 		}
 	}
 	// 数字键仍切页（历史页），过滤态跨页保持
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "5", Code: '5'})
 	if m.current != pageHistory {
 		t.Fatalf("数字 5 应切到历史页, got %v", m.current)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
 	if !m.queuePage.filtering || !m.queuePage.filterInput.Focused() {
 		t.Fatal("返回队列页后过滤态应保持")
 	}
@@ -2689,10 +2686,10 @@ func TestQueueFilterHintOnLastLine(t *testing.T) {
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m.queue.Add(testTrack("t1"))
 	m = m.syncQueueViews()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
 	assertHintOnLastLine(t, m, "Enter 确认")
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 确认
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 确认
 	assertHintOnLastLine(t, m, "Esc 退出过滤")
 }
 
@@ -2705,17 +2702,17 @@ func TestGlobalKeysYieldToFilterHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	m = m.refreshHistory()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = update(m, tea.KeyPressMsg{Text: "5", Code: '5'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
 	if m.historyPage.filterInput.Value() != " " {
 		t.Errorf("空格应输入过滤词, got %q", m.historyPage.filterInput.Value())
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker != nil {
 		t.Fatal("过滤聚焦时 a 不应打开选择器")
 	}
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m, cmd := update(m, tea.KeyPressMsg{Text: "q", Code: 'q'})
 	for _, msg := range execCmds(cmd) {
 		if _, ok := msg.(tea.QuitMsg); ok {
 			t.Fatal("过滤聚焦时 q 不应退出")
@@ -2771,11 +2768,11 @@ func TestQueueMoveRoundTripCurrentIdx(t *testing.T) {
 	}
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 队列页
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'}) // 队列页
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t2
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyDown}) // t2(1) → 2
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 选中 t2
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // t2(1) → 2
 	mv := moveMsgOf(t, cmd)
 	if mv.from != 1 || mv.to != 2 {
 		t.Fatalf("queueMoveMsg from/to = %d/%d, want 1/2", mv.from, mv.to)
@@ -2803,9 +2800,9 @@ func TestQueueMoveRoundTripCurrentIdx(t *testing.T) {
 	}
 	m2, _ = update(m2, trackAppendMsg{track: testTrack("t2")})
 	m2, _ = update(m2, trackAppendMsg{track: testTrack("t3")})
-	m2, _ = update(m2, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m2, _ = update(m2, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
-	m2, cmd = update(m2, tea.KeyMsg{Type: tea.KeyDown}) // t1(0) → 1
+	m2, _ = update(m2, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m2, _ = update(m2, tea.KeyPressMsg{Text: "m", Code: 'm'})
+	m2, cmd = update(m2, tea.KeyPressMsg{Code: tea.KeyDown}) // t1(0) → 1
 	mv2 := moveMsgOf(t, cmd)
 	if mv2.from != 0 || mv2.to != 1 {
 		t.Fatalf("queueMoveMsg from/to = %d/%d, want 0/1", mv2.from, mv2.to)
@@ -2838,16 +2835,16 @@ func TestQueueMoveThenTrackEndedPlaysNewNext(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
 	// 队列页把 t2 移到队尾：队列 [t1▶,t3,t2]（当前曲 t1 不变）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t2
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyDown}) // t2(1) → 2
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 选中 t2
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // t2(1) → 2
 	mv := moveMsgOf(t, cmd)
 	if mv.from != 1 || mv.to != 2 {
 		t.Fatalf("queueMoveMsg from/to = %d/%d, want 1/2", mv.from, mv.to)
 	}
 	m, _ = update(m, mv)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc}) // 退出移动模式
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc}) // 退出移动模式
 
 	// t1 播完 → 自动连播新顺序的下一首 t3（移动前应为 t2）
 	// 预推一个事件：TrackEnded 返回的 batch 含 waitForPlayerEvents（事件链），
@@ -3298,7 +3295,7 @@ func TestRestartAfterFallbackCancelKeepsQueue(t *testing.T) {
 	}
 
 	// 用户暂停（空格）：取消兜底 → 停止态（ended）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
 	if !m.ended {
 		t.Fatal("空格取消兜底后 ended 应为 true")
 	}
@@ -3308,7 +3305,7 @@ func TestRestartAfterFallbackCancelKeepsQueue(t *testing.T) {
 	beforePlays := fp.playCount()
 
 	// 用户再次播放（空格）：重播当前曲，队列必须保持 2 首不变
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
 	if m.queue.Len() != 2 {
 		t.Errorf("再次播放清空了队列: Len=%d, want 2（重播不得改动队列）", m.queue.Len())
 	}
@@ -3695,8 +3692,8 @@ func TestPlaylistLocalAddMsgSuccess(t *testing.T) {
 	}
 	listName := "本地-" + filepath.Base(dir)
 	// 模拟真实流程：先按 l 进入输入模式（成功后退出输入由 root 完成）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "l", Code: 'l'})
 	if m.plPage.mode != plLocalAdd {
 		t.Fatal("l 后应进入本地路径输入模式")
 	}
@@ -3728,8 +3725,8 @@ func TestPlaylistLocalAddMsgFileRejected(t *testing.T) {
 	if err := os.WriteFile(file, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "l", Code: 'l'})
 	m, _ = update(m, plLocalAddMsg{path: file})
 	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "仅支持目录路径") {
 		t.Errorf("toast = %+v, want toastError 且含「仅支持目录路径」", m.toast)
@@ -3746,8 +3743,8 @@ func TestPlaylistLocalAddMsgFileRejected(t *testing.T) {
 func TestPlaylistLocalAddMsgFailure(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	missing := filepath.Join(t.TempDir(), "不存在")
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "l", Code: 'l'})
 	m, _ = update(m, plLocalAddMsg{path: missing})
 	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "路径不存在") {
 		t.Errorf("toast = %+v, want toastError 且含路径不存在", m.toast)
@@ -3770,8 +3767,8 @@ func TestPlaylistLocalAddMsgRootPath(t *testing.T) {
     }
 	for _, p := range []string{string(os.PathSeparator), "."} {
 		m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-		m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-		m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+		m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+		m, _ = update(m, tea.KeyPressMsg{Text: "l", Code: 'l'})
 		m, _ = update(m, plLocalAddMsg{path: p})
 		if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "无法从该路径生成列表名") {
 			t.Errorf("path=%q: toast = %+v, want toastError 且含「无法从该路径生成列表名」", p, m.toast)
@@ -3790,8 +3787,8 @@ func TestPlaylistLocalAddMsgRootPath(t *testing.T) {
 func TestPlaylistLocalAddMsgEmptyDir(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	dir := t.TempDir() // 空目录：无任何音频文件
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "l", Code: 'l'})
 	m, _ = update(m, plLocalAddMsg{path: dir})
 	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "目录中没有找到支持的音频文件") {
 		t.Errorf("toast = %+v, want toastError 且含「目录中没有找到支持的音频文件」", m.toast)
@@ -3817,8 +3814,8 @@ func TestPlaylistLocalAddMsgDuplicateName(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.plPage = m.plPage.setLists(m.pl.Lists())
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "l", Code: 'l'})
 	m, _ = update(m, plLocalAddMsg{path: dir})
 	if m.toast == nil || m.toast.kind != toastError || !strings.Contains(m.toast.text, "已存在同名列表") {
 		t.Errorf("toast = %+v, want toastError 且含「已存在同名列表」", m.toast)
@@ -3888,10 +3885,10 @@ func TestPlaylistLocalAddMsgChineseDirName(t *testing.T) {
 // 保持"数字始终切页"的既有语义，TestTabSwitchesPages 回归）。
 func TestPlaylistLocalAddDigitsTypeNotSwitchPage(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")}) // 切到播放列表页
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")}) // 进入本地路径输入
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("0")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "3", Code: '3'}) // 切到播放列表页
+	m, _ = update(m, tea.KeyPressMsg{Text: "l", Code: 'l'}) // 进入本地路径输入
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "0", Code: '0'})
 	if m.current != pagePlaylists {
 		t.Fatalf("本地路径输入时按 2/0 不应切页: current=%v", m.current)
 	}
@@ -3899,8 +3896,8 @@ func TestPlaylistLocalAddDigitsTypeNotSwitchPage(t *testing.T) {
 		t.Errorf("input = %q, want %q", got, "20")
 	}
 	// 输入模式之外数字仍切页（既有语义不回归）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Text: "5", Code: '5'})
 	if m.current != pageHistory {
 		t.Errorf("退出输入后按 5 应切到历史页, got %v", m.current)
 	}
@@ -4467,12 +4464,12 @@ func testLyricOffsetModel(t *testing.T, fp *fakePlayer, ly *lyrics.Lyrics) (Mode
 
 // shiftRightKey 构造 Ctrl+Shift+↑ 按键（String() == "ctrl+shift+up"）。
 func shiftRightKey() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyCtrlShiftUp}
+	return tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModCtrl | tea.ModShift}
 }
 
 // shiftLeftKey 构造 Ctrl+Shift+↓ 按键（String() == "ctrl+shift+down"）。
 func shiftLeftKey() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyCtrlShiftDown}
+	return tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModCtrl | tea.ModShift}
 }
 
 // TestAdjustLyricOffsetShiftUp Ctrl+Shift+↑：歌词时间整体 +0.5s、toast 展示累计偏移、
@@ -4657,7 +4654,7 @@ func TestAdjustLyricOffsetGlobalInSearchInput(t *testing.T) {
 	fp := newFakePlayer()
 	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
 	m, rc := testLyricOffsetModel(t, fp, ly)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 全局切页 → 搜索页
+	m, _ = update(m, tea.KeyPressMsg{Text: "4", Code: '4'}) // 全局切页 → 搜索页
 	if m.current != pageSearch {
 		t.Fatalf("current = %v, want pageSearch", m.current)
 	}

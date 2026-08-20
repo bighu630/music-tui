@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 
 	"music-tui/lyrics"
 	"music-tui/model"
@@ -146,9 +146,9 @@ func TestArmSpinnerTickStartsOnce(t *testing.T) {
 func TestSpinnerTickSearchFlow(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{tracks: []model.Track{testTrack("t1")}}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 数字键直达搜索页
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: '4', Text: "4"}) // 数字键直达搜索页
+	m, _ = update(m, tea.KeyPressMsg{Code: 'q', Text: "q"})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.searchPage.state != searchLoading {
 		t.Fatalf("state = %v, want searchLoading", m.searchPage.state)
 	}

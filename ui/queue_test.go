@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"music-tui/lyrics"
 	"music-tui/model"
@@ -17,9 +17,9 @@ import (
 // 用数字键 4 直达搜索页（Tab 需 ×3，数字键更稳）。
 func searchAndPick(t *testing.T, m Model, fa *fakeSearchAdapter) Model {
 	t.Helper()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}) // 直达搜索页
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("晴天")})
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "4", Code: '4'}) // 直达搜索页
+	m, _ = update(m, tea.KeyPressMsg{Text: "晴天"})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var res searchResultsMsg
 	for _, msg := range execSearchCmds(cmd) {
 		if sm, ok := msg.(searchResultsMsg); ok {
@@ -38,12 +38,12 @@ func searchAndPick(t *testing.T, m Model, fa *fakeSearchAdapter) Model {
 // 可复用：搜索/历史/播放列表详情页选中歌曲后的追加流程。
 func openPickerAndAppendQueue(t *testing.T, m Model) Model {
 	t.Helper()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker == nil {
 		t.Fatal("按 a 应打开选择器")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中第二项"当前播放队列"
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 选中第二项"当前播放队列"
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var ta trackAppendMsg
 	for _, msg := range execCmds(cmd) {
 		if am, ok := msg.(trackAppendMsg); ok {
@@ -61,7 +61,7 @@ func openPickerAndAppendQueue(t *testing.T, m Model) Model {
 func TestQueueTabShowsEmptyView(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyTab})
 	if m.current != pageQueue {
 		t.Fatalf("Tab 后 current = %v, want pageQueue", m.current)
 	}
@@ -81,7 +81,7 @@ func TestSearchAppendBuildsQueue(t *testing.T) {
 	m = searchAndPick(t, m, fa)
 
 	m = openPickerAndAppendQueue(t, m)              // 追加 t1
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t2
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 选中 t2
 	m = openPickerAndAppendQueue(t, m)
 	if m.queue.Len() != 2 {
 		t.Fatalf("queue.Len = %d, want 2", m.queue.Len())
@@ -96,7 +96,7 @@ func TestSearchAppendBuildsQueue(t *testing.T) {
 		t.Errorf("追加不应改变播放状态, state.Track = %+v", m.state.Track)
 	}
 	// 队列页展示两条
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
 	if len(m.queuePage.items) != 2 || m.queuePage.current != -1 {
 		t.Errorf("队列页未同步: items=%d current=%d", len(m.queuePage.items), m.queuePage.current)
 	}
@@ -111,14 +111,14 @@ func TestSearchEnterReplacesQueue(t *testing.T) {
 
 	// 先 a 追加 t1、t2 建立队列
 	m = openPickerAndAppendQueue(t, m)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	m = openPickerAndAppendQueue(t, m)
 	if m.queue.Len() != 2 {
 		t.Fatalf("前置追加失败: Len = %d", m.queue.Len())
 	}
 
 	// Enter 播放选中项（t2）→ 替换语义
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var sel trackSelectedMsg
 	for _, msg := range execCmds(cmd) {
 		if sm, ok := msg.(trackSelectedMsg); ok {
@@ -249,7 +249,7 @@ func TestTrackEndedKeepsCurrentPage(t *testing.T) {
 	_ = execCmds(cmd)
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
 	if m.current != pageQueue {
 		t.Fatalf("current = %v, want pageQueue", m.current)
 	}
@@ -274,10 +274,10 @@ func TestQueuePageJumpPlay(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // t2
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // t3
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // t2
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // t3
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var qp queuePlayMsg
 	for _, msg := range execCmds(cmd) {
 		if qm, ok := msg.(queuePlayMsg); ok {
@@ -314,9 +314,9 @@ func TestQueuePageDeleteAndClear(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
 	// 默认选中第一项（t1 = 当前曲）→ d 删除
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "d", Code: 'd'})
 	var qd queueDeleteMsg
 	for _, msg := range execCmds(cmd) {
 		if qm, ok := msg.(queueDeleteMsg); ok {
@@ -341,7 +341,7 @@ func TestQueuePageDeleteAndClear(t *testing.T) {
 	}
 
 	// c 清空
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "c", Code: 'c'})
 	var qc queueClearMsg
 	for _, msg := range execCmds(cmd) {
 		if qm, ok := msg.(queueClearMsg); ok {
@@ -369,8 +369,8 @@ func TestQueueModeToggle(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
 	var qm queueModeMsg
 	for _, msg := range execCmds(cmd) {
 		if mm, ok := msg.(queueModeMsg); ok {
@@ -392,7 +392,7 @@ func TestQueueModeToggle(t *testing.T) {
 	}
 
 	// 再按 s：Shuffle → RepeatOne
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
 	for _, msg := range execCmds(cmd) {
 		if mm, ok := msg.(queueModeMsg); ok {
 			m, _ = update(m, mm)
@@ -409,7 +409,7 @@ func TestQueueModeToggle(t *testing.T) {
 	}
 
 	// 再按 s：RepeatOne → Sequential
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "s", Code: 's'})
 	for _, msg := range execCmds(cmd) {
 		if mm, ok := msg.(queueModeMsg); ok {
 			m, _ = update(m, mm)
@@ -460,13 +460,13 @@ func TestHistoryAppend(t *testing.T) {
 	}
 	m = m.refreshHistory()
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "5", Code: '5'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker == nil {
 		t.Fatal("历史页按 a 应打开选择器")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中第二项"当前播放队列"（追加到队尾）
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 选中第二项"当前播放队列"（追加到队尾）
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var ta trackAppendMsg
 	for _, msg := range execCmds(cmd) {
 		if am, ok := msg.(trackAppendMsg); ok {
@@ -496,8 +496,8 @@ func TestDeleteCurrentThenTrackEndedPlaysSlidTrack(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
 	// 队列页删除当前曲 t1 → 顺延 t2 为当前（mpv 仍在播 t1，不打断）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "d", Code: 'd'})
 	var qd queueDeleteMsg
 	for _, msg := range execCmds(cmd) {
 		if qm, ok := msg.(queueDeleteMsg); ok {
@@ -610,7 +610,7 @@ func TestSpaceReplayKeepsQueue(t *testing.T) {
 
 	// 追加 t3，空格重播 t1 → 仅重载当前曲，队列原样保留（[t3]、指针 -1 不动）
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
 	if fp.playCount() != 2 || fp.lastPlayed() != testTrack("t1").URL {
 		t.Fatalf("空格应重播同曲: playCount=%d lastPlayed=%q, want 2 次 t1", fp.playCount(), fp.lastPlayed())
 	}
@@ -633,10 +633,10 @@ func TestQueueDeleteKeepsSelectionValid(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 	m, _ = update(m, trackAppendMsg{track: testTrack("t3")})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 t3（下标 2）
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 选中 t3（下标 2）
+	m, cmd = update(m, tea.KeyPressMsg{Text: "d", Code: 'd'})
 	var qd queueDeleteMsg
 	for _, msg := range execCmds(cmd) {
 		if qm, ok := msg.(queueDeleteMsg); ok {
@@ -652,7 +652,7 @@ func TestQueueDeleteKeepsSelectionValid(t *testing.T) {
 		t.Errorf("选择应 clamp 到下标 1（t2）, got %+v", item)
 	}
 	// Enter 仍能正常发出跳转消息
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var qp queuePlayMsg
 	for _, msg := range execCmds(cmd) {
 		if qm, ok := msg.(queuePlayMsg); ok {
@@ -732,7 +732,7 @@ func moveMsgOf(t *testing.T, cmd tea.Cmd) queueMoveMsg {
 func TestQueueHintOnLastLine(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'}) // 直达队列页
 	m.queue.Add(testTrack("t1"))
 	m.queue.Add(testTrack("t2"))
 	m.queuePage = m.queuePage.sync(m.queue)
@@ -743,7 +743,7 @@ func TestQueueHintOnLastLine(t *testing.T) {
 func TestQueueHintOnLastLineManyItems(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'}) // 直达队列页
 	for i := 0; i < 10; i++ {
 		m.queue.Add(testTrack(fmt.Sprintf("t%d", i)))
 	}
@@ -755,7 +755,7 @@ func TestQueueHintOnLastLineManyItems(t *testing.T) {
 func TestQueueEmptyHintOnLastLine(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'}) // 直达队列页
 	assertHintOnLastLine(t, m, "Enter/p 跳转播放")
 }
 
@@ -801,10 +801,10 @@ func TestQueueSlashFilter(t *testing.T) {
 		m.queue.Add(testTrack(id))
 	}
 	m = m.syncQueueViews()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 队列页
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'}) // 队列页
 
 	// / 打开过滤
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
 	if !m.queuePage.filtering || !m.queuePage.filterInput.Focused() {
 		t.Fatalf("/ 后 filtering=%v focused=%v, want true/true", m.queuePage.filtering, m.queuePage.filterInput.Focused())
 	}
@@ -813,8 +813,8 @@ func TestQueueSlashFilter(t *testing.T) {
 	}
 
 	// 输入 "tb" 实时过滤 + 计数（数字 1-5 不可入过滤词，用字母区分）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "t", Code: 't'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "b", Code: 'b'})
 	if got := m.queuePage.view(); !strings.Contains(got, "(1/3)") {
 		t.Errorf("计数应显示 (1/3): %q", got)
 	}
@@ -823,7 +823,7 @@ func TestQueueSlashFilter(t *testing.T) {
 	}
 
 	// Enter 确认：失焦、过滤保持
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.queuePage.filterInput.Focused() {
 		t.Fatal("Enter 应确认过滤并失焦")
 	}
@@ -832,7 +832,7 @@ func TestQueueSlashFilter(t *testing.T) {
 	}
 
 	// 确认态 Enter 播放 → queuePlayMsg.index 为原始下标 1
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var play queuePlayMsg
 	for _, msg := range execCmds(cmd) {
 		if pm, ok := msg.(queuePlayMsg); ok {
@@ -844,7 +844,7 @@ func TestQueueSlashFilter(t *testing.T) {
 	}
 
 	// 确认态 d 删除 → deleteEntryMsg 原始下标 1
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "d", Code: 'd'})
 	var del queueDeleteMsg
 	for _, msg := range execCmds(cmd) {
 		if dm, ok := msg.(queueDeleteMsg); ok {
@@ -863,7 +863,7 @@ func TestQueueSlashFilter(t *testing.T) {
 	}
 
 	// Esc 恢复完整列表
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.queuePage.filtering {
 		t.Fatal("Esc 应退出过滤")
 	}
@@ -883,17 +883,17 @@ func TestQueueSlashFilterIndexMapping(t *testing.T) {
 		m.queue.Add(testTrack(id))
 	}
 	m = m.syncQueueViews()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")}) // 命中全部 3 项
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "t", Code: 't'}) // 命中全部 3 项
 	if n := len(m.queuePage.list.VisibleItems()); n != 3 {
 		t.Fatalf("过滤后可见 %d 项, want 3", n)
 	}
 	// 聚焦态 ↑↓ 仍可移动列表
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 确认（选中第 2 项）
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 确认（选中第 2 项）
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var play queuePlayMsg
 	for _, msg := range execCmds(cmd) {
 		if pm, ok := msg.(queuePlayMsg); ok {
@@ -904,7 +904,7 @@ func TestQueueSlashFilterIndexMapping(t *testing.T) {
 		t.Fatalf("播放 index = %d, want 1", play.index)
 	}
 	// 已确认态再按 /：重新聚焦并保留关键词（本次按键不消费为字符）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
 	if !m.queuePage.filterInput.Focused() {
 		t.Fatal("已确认态 / 应重新聚焦过滤输入框")
 	}
@@ -912,7 +912,7 @@ func TestQueueSlashFilterIndexMapping(t *testing.T) {
 		t.Fatalf("重聚焦应保留关键词, got %q", m.queuePage.filterInput.Value())
 	}
 	// 聚焦态再按 / 才是输入字符
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
 	if m.queuePage.filterInput.Value() != "t/" {
 		t.Fatalf("聚焦态 / 应输入字符, got %q", m.queuePage.filterInput.Value())
 	}
@@ -926,9 +926,9 @@ func TestQueueSlashFilterSyncReapplies(t *testing.T) {
 		m.queue.Add(testTrack(id))
 	}
 	m = m.syncQueueViews()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "t", Code: 't'})
 	// 外部变化（如搜索页追加 u4）→ sync 后过滤仍生效（u4 不含关键词 t）
 	m.queue.Add(testTrack("u4"))
 	m = m.syncQueueViews()
@@ -949,14 +949,14 @@ func TestQueueSlashFilterEscKeepsSelection(t *testing.T) {
 		m.queue.Add(testTrack(id))
 	}
 	m = m.syncQueueViews()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // 选中 tb（下标 1）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("tb")}) // 仅 tb 可见
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown}) // 选中 tb（下标 1）
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "tb"}) // 仅 tb 可见
 	if it, ok := m.queuePage.list.SelectedItem().(queueItem); !ok || it.track.ID != "tb" {
 		t.Fatalf("过滤后选中应保持 tb")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc}) // 退出过滤
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc}) // 退出过滤
 	if it, ok := m.queuePage.list.SelectedItem().(queueItem); !ok || it.track.ID != "tb" {
 		t.Fatalf("Esc 后选中应按 ID 恢复 tb")
 	}
@@ -971,22 +971,22 @@ func TestQueueSlashFilterZeroHitsSafe(t *testing.T) {
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
 	m.queue.Add(testTrack("t1"))
 	m = m.syncQueueViews()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")}) // 0 命中
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "z", Code: 'z'}) // 0 命中
 	if got := m.queuePage.view(); !strings.Contains(got, "(0/1)") {
 		t.Fatalf("计数应 (0/1): %q", got)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 确认
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 确认
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if len(execCmds(cmd)) != 0 {
 		t.Fatal("0 命中时 Enter 不应产生消息")
 	}
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "d", Code: 'd'})
 	if len(execCmds(cmd)) != 0 {
 		t.Fatal("0 命中时 d 不应产生消息")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if n := len(m.queuePage.list.VisibleItems()); n != 1 {
 		t.Fatalf("Esc 后可见 %d 项, want 1", n)
 	}
@@ -995,12 +995,12 @@ func TestQueueSlashFilterZeroHitsSafe(t *testing.T) {
 // TestQueueSlashFilterEmptyQueue 空队列 / 打开显示 (0/0)，Esc 正常退出。
 func TestQueueSlashFilterEmptyQueue(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
 	if got := m.queuePage.view(); !strings.Contains(got, "(0/0)") {
 		t.Fatalf("空队列计数应 (0/0): %q", got)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.queuePage.filtering {
 		t.Fatal("Esc 应退出过滤")
 	}
@@ -1016,7 +1016,7 @@ func buildQueuePageModel(t *testing.T, ids ...string) Model {
 		m.queue.Add(testTrack(id))
 	}
 	m = m.syncQueueViews()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'}) // 直达队列页
 	return m
 }
 
@@ -1025,7 +1025,7 @@ func buildQueuePageModel(t *testing.T, ids ...string) Model {
 func TestQueueMoveEnterExit(t *testing.T) {
 	m := buildQueuePageModel(t, "t1", "t2", "t3")
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 	if !m.queuePage.moving {
 		t.Fatal("按 m 应进入移动模式")
 	}
@@ -1040,7 +1040,7 @@ func TestQueueMoveEnterExit(t *testing.T) {
 	}
 
 	// Enter 结束：等效 Esc，且不触发跳转播放
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.queuePage.moving {
 		t.Fatal("Enter 应结束移动模式")
 	}
@@ -1054,11 +1054,11 @@ func TestQueueMoveEnterExit(t *testing.T) {
 	}
 
 	// Esc 结束
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 	if !m.queuePage.moving {
 		t.Fatal("再次按 m 应进入移动模式")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.queuePage.moving {
 		t.Fatal("Esc 应结束移动模式")
 	}
@@ -1070,13 +1070,13 @@ func TestQueueMoveEnterExit(t *testing.T) {
 // TestQueueMoveNotEnteredEmptyOrSingle 空队列/单曲队列按 m 不进入移动模式。
 func TestQueueMoveNotEnteredEmptyOrSingle(t *testing.T) {
 	m := buildQueuePageModel(t) // 空队列
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 	if m.queuePage.moving {
 		t.Error("空队列按 m 不应进入移动模式")
 	}
 
 	m = buildQueuePageModel(t, "t1") // 单曲队列
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 	if m.queuePage.moving {
 		t.Error("单曲队列按 m 不应进入移动模式")
 	}
@@ -1086,10 +1086,10 @@ func TestQueueMoveNotEnteredEmptyOrSingle(t *testing.T) {
 // 每次回灌后队列顺序更新且选中项跟随被移动曲目（从新位置继续）。
 func TestQueueMoveKeys(t *testing.T) {
 	m := buildQueuePageModel(t, "t1", "t2", "t3")
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 
 	// ↓：t1(0) → 1，回灌后 [t2,t1,t3]，选中仍 t1
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	mv := moveMsgOf(t, cmd)
 	if mv.from != 0 || mv.to != 1 {
 		t.Fatalf("↓ from/to = %d/%d, want 0/1", mv.from, mv.to)
@@ -1103,7 +1103,7 @@ func TestQueueMoveKeys(t *testing.T) {
 	}
 
 	// ↓：t1(1) → 2（从新位置继续），回灌后 [t2,t3,t1]
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	mv = moveMsgOf(t, cmd)
 	if mv.from != 1 || mv.to != 2 {
 		t.Fatalf("再次 ↓ from/to = %d/%d, want 1/2", mv.from, mv.to)
@@ -1114,7 +1114,7 @@ func TestQueueMoveKeys(t *testing.T) {
 	}
 
 	// ↑：t1(2) → 1
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyUp})
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeyUp})
 	mv = moveMsgOf(t, cmd)
 	if mv.from != 2 || mv.to != 1 {
 		t.Fatalf("↑ from/to = %d/%d, want 2/1", mv.from, mv.to)
@@ -1122,7 +1122,7 @@ func TestQueueMoveKeys(t *testing.T) {
 	m, _ = update(m, mv) // [t2,t1,t3]
 
 	// k：t1(1) → 0
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "k", Code: 'k'})
 	mv = moveMsgOf(t, cmd)
 	if mv.from != 1 || mv.to != 0 {
 		t.Fatalf("k from/to = %d/%d, want 1/0", mv.from, mv.to)
@@ -1130,7 +1130,7 @@ func TestQueueMoveKeys(t *testing.T) {
 	m, _ = update(m, mv) // [t1,t2,t3]
 
 	// j：t1(0) → 1
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "j", Code: 'j'})
 	mv = moveMsgOf(t, cmd)
 	if mv.from != 0 || mv.to != 1 {
 		t.Fatalf("j from/to = %d/%d, want 0/1", mv.from, mv.to)
@@ -1138,7 +1138,7 @@ func TestQueueMoveKeys(t *testing.T) {
 	m, _ = update(m, mv) // [t2,t1,t3]
 
 	// h：t1(1) → 队首 0
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "h", Code: 'h'})
 	mv = moveMsgOf(t, cmd)
 	if mv.from != 1 || mv.to != 0 {
 		t.Fatalf("h from/to = %d/%d, want 1/0（队首）", mv.from, mv.to)
@@ -1146,7 +1146,7 @@ func TestQueueMoveKeys(t *testing.T) {
 	m, _ = update(m, mv) // [t1,t2,t3]
 
 	// l：t1(0) → 队尾 len-1 = 2
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "l", Code: 'l'})
 	mv = moveMsgOf(t, cmd)
 	if mv.from != 0 || mv.to != 2 {
 		t.Fatalf("l from/to = %d/%d, want 0/2（队尾）", mv.from, mv.to)
@@ -1161,13 +1161,13 @@ func TestQueueMoveKeys(t *testing.T) {
 // 队列与 moving 状态不变。
 func TestQueueMoveBoundaries(t *testing.T) {
 	m := buildQueuePageModel(t, "t1", "t2", "t3")
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 
 	// 队首（t1 idx 0）：上移/队首均为边界
 	for _, key := range []tea.Msg{
-		tea.KeyMsg{Type: tea.KeyUp},
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")},
-		tea.KeyMsg{Type: tea.KeyLeft},
+		tea.KeyPressMsg{Code: tea.KeyUp},
+		tea.KeyPressMsg{Text: "k", Code: 'k'},
+		tea.KeyPressMsg{Code: tea.KeyLeft},
 	} {
 		_, cmd := update(m, key)
 		if msgs := execCmds(cmd); len(msgs) != 0 {
@@ -1179,7 +1179,7 @@ func TestQueueMoveBoundaries(t *testing.T) {
 	}
 
 	// l 移到队尾（t1 → idx 2）后测队尾边界
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRight})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyRight})
 	mv := moveMsgOf(t, cmd)
 	if mv.from != 0 || mv.to != 2 {
 		t.Fatalf("l from/to = %d/%d, want 0/2", mv.from, mv.to)
@@ -1187,9 +1187,9 @@ func TestQueueMoveBoundaries(t *testing.T) {
 	m, _ = update(m, mv) // [t2,t3,t1]
 
 	for _, key := range []tea.Msg{
-		tea.KeyMsg{Type: tea.KeyDown},
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")},
-		tea.KeyMsg{Type: tea.KeyRight},
+		tea.KeyPressMsg{Code: tea.KeyDown},
+		tea.KeyPressMsg{Text: "j", Code: 'j'},
+		tea.KeyPressMsg{Code: tea.KeyRight},
 	} {
 		_, cmd := update(m, key)
 		if msgs := execCmds(cmd); len(msgs) != 0 {
@@ -1208,14 +1208,14 @@ func TestQueueMoveBoundaries(t *testing.T) {
 // 队列不变），移动键仍有效。
 func TestQueueMoveModal(t *testing.T) {
 	m := buildQueuePageModel(t, "t1", "t2", "t3")
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 
 	for _, key := range []tea.Msg{
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")},
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")},
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")},
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")},
-		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")},
+		tea.KeyPressMsg{Text: "d", Code: 'd'},
+		tea.KeyPressMsg{Text: "c", Code: 'c'},
+		tea.KeyPressMsg{Text: "s", Code: 's'},
+		tea.KeyPressMsg{Text: "p", Code: 'p'},
+		tea.KeyPressMsg{Text: "/", Code: '/'},
 	} {
 		_, cmd := update(m, key)
 		if msgs := execCmds(cmd); len(msgs) != 0 {
@@ -1230,7 +1230,7 @@ func TestQueueMoveModal(t *testing.T) {
 	}
 
 	// 移动键仍有效
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyDown})
 	mv := moveMsgOf(t, cmd)
 	if mv.from != 0 || mv.to != 1 {
 		t.Fatalf("模态后 ↓ from/to = %d/%d, want 0/1", mv.from, mv.to)
@@ -1242,14 +1242,14 @@ func TestQueueMoveModal(t *testing.T) {
 func TestQueueMoveFilterInteraction(t *testing.T) {
 	m := buildQueuePageModel(t, "t1", "t2", "t3")
 	// / 打开 → 输入 t → Enter 确认失焦（过滤确认态）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "t", Code: 't'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !m.queuePage.filtering || m.queuePage.filterInput.Focused() {
 		t.Fatalf("前置过滤确认态失败: filtering=%v focused=%v", m.queuePage.filtering, m.queuePage.filterInput.Focused())
 	}
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 	if m.queuePage.filtering {
 		t.Error("确认态按 m 应先退出过滤")
 	}
@@ -1262,8 +1262,8 @@ func TestQueueMoveFilterInteraction(t *testing.T) {
 
 	// 聚焦态：m 是普通过滤字符
 	m = buildQueuePageModel(t, "t1", "t2", "t3")
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 	if m.queuePage.moving {
 		t.Error("输入框聚焦时按 m 不应进入移动模式")
 	}
@@ -1284,14 +1284,14 @@ func TestQueueMoveGlobalKeysNotIntercepted(t *testing.T) {
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'}) // 直达队列页
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 	if !m.queuePage.moving {
 		t.Fatal("按 m 应进入移动模式")
 	}
 
 	// 空格：不退出移动模式，暂停命令照常发出（全局语义不被拦截）
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
 	if !m.queuePage.moving {
 		t.Fatal("移动模式按空格不应退出移动模式")
 	}
@@ -1303,7 +1303,7 @@ func TestQueueMoveGlobalKeysNotIntercepted(t *testing.T) {
 		t.Error("暂停事件回灌后 Playing 应为 false")
 	}
 	// 再按空格：继续播放，同样不退出移动模式
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeySpace})
 	if !m.queuePage.moving {
 		t.Fatal("移动模式再按空格不应退出移动模式")
 	}
@@ -1316,11 +1316,11 @@ func TestQueueMoveGlobalKeysNotIntercepted(t *testing.T) {
 	}
 
 	// 数字键切页：moving 状态随页面保留（1 首页 → 2 队列页）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "1", Code: '1'})
 	if m.current != pageHome {
 		t.Fatalf("按 1 应切到首页, current = %v", m.current)
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'})
 	if m.current != pageQueue {
 		t.Fatalf("按 2 应切回队列页, current = %v", m.current)
 	}
@@ -1332,7 +1332,7 @@ func TestQueueMoveGlobalKeysNotIntercepted(t *testing.T) {
 	}
 
 	// q：照常触发退出（先例：resume_test 对 Quit 消息有断言）
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "q", Code: 'q'})
 	var quit bool
 	for _, msg := range execCmds(cmd) {
 		if _, ok := msg.(tea.QuitMsg); ok {
@@ -1347,7 +1347,7 @@ func TestQueueMoveGlobalKeysNotIntercepted(t *testing.T) {
 	}
 
 	// Esc 正常退出移动模式
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.queuePage.moving {
 		t.Fatal("Esc 应退出移动模式")
 	}
@@ -1363,12 +1363,12 @@ func TestQueueMoveGlobalKeysNotIntercepted(t *testing.T) {
 func TestQueueMoveHintOnLastLine(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // 直达队列页
+	m, _ = update(m, tea.KeyPressMsg{Text: "2", Code: '2'}) // 直达队列页
 	for i := 0; i < 10; i++ {
 		m.queue.Add(testTrack(fmt.Sprintf("t%d", i)))
 	}
 	m = m.syncQueueViews()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 	if !m.queuePage.moving {
 		t.Fatal("按 m 应进入移动模式")
 	}
@@ -1378,10 +1378,10 @@ func TestQueueMoveHintOnLastLine(t *testing.T) {
 	}
 
 	// Esc 退出 → 过滤确认态（/ → 输入词 → Enter 失焦）：hint 含 m 移动且贴底
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "t", Code: 't'})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.queuePage.filterInput.Focused() || !m.queuePage.filtering {
 		t.Fatalf("过滤确认态前置失败: filtering=%v focused=%v", m.queuePage.filtering, m.queuePage.filterInput.Focused())
 	}

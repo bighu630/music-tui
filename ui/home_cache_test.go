@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"music-tui/lyrics"
 	"music-tui/player"
@@ -22,6 +22,7 @@ import (
 func TestMiddleViewCacheTracksLyricsLineChange(t *testing.T) {
 	fp := newFakePlayer()
 	m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 	ly, _ := lyrics.ParseLRC([]byte("[00:10.00]第一行\n[00:20.00]第二行\n"))
@@ -49,7 +50,7 @@ func TestMiddleViewCacheInvalidatedByWheel(t *testing.T) {
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12}})
 	before := m.home.middleView()
 	// 滚轮下滚 3 行（歌词区：X ≥ coverW+2，页面 Y 在中间区）
-	m, _ = update(m, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, X: coverW + 5, Y: 8})
+	m, _ = update(m, tea.MouseWheelMsg{X: coverW + 5, Y: 8, Button: tea.MouseWheelDown})
 	after := m.home.middleView()
 	if before == after {
 		t.Fatal("滚轮滚动后中间区应变化（缓存未失效）")

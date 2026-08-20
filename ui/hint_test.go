@@ -53,14 +53,14 @@ func TestBottomHintContentTooTall(t *testing.T) {
 	}
 }
 
-// assertHintOnLastLine 页面布局断言：m.View() 恰好占满窗口（80x24，不超屏
+// assertHintOnLastLine 页面布局断言：m.View().Content 恰好占满窗口（80x24，不超屏
 // 也不缺行）。master 已合并 toast 分支（底部常驻状态栏）：窗口 = tabBar 2 +
 // 页面 h=21 + 状态栏 1；提示行在页面内容区最后一行 = 状态栏上方一行
 // （倒数第二行），stripANSI 后含 hint 文本且为 faint 样式。
 // 三个页面的布局测试共用。
 func assertHintOnLastLine(t *testing.T, m Model, hint string) {
 	t.Helper()
-	lines := strings.Split(m.View(), "\n")
+	lines := strings.Split(m.View().Content, "\n")
 	if len(lines) != 24 {
 		t.Fatalf("View 行数 = %d, want 24（tabBar 2 + 页面 h=21 + 状态栏 1）", len(lines))
 	}
