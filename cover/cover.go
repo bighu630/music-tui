@@ -4,6 +4,8 @@ package cover
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
@@ -116,16 +118,32 @@ func thumbURL(base, size string) (string, error) {
 	return u.String(), nil
 }
 
+// maxCacheNameLen 是 cacheFileName 中 sanitize 段的最大字节数：超长地址路径
+// 截断，避免与哈希后缀合计超操作系统单文件名上限（255 字节）。截断不影响
+// 唯一性——哈希后缀覆盖完整 ID（见 cacheFileName）。
+const maxCacheNameLen = 120
+
 // cacheFileName 把 (source, id) 安全化为缓存文件名（不含扩展名）。
 //
-// 本地曲目的 ID 是文件绝对路径（含 /、\ 等分隔符与空格），直接拼接会让
-// dest 变成子目录路径导致写入失败甚至逃逸缓存目录。此处按 cache.SafeName
-// 的思路保留 [A-Za-z0-9._-]、其余字符（含路径分隔符、Windows 非法字符、
-// Unicode 非 ASCII）统一替换为 '_'；但 cover 不依赖 cache 包，独立实现。
-// 转义并非单射：分隔符与转义字符同位时不同路径会撞名（如 /a/b.mp3 与
-// /a_b.mp3 映射到同一缓存文件名），后果仅限封面串显/互相覆盖（装饰性，
-// 无数据损失），与 cache.SafeName 惯例一致，属接受的设计取舍。长度由
-// 操作系统路径上限约束。YouTube ID（[A-Za-z0-9_-]）不受影响。
+// 本地曲目的 ID 是文件绝对路径（含 /、\ 等分隔符、空格与非 ASCII 字符），
+// 直接拼接会让 dest 变成子目录路径导致写入失败甚至逃逸缓存目录。此处按
+// cache.SafeName 的思路保留 [A-Za-z0-9._-]、其余字符（含路径分隔符、Windows
+// 非法字符、Unicode 非 ASCII）统一替换为 '_'；但 cover 不依赖 cache 包，独立
+// 实现。
+//
+// 单射性（封面错位根因）：转义本身并非单射——非 ASCII rune 折叠为 '_'（
+// 等长中文名如 a/晴天.mp3 与 a/稻香.mp3 撞名）、路径分隔符/空格与字面 '_'
+// 同形（/a/b.mp3 与 /a_b.mp3 撞名）。若不加区分，两首不同歌曲会共享同一
+// 缓存文件，先 fetch 的封面被另一首命中复用 → 封面串显/错位（稳定、仅
+// 受影响路径撞 key 的部分歌曲）。故：
+//   - ID 本身全为安全字符（sanitize 是恒等映射，如 YouTube video id）时，
+//     不同 ID 天然映射到不同文件名，直接用原名（youtube 缓存零变化）；
+//   - 否则（本地绝对路径必含 '/'）追加完整 ID 的 sha256 前 12 hex（48 bit）
+//     后缀恢复单射性：不同 ID 必得不同文件名，哈希碰撞概率可忽略。哈希
+//     覆盖完整 ID，sanitize 段被截断也不影响唯一性。
+//
+// 文件名长度受操作系统上限约束：sanitize 段截断到 maxCacheNameLen，加后缀
+// 仍远小于 255。
 func cacheFileName(source, id string) string {
 	out := make([]byte, 0, len(source)+1+len(id))
 	for _, r := range id {
@@ -139,7 +157,17 @@ func cacheFileName(source, id string) string {
 		}
 		out = append(out, byte(r)) // 非 ASCII rune 已在 default 分支转 '_'（直接截断 byte(r) 会漏网）
 	}
-	return source + "-" + string(out)
+	base := string(out)
+	// 恒等且长度未超上限：直接原名（YouTube 等纯安全字符 ID）。超长恒等 ID
+	// 也落入哈希分支（截断 + 哈希兜底唯一性与长度），避免 ENAMETOOLONG。
+	if len(base) <= maxCacheNameLen && base == id {
+		return source + "-" + base
+	}
+	if len(base) > maxCacheNameLen {
+		base = base[:maxCacheNameLen]
+	}
+	sum := sha256.Sum256([]byte(id))
+	return source + "-" + base + "-" + hex.EncodeToString(sum[:])[:12]
 }
 
 // fetchLocalCover 从本地音频文件标签提取内嵌封面（local.Picture），校验

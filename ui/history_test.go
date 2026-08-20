@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"music-tui/history"
 	"music-tui/model"
@@ -28,7 +28,7 @@ func TestHistoryReplayDeleteClear(t *testing.T) {
 	}
 	m = m.refreshHistory()
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 数字键直达历史页
+	m, _ = update(m, tea.KeyPressMsg{Text: "5", Code: '5'}) // 数字键直达历史页
 	if m.current != pageHistory {
 		t.Fatal("按 5 后应在历史页")
 	}
@@ -37,7 +37,7 @@ func TestHistoryReplayDeleteClear(t *testing.T) {
 	}
 
 	// Enter 重播选中项（第一项 t2）
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	msgs := execCmds(cmd)
 	var sel trackSelectedMsg
 	for _, msg := range msgs {
@@ -50,7 +50,7 @@ func TestHistoryReplayDeleteClear(t *testing.T) {
 	}
 
 	// d 删除选中项
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "d", Code: 'd'})
 	msgs = execCmds(cmd)
 	var del deleteEntryMsg
 	for _, msg := range msgs {
@@ -67,7 +67,7 @@ func TestHistoryReplayDeleteClear(t *testing.T) {
 	}
 
 	// c 清空
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "c", Code: 'c'})
 	msgs = execCmds(cmd)
 	var clr clearHistoryMsg
 	for _, msg := range msgs {
@@ -83,7 +83,7 @@ func TestHistoryReplayDeleteClear(t *testing.T) {
 
 func TestHistoryEmptyView(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 数字键直达历史页
+	m, _ = update(m, tea.KeyPressMsg{Text: "5", Code: '5'}) // 数字键直达历史页
 	if got := m.historyPage.view(); !strings.Contains(got, "暂无播放历史") {
 		t.Errorf("空历史 view = %q", got)
 	}
@@ -110,7 +110,7 @@ func TestHistoryItemTitleAndDescription(t *testing.T) {
 func TestHistoryHintOnLastLine(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 数字键直达历史页
+	m, _ = update(m, tea.KeyPressMsg{Text: "5", Code: '5'}) // 数字键直达历史页
 	m.historyPage = m.historyPage.setEntries([]history.Entry{
 		{Track: testTrack("t1")},
 		{Track: testTrack("t2")},
@@ -122,7 +122,7 @@ func TestHistoryHintOnLastLine(t *testing.T) {
 func TestHistoryEmptyHintOnLastLine(t *testing.T) {
 	m := newTestModel(t, newFakePlayer(), &fakeSearchAdapter{}, nil)
 	m, _ = update(m, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 数字键直达历史页
+	m, _ = update(m, tea.KeyPressMsg{Text: "5", Code: '5'}) // 数字键直达历史页
 	assertHintOnLastLine(t, m, "Enter/p 重播")
 }
 
@@ -139,10 +139,10 @@ func TestHistorySlashFilter(t *testing.T) {
 		}
 	}
 	m = m.refreshHistory()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")}) // 历史页
+	m, _ = update(m, tea.KeyPressMsg{Text: "5", Code: '5'}) // 历史页
 
 	// / 打开过滤
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
 	if !m.historyPage.filtering || !m.historyPage.filterInput.Focused() {
 		t.Fatalf("/ 后 filtering=%v focused=%v, want true/true", m.historyPage.filtering, m.historyPage.filterInput.Focused())
 	}
@@ -151,7 +151,7 @@ func TestHistorySlashFilter(t *testing.T) {
 	}
 
 	// 输入 "7" 实时过滤 + 计数（历史最新在前，t7 在第 2 位）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("7")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "7", Code: '7'})
 	if got := m.historyPage.view(); !strings.Contains(got, "(1/3)") {
 		t.Errorf("计数应显示 (1/3): %q", got)
 	}
@@ -160,13 +160,13 @@ func TestHistorySlashFilter(t *testing.T) {
 	}
 
 	// Enter 确认
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.historyPage.filterInput.Focused() {
 		t.Fatal("Enter 应确认过滤并失焦")
 	}
 
 	// 确认态 Enter 重播 → trackSelectedMsg 应为 t7
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	var sel trackSelectedMsg
 	for _, msg := range execCmds(cmd) {
 		if sm, ok := msg.(trackSelectedMsg); ok {
@@ -178,7 +178,7 @@ func TestHistorySlashFilter(t *testing.T) {
 	}
 
 	// 确认态 d 删除 → deleteEntryMsg 应为 t7
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "d", Code: 'd'})
 	var del deleteEntryMsg
 	for _, msg := range execCmds(cmd) {
 		if dm, ok := msg.(deleteEntryMsg); ok {
@@ -197,7 +197,7 @@ func TestHistorySlashFilter(t *testing.T) {
 	}
 
 	// Esc 恢复完整列表
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.historyPage.filtering {
 		t.Fatal("Esc 应退出过滤")
 	}
@@ -219,18 +219,18 @@ func TestHistorySlashFilterMapping(t *testing.T) {
 		}
 	}
 	m = m.refreshHistory()
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "5", Code: '5'})
 
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")}) // 命中全部
+	m, _ = update(m, tea.KeyPressMsg{Text: "/", Code: '/'})
+	m, _ = update(m, tea.KeyPressMsg{Text: "t", Code: 't'}) // 命中全部
 	if n := len(m.historyPage.list.VisibleItems()); n != 3 {
 		t.Fatalf("过滤后可见 %d 项, want 3", n)
 	}
 	// 聚焦态 ↑↓ 移动（历史最新在前：t3, t2, t1；down 一次到 t2）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter}) // 确认
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	m, _ = update(m, tea.KeyPressMsg{Code: tea.KeyEnter}) // 确认
 	// 确认态 a 打开"添加到"选择器（root 全局键，作用于过滤后选中项）
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "a", Code: 'a'})
 	if m.plPicker == nil {
 		t.Fatal("确认态按 a 应打开选择器")
 	}

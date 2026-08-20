@@ -2,12 +2,13 @@ package ui
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"music-tui/coverrender"
@@ -194,17 +195,17 @@ func TestHomeCoverHiddenWheelRegion(t *testing.T) {
 
 	var sb strings.Builder
 	for i := 0; i < 40; i++ {
-		sb.WriteString("[00:10.00]歌词行A\n")
+		sb.WriteString(fmt.Sprintf("[%02d:%02d.00]歌词行A\n", (10+i*5)/60, (10+i*5)%60))
 	}
 	ly, _ := lyrics.ParseLRC([]byte(sb.String()))
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
 	m.home = setWindow(m.home, 120, 26) // 隐藏封面
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
-	base := m.home.lyricView.YOffset
+	base := m.home.lyricView.YOffset()
 
 	// X=5（封面列区域，隐藏后属于歌词区）滚轮向下也应滚动
-	m, _ = update(m, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, X: 5, Y: 20})
-	if got := m.home.lyricView.YOffset; got <= base {
+	m, _ = update(m, tea.MouseWheelMsg{X: 5, Y: 20, Button: tea.MouseWheelDown})
+	if got := m.home.lyricView.YOffset(); got <= base {
 		t.Errorf("隐藏封面后 X=5 滚轮向下 YOffset = %d, want > %d（整页为歌词区）", got, base)
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"music-tui/cache"
 	"music-tui/cover"
@@ -296,7 +296,7 @@ func TestSaveOnQuitWritesSession(t *testing.T) {
 	m, _ = update(m, trackAppendMsg{track: testTrack("t2")})
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 42, Duration: 200}})
 
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "q", Code: 'q'})
 	// 退出 cmd 应包含 Quit
 	var quit bool
 	for _, msg := range execCmds(cmd) {
@@ -358,7 +358,7 @@ func TestQuitWithoutTrackClearsSession(t *testing.T) {
 	if m.state.Track != nil {
 		t.Fatal("前置状态错误：应无播放中曲目")
 	}
-	m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m, _ = update(m, tea.KeyPressMsg{Text: "q", Code: 'q'})
 	if st := m.session.State(); st != nil {
 		t.Error("无播放退出后会话应为空")
 	}

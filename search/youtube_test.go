@@ -445,7 +445,7 @@ func TestSearchGlobalCookieAndHeaders(t *testing.T) {
 		}
 	}
 	// 原有搜索参数保持在后
-	if !strings.Contains(s, "--dump-json --no-warnings --flat-playlist ytsearch20:hello world") {
+	if !strings.Contains(s, "--dump-json --no-warnings --flat-playlist ytsearch50:hello world") {
 		t.Errorf("args = %q, want 保留原有搜索参数", s)
 	}
 }
@@ -463,7 +463,7 @@ func TestSearchNoGlobalArgsUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "--dump-json --no-warnings --flat-playlist ytsearch20:hello"
+	want := "--dump-json --no-warnings --flat-playlist ytsearch50:hello"
 	if s := strings.TrimSpace(string(got)); s != want {
 		t.Errorf("args = %q, want %q（未设全局时参数与现状逐字节一致）", s, want)
 	}
@@ -553,6 +553,97 @@ func TestFetchPlaylistGlobalHeadersAlwaysAppended(t *testing.T) {
 	}
 	if strings.Contains(s2, "/tmp/global.txt") {
 		t.Errorf("args = %q, 参数非空时不应出现全局 cookie 文件", s2)
+	}
+}
+
+// ---- 全局 proxy ----
+
+func TestSearchWithProxy(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	a := NewYouTubeAdapter(searchArgsCaptureScript(t, argsFile))
+	a.SetGlobalYTDlp("", map[string]string{"X-Custom": "v1"})
+	a.SetGlobalProxy("socks5://127.0.0.1:1080")
+	if _, err := a.Search(context.Background(), "hello world"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := strings.TrimSpace(string(got))
+	// 位置：--add-header 之后、--dump-json 之前
+	proxyIdx := strings.Index(s, "--proxy socks5://127.0.0.1:1080")
+	if proxyIdx < 0 {
+		t.Fatalf("args = %q, want 包含 --proxy socks5://127.0.0.1:1080", s)
+	}
+	addHeaderIdx := strings.Index(s, "--add-header X-Custom:v1")
+	if addHeaderIdx < 0 || addHeaderIdx > proxyIdx {
+		t.Errorf("args = %q, --proxy 应排在 --add-header 之后", s)
+	}
+	if dumpIdx := strings.Index(s, "--dump-json"); dumpIdx < 0 || proxyIdx > dumpIdx {
+		t.Errorf("args = %q, --proxy 应排在 --dump-json 之前", s)
+	}
+	// 原有搜索参数保持在后
+	if !strings.Contains(s, "--dump-json --no-warnings --flat-playlist ytsearch50:hello world") {
+		t.Errorf("args = %q, want 保留原有搜索参数", s)
+	}
+}
+
+func TestFetchPlaylistWithProxy(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	a := NewYouTubeAdapter(argsCaptureScript(t, argsFile))
+	a.SetGlobalProxy("http://127.0.0.1:7890")
+	const url = "https://music.youtube.com/playlist?list=PL1"
+	if _, err := a.FetchPlaylist(context.Background(), url, CookieArgs{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := strings.TrimSpace(string(got))
+	// 位置：--extractor-args 之前（与 cookie 参数无关，总是附加）
+	proxyIdx := strings.Index(s, "--proxy http://127.0.0.1:7890")
+	if proxyIdx < 0 {
+		t.Fatalf("args = %q, want 包含 --proxy http://127.0.0.1:7890", s)
+	}
+	extractIdx := strings.Index(s, "--extractor-args youtubetab:skip=authcheck")
+	if extractIdx < 0 || proxyIdx > extractIdx {
+		t.Errorf("args = %q, --proxy 应排在 --extractor-args 之前", s)
+	}
+	// 歌单 URL 仍在最后
+	if !strings.HasSuffix(s, url) {
+		t.Errorf("args = %q, want 以歌单 URL 结尾", s)
+	}
+}
+
+func TestSetGlobalProxyEmptyNoOp(t *testing.T) {
+    if runtime.GOOS == "windows" {
+        t.Skip("Windows 无法执行 POSIX sh 假 yt-dlp 脚本（%1 not a valid Win32 application），skip")
+    }
+	// SetGlobalProxy("")：不附加任何 --proxy，与未设置全局逐字节一致
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	a := NewYouTubeAdapter(searchArgsCaptureScript(t, argsFile))
+	a.SetGlobalProxy("")
+	if _, err := a.Search(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := strings.TrimSpace(string(got)); strings.Contains(s, "--proxy") {
+		t.Errorf("args = %q, SetGlobalProxy(\"\") 不应附加 --proxy", s)
+	}
+	want := "--dump-json --no-warnings --flat-playlist ytsearch50:hello"
+	if s := strings.TrimSpace(string(got)); s != want {
+		t.Errorf("args = %q, want %q（与未设置全局完全一致）", s, want)
 	}
 }
 

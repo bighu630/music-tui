@@ -9,10 +9,10 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"music-tui/coverrender"
@@ -174,7 +174,7 @@ type homeModel struct {
 	lyrics      *lyrics.Lyrics
 	currentLine int // 当前高亮行下标;-1 = 无高亮
 
-	// lyricOffset 当前歌曲歌词时间偏移累计（秒；Alt+L/H 每按 ±0.5s）。
+	// lyricOffset 当前歌曲歌词时间偏移累计（秒；Ctrl+Shift+←/→ 每按 ±0.5s）。
 	// 仅用于 toast 展示与测试断言——偏移已并入 m.lyrics.Lines 的时间戳，
 	// 播放进度按新时间重算高亮行；换歌（resetForTrack）时清零。
 	lyricOffset float64
@@ -219,7 +219,7 @@ func newHomeModel(p player.Player) homeModel {
 	return homeModel{
 		player:      p,
 		spinner:     spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("63")))),
-		lyricView:   viewport.New(0, 0),
+		lyricView:   viewport.New(),
 		lyricsState: lyricsNone,
 		currentLine: -1,
 		sixelSt:      &sixelState{},
@@ -236,7 +236,7 @@ func (m homeModel) Init() tea.Cmd { return nil }
 // root.onMouse 在 Y!=1 时已把事件 delegate 到本页）。
 func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "left":
 			if m.state.Track == nil {
@@ -275,53 +275,58 @@ func (m homeModel) Update(msg tea.Msg) (homeModel, tea.Cmd) {
 			return m, emitToggleMode()
 		}
 	case tea.MouseMsg:
+		mPos := msg.Mouse()
 		// 屏幕坐标 → 页面坐标：顶部 3 行（空行 + Tab 栏标签 + 分隔线），页面从屏幕行 3 起。
 		// （回归：曾按 1 行 Tab 换算（-1），进度条/按钮点击整体偏移 1 行不命中；
 		//  顶部留空后必须同步 -3，否则点击整体偏移 1 行。）
-		pageY := msg.Y - 3
-		// 滚轮：歌词视口手动滚动（仅歌词列区域：X ≥ 封面列+gap，Y 在中间区）。
-		// 播放推进时 scrollLyricsTo 会重新把当前行居中（自动跟随优先）。
-		if tea.MouseEvent(msg).IsWheel() {
+		pageY := mPos.Y - 3
+		switch msg.(type) {
+		case tea.MouseWheelMsg:
 			if m.lyricsState == lyricsSynced {
-				if pageY >= 0 && pageY < m.height-2 && msg.X >= m.lyricsStartCol() {
-					if msg.Button == tea.MouseButtonWheelUp {
-						m.lyricView.SetYOffset(m.lyricView.YOffset - 3)
-					} else if msg.Button == tea.MouseButtonWheelDown {
-						m.lyricView.SetYOffset(m.lyricView.YOffset + 3)
+				if pageY >= 0 && pageY < m.height-2 && mPos.X >= m.lyricsStartCol() {
+					if mPos.Button == tea.MouseWheelUp {
+						m.lyricView.SetYOffset(m.lyricView.YOffset() - 3)
+					} else if mPos.Button == tea.MouseWheelDown {
+						m.lyricView.SetYOffset(m.lyricView.YOffset() + 3)
 					}
 					m = m.rebuildMiddleCache() // 滚动改变视口输出：中间区缓存重建
 				}
 			}
 			return m, nil
-		}
-		pressLeft := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft
-		switch {
-		case pageY == m.height-2 && pressLeft:
+		case tea.MouseClickMsg:
+			if mPos.Button != tea.MouseLeft {
+				return m, nil
+			}
+			switch {
+			case pageY == m.height-2:
 			// 进度条行：点击列 ∈ [0, barW) → seek 到对应百分比位置
 			if m.state.Track == nil {
 				return m, nil
 			}
 			barW := m.progressBarWidth()
-			if msg.X >= 0 && msg.X < barW {
-				return m, seekCmd(m.player, progressClickPercent(msg.X, barW)*m.state.Duration)
+			if mPos.X >= 0 && mPos.X < barW {
+				return m, seekCmd(m.player, progressClickPercent(mPos.X, barW)*m.state.Duration)
 			}
 			return m, nil
-		case pageY == m.height-1 && pressLeft:
+		case pageY == m.height-1:
 			// 按钮行：左信息区不响应；中栏三键 + 右栏模式按钮。
 			if m.state.Track == nil {
 				return m, nil
 			}
 			lay := m.controlBarLayout(m.width)
 			switch {
-			case hitBtn(msg.X, lay.centerStart+btnPrevRel):
+			case hitBtn(mPos.X, lay.centerStart+btnPrevRel):
 				return m, emitPrevTrack()
-			case hitBtn(msg.X, lay.centerStart+btnToggleRel):
+			case hitBtn(mPos.X, lay.centerStart+btnToggleRel):
 				return m, emitTogglePlay()
-			case hitBtn(msg.X, lay.centerStart+btnNextRel):
+			case hitBtn(mPos.X, lay.centerStart+btnNextRel):
 				return m, emitNextTrack()
-			case msg.X >= lay.rightStart && msg.X < lay.rightStart+ansi.StringWidth(m.modeRightText())+2:
+			case mPos.X >= lay.rightStart && mPos.X < lay.rightStart+ansi.StringWidth(m.modeRightText())+2:
 				return m, emitToggleMode()
 			}
+			return m, nil
+			}
+		default:
 			return m, nil
 		}
 	}
@@ -480,7 +485,7 @@ func (m homeModel) setLyrics(err error, ly *lyrics.Lyrics) homeModel {
 		m.lyricsState = lyricsSynced
 		m.currentLine = -1
 		// 歌词到达后按动态公式设置视口高度（padding 模型，不随行数收缩）。
-		m.lyricView.Height = m.lyricsHeight()
+		m.lyricView.SetHeight(m.lyricsHeight())
 		m.rebuildLyrics()
 	} else {
 		m.lyricsState = lyricsNone
@@ -582,9 +587,11 @@ func (m homeModel) setSize(width, height int) homeModel {
 	// 封面字符画固定 30×17、与终端尺寸无关：setSize 不清缓存不重渲。
 	// 歌词 viewport 尺寸 = 中间区歌词列尺寸：宽 = width-coverW-4（gap 2 + 边距 2），
 	// 高 = 动态视口行数 min(21, 中间区高−上下各 2 行留白)（见 lyricsHeight），
-	// 窄窗口下自动收缩。
-	m.lyricView.Width = m.lyricsColumnWidth()
-	m.lyricView.Height = m.lyricsHeight()
+	// 窄窗口下自动收缩。视口高度强制奇数，保证中心对称。
+	// 使用同一 coverHidden 快照计算列宽，避免中间状态不一致导致抖动。
+	hide := m.coverHidden()
+	m.lyricView.SetWidth(m.lyricsColumnWidthWithHide(hide))
+	m.lyricView.SetHeight(m.lyricsHeight())
 	// 视口高度可能已变化（留白/上限动态计算），先重建 padding 内容再重算
 	// 滚动偏移：此前基于未知尺寸（Height=1）的 scrollLyricsTo 会留下越界
 	// YOffset，导致歌词首行被吞（回归：TestHomeLyricsCenteredWhenFew）。
@@ -611,12 +618,13 @@ var lyricActiveStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(
 
 // rebuildLyrics 用当前高亮行重渲染歌词内容：内容 = H/2 行空白 + 歌词行
 // + H/2 行空白（padding 模型，配合 scrollLyricsTo 使当前行恒在视口中央；
+// H 恒为奇数，故上下 padding 对称，H/2 向下取整即 (H-1)/2 行空白，中心对称；
 // H 变化后必须重调本函数，padding 行数随 H/2 变化）。
 func (m *homeModel) rebuildLyrics() {
 	if m.lyrics == nil {
 		return
 	}
-	pad := m.lyricView.Height / 2
+	pad := m.lyricView.Height() / 2 // H 奇数时 pad = (H-1)/2，对称
 	var sb strings.Builder
 	sb.WriteString(strings.Repeat("\n", pad))
 	for i, line := range m.lyrics.Lines {
@@ -635,7 +643,7 @@ func (m *homeModel) rebuildLyrics() {
 // 开头首行在中央（上方整片空白）、结尾末行停中央（下方可空白）；行数少时
 // 同样滚动 N−1 行，首末行都在中央。
 func (m *homeModel) scrollLyricsTo(idx int) {
-	if m.lyricView.Height <= 0 || m.lyrics == nil {
+	if m.lyricView.Height() <= 0 || m.lyrics == nil {
 		return
 	}
 	m.lyricView.SetYOffset(lyricScrollOffset(idx, len(m.lyrics.Lines)))
@@ -670,7 +678,14 @@ func (m homeModel) middleHeight() int {
 // 封面隐藏时（窗口不满足宽 < 60 或 高 < 28）封面列移除，歌词区占满整页宽（直接居中
 // 屏幕，见 renderMiddleView/centerLyrics）。
 func (m homeModel) lyricsColumnWidth() int {
-	if m.coverHidden() {
+	return m.lyricsColumnWidthWithHide(m.coverHidden())
+}
+
+// lyricsColumnWidthWithHide 按给定隐藏态计算歌词列宽（setSize 内与
+// lyricView.Width 使用同一 hide 快照，避免中间状态不一致导致列宽与
+// centerLyrics 的 lyricsW 不一致而抖动）。
+func (m homeModel) lyricsColumnWidthWithHide(hide bool) int {
+	if hide {
 		return m.width
 	}
 	w := m.width - coverW - 4
@@ -792,10 +807,12 @@ func (m homeModel) lyricsColumnView() string {
 	return ""
 }
 
-// centerLyrics 把每行文本水平居中到屏幕中心（歌词列起点 = coverW+2），
-// 并补尾空格到歌词列宽——外层 Place(lyricsW, ...) 对满宽行不再重新水平
-// 居中（否则短行/提示文本会被推回歌词列中心，回归：暂无歌词偏右）。
-// viewport 填充的行尾空格先剔除，避免宽度计算失真；超宽行保持原样。
+// centerLyrics 把每行文本水平居中到歌词列内，并补尾空格到歌词列宽——
+// 外层 Place(lyricsW, ...) 对满宽行不再重新水平居中（否则短行/提示文本
+// 会被推回歌词列中心，回归：暂无歌词偏右）。尾空格填充使每行占满 lyricsW，
+// 防止外层 Place 对短行再次居中导致偶发一列抖动。
+// viewport 填充的行尾空格先 TrimRight 剔除，再用 ansi.StringWidth 计宽，
+// 避免宽度计算失真；超宽行 vis>lyricsW 时 pad=0 tail=0 退化为左对齐。
 func (m homeModel) centerLyrics(s string) string {
 	lyricsW := m.lyricsColumnWidth()
 	lines := strings.Split(s, "\n")
@@ -813,6 +830,7 @@ func (m homeModel) centerLyrics(s string) string {
 		if tail < 0 {
 			tail = 0
 		}
+		// 防 Place 重新居中：每行补尾空格至 lyricsW，使外层 Place 视其为满宽行
 		lines[i] = strings.Repeat(" ", pad) + trimmed + strings.Repeat(" ", tail)
 	}
 	return strings.Join(lines, "\n")

@@ -458,6 +458,96 @@ func TestLoadYtdlpHeadersInvalidType(t *testing.T) {
 	}
 }
 
+func TestLoadYtdlpPathProxyMissing(t *testing.T) {
+	// 不写 path/proxy → 空字符串（零值 = 未配置）
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"ytdlp":{"headers":{"User-Agent":"Mozilla/5.0"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Ytdlp.Path != "" {
+		t.Errorf("Ytdlp.Path = %q, want 空（缺省 = 用 PATH 查找 yt-dlp）", cfg.Ytdlp.Path)
+	}
+	if cfg.Ytdlp.Proxy != "" {
+		t.Errorf("Ytdlp.Proxy = %q, want 空（缺省 = 不走代理）", cfg.Ytdlp.Proxy)
+	}
+}
+
+func TestLoadYtdlpPathProxyExplicit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"ytdlp":{"path":"/usr/local/bin/yt-dlp","proxy":"socks5://127.0.0.1:1080","headers":{"User-Agent":"Mozilla/5.0"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Ytdlp.Path != "/usr/local/bin/yt-dlp" {
+		t.Errorf("Ytdlp.Path = %q, want /usr/local/bin/yt-dlp", cfg.Ytdlp.Path)
+	}
+	if cfg.Ytdlp.Proxy != "socks5://127.0.0.1:1080" {
+		t.Errorf("Ytdlp.Proxy = %q, want socks5://127.0.0.1:1080", cfg.Ytdlp.Proxy)
+	}
+}
+
+func TestLoadYtdlpPathProxyExplicitEmpty(t *testing.T) {
+	// 显式空字符串保留为空（与缺省等价）：消费方按默认处理
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"ytdlp":{"path":"","proxy":"","headers":{"User-Agent":"Mozilla/5.0"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Ytdlp.Path != "" || cfg.Ytdlp.Proxy != "" {
+		t.Errorf("got Path=%q Proxy=%q, want 均为空", cfg.Ytdlp.Path, cfg.Ytdlp.Proxy)
+	}
+	// 其余字段不受影响
+	if !reflect.DeepEqual(cfg.Ytdlp.Headers, map[string]string{"User-Agent": "Mozilla/5.0"}) {
+		t.Errorf("Ytdlp.Headers = %v, want User-Agent 保留", cfg.Ytdlp.Headers)
+	}
+}
+
+func TestDefaultYtdlpPathProxyEmpty(t *testing.T) {
+	cfg, err := Default()
+	if err != nil {
+		t.Fatalf("Default() error: %v", err)
+	}
+	if cfg.Ytdlp.Path != "" {
+		t.Errorf("Ytdlp.Path = %q, want 空（默认不配置路径）", cfg.Ytdlp.Path)
+	}
+	if cfg.Ytdlp.Proxy != "" {
+		t.Errorf("Ytdlp.Proxy = %q, want 空（默认不走代理）", cfg.Ytdlp.Proxy)
+	}
+}
+
+func TestSaveRoundtripYtdlpPathProxy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "config.json")
+	cfg := &Config{
+		Cache:  cache.Options{Enabled: false, MaxEntries: 42, Dir: "/tmp/some-cache"},
+		OpenAI: OpenAI{APIKey: "sk-789", Model: "gpt-4o-mini"},
+		Ytdlp: Ytdlp{
+			Headers: map[string]string{"User-Agent": "Mozilla/5.0"},
+			Path:    "/opt/yt-dlp/bin/yt-dlp",
+			Proxy:   "http://127.0.0.1:7890",
+		},
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got.Ytdlp, cfg.Ytdlp) {
+		t.Errorf("ytdlp roundtrip 不一致: got %+v, want %+v", got.Ytdlp, cfg.Ytdlp)
+	}
+}
+
 func TestSaveRoundtripYtdlp(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sub", "config.json")
 	cfg := &Config{

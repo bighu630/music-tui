@@ -50,6 +50,73 @@ func TestRequireToolMissing(t *testing.T) {
 	}
 }
 
+// requireYtdlp 空配置 → 与 requireTool 一致走 PATH 查找：PATH 中放假
+// yt-dlp 脚本即返回该路径。
+func TestRequireYtdlpEmptyUsesPATH(t *testing.T) {
+	dir := t.TempDir()
+	name := "yt-dlp"
+	if runtime.GOOS == "windows" {
+		name = "yt-dlp.exe"
+	}
+	bin := filepath.Join(dir, name)
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	got, err := requireYtdlp("")
+	if err != nil {
+		t.Fatalf("requireYtdlp(\"\"): %v", err)
+	}
+	if got != bin {
+		t.Errorf("path = %q, want %q", got, bin)
+	}
+}
+
+// requireYtdlp 自定义路径：配置的路径存在且可执行 → 返回该路径。
+func TestRequireYtdlpCustomPath(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "custom-yt-dlp")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := requireYtdlp(bin)
+	if err != nil {
+		t.Fatalf("requireYtdlp: %v", err)
+	}
+	if got != bin {
+		t.Errorf("path = %q, want %q", got, bin)
+	}
+}
+
+// requireYtdlp 自定义路径不存在 → 报错含 "ytdlp.path" 与配置值；且即使 PATH
+// 中存在真实 yt-dlp 也不回落（配置了路径就只检测该路径）。
+func TestRequireYtdlpCustomPathMissingNoFallback(t *testing.T) {
+	dir := t.TempDir()
+	name := "yt-dlp"
+	if runtime.GOOS == "windows" {
+		name = "yt-dlp.exe"
+	}
+	bin := filepath.Join(dir, name)
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	missing := filepath.Join(dir, "no-such-yt-dlp")
+	_, err := requireYtdlp(missing)
+	if err == nil {
+		t.Fatal("配置路径不存在时应报错")
+	}
+	if !strings.Contains(err.Error(), "ytdlp.path") {
+		t.Errorf("错误信息应包含 ytdlp.path: %v", err)
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("错误信息应包含配置值: %v", err)
+	}
+}
+
 func TestInstallHint(t *testing.T) {
 	hint := installHint("mpv")
 	switch runtime.GOOS {
@@ -246,7 +313,7 @@ func TestLoadCacheCorruptIndexBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cm := loadCache(cache.Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent/yt-dlp", "", nil)
+	cm := loadCache(cache.Options{Enabled: true, MaxEntries: 100, Dir: dir}, "/nonexistent/yt-dlp", "", "", nil)
 	if cm == nil {
 		t.Fatal("loadCache 不应返回 nil")
 	}
@@ -270,7 +337,7 @@ func TestLoadCacheFailsGracefullyDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cm := loadCache(cache.Options{Enabled: true, MaxEntries: 100, Dir: notDir}, "/nonexistent/yt-dlp", "", nil)
+	cm := loadCache(cache.Options{Enabled: true, MaxEntries: 100, Dir: notDir}, "/nonexistent/yt-dlp", "", "", nil)
 	if cm == nil {
 		t.Fatal("loadCache 不应返回 nil")
 	}

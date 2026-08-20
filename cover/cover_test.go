@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"image"
+	"image/color"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
@@ -317,16 +318,147 @@ func TestCacheFileNameEscapesPath(t *testing.T) {
 	cases := []struct {
 		source, id, want string
 	}{
-		{"youtube", "abc", "youtube-abc"},                         // YouTube ID（[A-Za-z0-9_-]）不受影响
-		{"local", `/a/b/c.mp3`, "local-_a_b_c.mp3"},               // 路径分隔符 → _
-		{"local", `C:\music\song.mp3`, "local-C__music_song.mp3"}, // Windows 分隔符/冒号 → _
-		{"local", "a b?.mp3", "local-a_b_.mp3"},                   // 空格与非法字符 → _
-		{"local", "中文.mp3", "local-__.mp3"},                       // Unicode 非 ASCII → _
+		{"youtube", "abc", "youtube-abc"},                         // YouTube ID（[A-Za-z0-9_-]，sanitize 恒等）不受影响
+		{"local", `/a/b/c.mp3`, "local-_a_b_c.mp3-78a914f5c93a"}, // 本地路径：转义 + 哈希后缀（单射）
+		{"local", `C:\music\song.mp3`, "local-C__music_song.mp3-1e2014c54dc1"},
+		{"local", "a b?.mp3", "local-a_b_.mp3-eea52ce19caa"},
+		{"local", "中文.mp3", "local-__.mp3-4959cceb308c"}, // Unicode 非 ASCII → _ + 哈希后缀
 	}
 	for _, c := range cases {
 		if got := cacheFileName(c.source, c.id); got != c.want {
 			t.Errorf("cacheFileName(%q, %q) = %q, want %q", c.source, c.id, got, c.want)
 		}
+	}
+}
+
+// TestCacheFileNameLongPathCapped 超长本地路径的 sanitize 段截断到上限，
+// 总文件名仍远小于 OS 单文件名上限；截断不影响唯一性（哈希覆盖完整 ID），
+// 两条仅尾部不同的超长路径仍映射到不同文件名。
+func TestCacheFileNameLongPathCapped(t *testing.T) {
+	id := "/home/very/long/path/" + strings.Repeat("sub/", 40) + "中文歌曲.mp3"
+	got := cacheFileName(model.SourceLocal, id)
+	if len(got) > 200 {
+		t.Errorf("缓存文件名过长: %d 字节（%q）", len(got), got)
+	}
+	if !strings.Contains(got, "-") {
+		t.Errorf("长路径应带哈希后缀: %q", got)
+	}
+	// 两条仅在超长尾部不同的路径必须不同名（哈希兜底唯一性）
+	id2 := id + "x"
+	if got2 := cacheFileName(model.SourceLocal, id2); got2 == got {
+		t.Errorf("尾部不同的超长路径撞名:\n %q\n %q", got, got2)
+	}
+}
+
+// TestCacheFileNameOverlongIdentityID 超长但全为安全字符的 ID（恒等分支本会
+// 命中）也必须受限长约束：落哈希分支取截断 + 后缀，不产生超 OS 上限的文件名。
+func TestCacheFileNameOverlongIdentityID(t *testing.T) {
+	id := strings.Repeat("a", 200) // 全安全字符、恒等、但超长
+	got := cacheFileName("youtube", id)
+	if len(got) > 200 {
+		t.Errorf("缓存文件名过长: %d 字节（%q）", len(got), got)
+	}
+	if !strings.HasSuffix(got, "-c2a908d98f5d") {
+		t.Errorf("超长恒等 ID 应落哈希分支（截断+后缀）: %q", got)
+	}
+	// 同一前缀仅尾字符不同的超长恒等 ID 仍不同名
+	id2 := id[:199] + "b"
+	if got2 := cacheFileName("youtube", id2); got2 == got {
+		t.Errorf("尾部不同的超长恒等 ID 撞名:\n %q\n %q", got, got2)
+	}
+}
+
+// TestCacheFileNameDistinctForCollidingPaths 缓存命名必须单射：不同本地文件
+// （中文路径/分隔符 vs 下划线等经过转义会撞名的一类）不得映射到同一缓存
+// 文件名——否则两首歌共享一个封面缓存文件，先 fetch 的封面串显到另一首，
+// 即用户报告的"封面错位"（稳定、部分歌曲受影响）。
+func TestCacheFileNameDistinctForCollidingPaths(t *testing.T) {
+	pairs := [][2]string{
+		{ // 同目录同长相中文歌名（每 非ASCII rune → 一个 '_'，长度相同必撞）
+			"/home/ivhu/Music/周杰伦/晴天.mp3",
+			"/home/ivhu/Music/周杰伦/稻香.mp3",
+		},
+		{ // 分隔符 vs 字面下划线同形
+			"/a/b.mp3",
+			"/a_b.mp3",
+		},
+		{ // 空格 vs 下划线
+			"/a b.mp3",
+			"/a_b.mp3",
+		},
+		{ // 中文歌名 vs 中文歌手名同长相
+			"/home/u/Music/克罗地亚狂想曲.mp3",
+			"/home/u/Music/天空之城钢琴版.mp3",
+		},
+	}
+	for _, p := range pairs {
+		a, b := cacheFileName(model.SourceLocal, p[0]), cacheFileName(model.SourceLocal, p[1])
+		if a == b {
+			t.Errorf("不同文件撞同一缓存文件名:\n  %q → %s\n  %q → %s\n（封面将串显）", p[0], a, p[1], b)
+		}
+	}
+}
+
+// pngColor 生成一张 8x8 纯色 PNG（以不同颜色区分不同歌曲的内嵌封面）。
+func pngColor(t *testing.T, r, g, b uint8) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img.SetRGBA(x, y, color.RGBA{r, g, b, 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestFetchLocalCoverDistinctPerTrack 症状级端到端复现：同一目录下两张
+// 中文歌名的 mp3（转义后长度相同会撞 key），内嵌不同封面。Fetch 两首必须
+// 返回不同的缓存文件、且各自内容与自己的内嵌封面一致（不得把另一首的
+// 封面当成自己的）。修复前两首共享同一缓存文件 → 后 fetch 的一首拿到
+// 先 fetch 的那首的封面（用户报告的错位）。
+func TestFetchLocalCoverDistinctPerTrack(t *testing.T) {
+	f, err := NewFetcher(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	picA := pngColor(t, 255, 0, 0) // 红色封面
+	picB := pngColor(t, 0, 0, 255) // 蓝色封面
+	pA := filepath.Join(dir, "晴天.mp3")
+	pB := filepath.Join(dir, "稻香.mp3")
+	writeMP3WithAPIC(t, pA, picA)
+	writeMP3WithAPIC(t, pB, picB)
+	trA := model.Track{ID: pA, URL: pA, Source: model.SourceLocal}
+	trB := model.Track{ID: pB, URL: pB, Source: model.SourceLocal}
+
+	destA, err := f.Fetch(context.Background(), trA)
+	if err != nil {
+		t.Fatalf("Fetch(A): %v", err)
+	}
+	destB, err := f.Fetch(context.Background(), trB)
+	if err != nil {
+		t.Fatalf("Fetch(B): %v", err)
+	}
+	if destA == destB {
+		t.Fatalf("两首不同歌曲命中同一缓存文件 %q——封面将串显", destA)
+	}
+	dataA, err := os.ReadFile(destA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataB, err := os.ReadFile(destB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(dataA, picA) {
+		t.Errorf("歌曲 A 缓存内容应为其自己的内嵌封面（红），但内容不匹配")
+	}
+	if !bytes.Equal(dataB, picB) {
+		t.Errorf("歌曲 B 缓存内容应为其自己的内嵌封面（蓝），但内容不匹配")
 	}
 }
 

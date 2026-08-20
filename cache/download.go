@@ -50,7 +50,8 @@ func findDestFiles(destBase string) []string {
 
 // realDownload 用 yt-dlp 直接把音频下载到 destBase+".%(ext)s" 模板落盘：
 // exec `yt-dlp --no-playlist --no-warnings -f bestaudio [-cookies <file>]
-// [--add-header <Name:Value>...] -o <destBase>.%(ext)s <url>`。
+// [--add-header <Name:Value>...] [--proxy <proxy>] -o <destBase>.%(ext)s <url>`。
+// proxy 可选：非空时在 headers 之后、-o 之前插入 --proxy；空时不改变既有行为。
 // cookieFile/headers 可选（YouTube 403 风控时附加登录态 cookie 与自定义请求头）：
 // headers 按键排序保证参数确定性，值 TrimSpace 后拼 "Name:value"，空值跳过。
 // 成功返回最终文件 basename（register 用）；失败清理 destBase.* 残留（含 .part）后返回错误。
@@ -58,7 +59,7 @@ func findDestFiles(destBase string) []string {
 // 背景：YouTube 对音频直链做概率性 403 风控（同一 CDN/同一客户端，换 URL 换结果），
 // 而每次运行 yt-dlp = 重新提取 = 新 URL。因此下载失败的重试交给上层整进程重跑
 // （download 循环），每次重跑重新提取新 URL，天然绕开 403——单次尝试内不重试。
-func realDownload(ctx context.Context, ytdlpPath, url, destBase string, cookieFile string, headers map[string]string) (string, error) {
+func realDownload(ctx context.Context, ytdlpPath, proxy, url, destBase string, cookieFile string, headers map[string]string) (string, error) {
 	args := []string{"--no-playlist", "--no-warnings", "-f", "bestaudio"}
 	if cookieFile != "" {
 		args = append(args, "--cookies", cookieFile)
@@ -76,6 +77,9 @@ func realDownload(ctx context.Context, ytdlpPath, url, destBase string, cookieFi
 			}
 			args = append(args, "--add-header", k+":"+v)
 		}
+	}
+	if proxy != "" {
+		args = append(args, "--proxy", proxy)
 	}
 	args = append(args, "-o", destBase+".%(ext)s", url)
 	// 命令摘要日志：header 只打键名不打值（值可能含敏感信息）

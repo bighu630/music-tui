@@ -57,6 +57,12 @@ type MpvPlayer struct {
 	cookieFile    string
 	headers       map[string]string
 	ytdlpConfPath string
+	// ytdlpPath/proxy 由 SetYtdlpOptions 设置（须在 Start 之前调用）：
+	// ytdlpPath 非空 → mpv 用该路径调用 yt-dlp（--script-opts=ytdl_hook-ytdl_path=）；
+	// proxy 非空 → --ytdl-raw-options 值内追加 proxy=（mpv 传给 yt-dlp 的 --proxy）。
+	// 两者均空 = 行为与现状完全一致；startProcess 只读它们，无需 stateMu 保护。
+	ytdlpPath string
+	proxy     string
 
 	cmd    *exec.Cmd
 	waitCh chan error
@@ -101,6 +107,13 @@ type MpvPlayer struct {
 	stallSawProgress bool
 	stallArmSeq      int
 
+	// intendedPause 用户暂停意图（stateMu 保护）：true = 最近一次暂停是用户显式
+	// 意图（Pause/PlayPaused），false = 无暂停意图（Play/Resume/新连接）。
+	// obsPause 分支据此区分"用户主动暂停"（disarm watchdog + 正常发 StateEvent）
+	// 与"pause 属性异常残留"（不 disarm、不发事件、自动恢复）——回归：
+	// TestStallWatchdogAutoRecoversUnexpectedPause / TestStallWatchdogKeepsResumePaused。
+	intendedPause bool
+
 	events   chan Event
 	mu       sync.Mutex
 	duration float64
@@ -123,6 +136,15 @@ func NewMpvPlayer(binPath, socketPath string, cookieFile string, headers map[str
 	}
 }
 
+// SetYtdlpOptions 设置取流附加配置（必须在 Start() 之前调用）：
+// ytdlpPath 非空时 mpv 用该路径调用 yt-dlp（--script-opts=ytdl_hook-ytdl_path=，
+// ytdl_hook.lua 的 script-opt 键名，下划线）；proxy 非空时 mpv 传给 yt-dlp
+// 的 --proxy（--ytdl-raw-options=proxy=）。两者均空 = 行为与现状完全一致。
+func (p *MpvPlayer) SetYtdlpOptions(ytdlpPath, proxy string) {
+	p.ytdlpPath = ytdlpPath
+	p.proxy = proxy
+}
+
 // Start 启动 mpv 进程（--idle=yes 常驻），等待 IPC socket 就绪后
 // 连接、注册属性观察并启动事件泵。
 func (p *MpvPlayer) Start() error {
@@ -141,13 +163,16 @@ func (p *MpvPlayer) Start() error {
 func (p *MpvPlayer) startProcess() error {
 	_ = os.Remove(p.socketPath) // 清理上次残留的 socket 文件
 	// --ytdl-raw-options 动态拼接：打底 socket-timeout=15,retries=2（yt-dlp 取流
-	// 收紧：403/网络黑洞快速失败），cookieFile/headers 非空时追加 cookies= 与
-	// config-locations=（mpv 列表值语法：值含逗号时双引号包裹，内部 `"` 无法
+	// 收紧：403/网络黑洞快速失败），cookieFile/proxy/headers 非空时追加 cookies=、
+	// proxy= 与 config-locations=（mpv 列表值语法：值含逗号时双引号包裹，内部 `"` 无法
 	// 转义表示）。headers 生成临时配置失败仅 log 警告并跳过 config-locations
 	// 段——绝不因 header 配置问题导致 mpv 启动失败（取流功能降级不崩溃）。
 	ytdlRawOpts := "socket-timeout=15,retries=2"
 	if p.cookieFile != "" {
 		ytdlRawOpts += ",cookies=" + quoteMpvOptionValue(p.cookieFile)
+	}
+	if p.proxy != "" {
+		ytdlRawOpts += ",proxy=" + quoteMpvOptionValue(p.proxy)
 	}
 	if len(p.headers) > 0 {
 		confPath, err := buildYtdlpConf(p.headers)
@@ -169,6 +194,12 @@ func (p *MpvPlayer) startProcess() error {
 		"--ytdl-raw-options=" + ytdlRawOpts, // yt-dlp 取流收紧：403/网络黑洞快速失败（默认 retries=10 可拖 1-2 分钟）
 		"--no-resume-playback",              // 不写恢复播放状态文件
 		"--input-ipc-server=" + p.socketPath,
+	}
+	// ytdlpPath 非空：mpv 用自定义 yt-dlp 路径（--script-opts=ytdl_hook-ytdl_path=，
+	// ytdl_hook.lua 的 script-opt 键名，下划线；值含逗号同样按 mpv 列表值语法
+	// 双引号包裹）。
+	if p.ytdlpPath != "" {
+		args = append(args, "--script-opts=ytdl_hook-ytdl_path="+quoteMpvOptionValue(p.ytdlpPath))
 	}
 	p.stateMu.Lock()
 	binPath := p.binPath
@@ -246,6 +277,7 @@ func (p *MpvPlayer) connect() error {
 		return err
 	}
 	p.conn = conn
+	p.intendedPause = false // 新进程 pause 默认关：无用户暂停意图（残留修复语义）
 	p.stateMu.Unlock()
 	go p.pump(conn)
 	// 启动加载看门狗：loadDeadline 零值时空转，无副作用。
@@ -667,13 +699,42 @@ func (p *MpvPlayer) handlePropertyChange(ev *mpvipc.Event) {
 		}
 	case obsPause:
 		if paused, ok := toBool(ev.Data); ok {
-			// 暂停 = 用户主动不会继续播放：卡住检测解除（暂停窗口内位置不推进属正常，
-			// 不误判卡住——回归：TestStallWatchdogDisarmedByPause）。
-			if paused {
+			p.stateMu.Lock()
+			intended := p.intendedPause
+			p.stateMu.Unlock()
+			if paused && intended {
+				// 用户主动暂停 = 不会继续播放：卡住检测解除（暂停窗口内位置不推进
+				// 属正常，不误判卡住——回归：TestStallWatchdogDisarmedByPause）。
 				p.disarmStallWatchdog()
+				p.emit(StateEvent{Playing: false})
+			} else if paused {
+				// pause=true 但无用户暂停意图 = 属性异常残留（mpv pause 不随新文件
+				// 重置，Play 已显式复位，此处是兜底）：不 disarm（watchdog 保持武装，
+				// 窗口后照常 StalledEvent → UI 重启链路兜底）、不发 StateEvent（避免
+				// UI Playing 闪烁）、自动恢复。恢复成功 mpv 回发 pause=false →
+				// StateEvent{Playing:true}，UI 状态自然一致。
+				logger.Warn("mpv pause 属性异常为 true（非用户暂停意图），自动恢复播放")
+				go p.recoverUnexpectedPause()
+			} else {
+				p.emit(StateEvent{Playing: true})
 			}
-			p.emit(StateEvent{Playing: !paused})
 		}
+	}
+}
+
+// recoverUnexpectedPause 非用户意图的 pause=true（跨文件残留）自动恢复：
+// 快照当前连接下发 set pause=false（callWithTimeout 包裹：mpv 挂死不阻塞）。
+// conn 为 nil（断线清理窗口）则跳过——断线路径自会重连重置。恢复失败静默
+// 返回：watchdog 保持武装，窗口后照常 emit StalledEvent，UI 重启链路兜底。
+func (p *MpvPlayer) recoverUnexpectedPause() {
+	conn := p.currentConn()
+	if conn == nil {
+		return
+	}
+	if err := callWithTimeout(func() error {
+		return conn.Set("pause", false)
+	}); err != nil {
+		logger.Warn("自动恢复 pause 失败: %v", err)
 	}
 }
 
@@ -702,6 +763,19 @@ func (p *MpvPlayer) Play(url string) error {
 	conn := p.currentConn()
 	if conn == nil {
 		return errors.New("mpv 未连接") // 断开清理恰好在检查后发生：极窄窗口，下次命令会重连
+	}
+	// 意图先于动作（与 PlayPaused 对称）：mpv 的 pause 属性不随新文件加载重置，
+	// 用户暂停后再经 Play 加载新曲会保持暂停（不发声、position 不动），故 Play
+	// 必须显式复位 pause=false——Play 语义 = 播放意图。intendedPause 须在命令
+	// 之前置 false：set pause=false 的回发事件按非暂停意图处理（幂等无害）。
+	p.stateMu.Lock()
+	p.intendedPause = false
+	p.stateMu.Unlock()
+	if err := callWithTimeout(func() error {
+		return conn.Set("pause", false)
+	}); err != nil {
+		logger.Error("Play set pause=false 失败: %s: %v", url, err)
+		return fmt.Errorf("set pause: %w", err)
 	}
 	var data interface{}
 	if err := callWithTimeout(func() error {
@@ -734,6 +808,11 @@ func (p *MpvPlayer) PlayPaused(url string, start float64) error {
 	if conn == nil {
 		return errors.New("mpv 未连接") // 断开清理恰好在检查后发生：极窄窗口，下次命令会重连
 	}
+	// 恢复流程有意静默暂停等待用户操作，绝不能被自动恢复破坏：intendedPause
+	// 须在 set pause=true 之前置 true（回发的 pause=true 事件按用户意图处理）。
+	p.stateMu.Lock()
+	p.intendedPause = true
+	p.stateMu.Unlock()
 	if err := callWithTimeout(func() error {
 		return conn.Set("pause", true)
 	}); err != nil {
@@ -810,6 +889,11 @@ func (p *MpvPlayer) Pause() error {
 	if conn == nil {
 		return errors.New("mpv 未连接")
 	}
+	// 用户显式暂停意图：先置位再发命令（回发的 pause=true 事件按用户主动暂停
+	// 处理：disarm watchdog + StateEvent，不触发自动恢复）。
+	p.stateMu.Lock()
+	p.intendedPause = true
+	p.stateMu.Unlock()
 	if err := callWithTimeout(func() error {
 		return conn.Set("pause", true)
 	}); err != nil {
@@ -828,6 +912,11 @@ func (p *MpvPlayer) Resume() error {
 	if conn == nil {
 		return errors.New("mpv 未连接")
 	}
+	// 用户显式恢复意图：先置位再发命令（此后再来的 pause=true 若无人为操作 =
+	// 异常残留，按残留路径自动恢复，不 disarm watchdog）。
+	p.stateMu.Lock()
+	p.intendedPause = false
+	p.stateMu.Unlock()
 	if err := callWithTimeout(func() error {
 		return conn.Set("pause", false)
 	}); err != nil {

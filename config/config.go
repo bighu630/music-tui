@@ -29,13 +29,19 @@ type OpenAI struct {
 	BaseURL string `json:"base_url"`
 }
 
-// Ytdlp 是 yt-dlp 全局附加参数配置：Headers 非空时以 --add-header 附加到
-// 每次 yt-dlp 调用（cookie 文件由 ytm.Store 管理，不在配置文件中）。
-// Headers 为 nil/空 = 未配置（行为与不附加完全一致）。
+// Ytdlp 是 yt-dlp 全局附加参数配置，三项均为可选：
+//   - Headers 非空时以 --add-header 附加到每次 yt-dlp 调用（cookie 文件由
+//     ytm.Store 管理，不在配置文件中）；nil/空 = 未配置（行为与不附加一致）
+//   - Path 为 yt-dlp 可执行文件路径；空 = 用 PATH 查找 "yt-dlp"（默认行为）
+//   - Proxy 为代理 URL（http/https/socks5 等格式，如
+//     "http://127.0.0.1:7890"、"socks5://127.0.0.1:1080"）；空 = 不走代理
+//
 // header 名须匹配 [\w-]+（字母数字与连字符）：非法键（如含空格）会让
 // 整次 yt-dlp 调用报错。
 type Ytdlp struct {
 	Headers map[string]string `json:"headers"`
+	Path    string            `json:"path"`
+	Proxy   string            `json:"proxy"`
 }
 
 // Log 是日志配置：Level 为 "debug"/"info"/"warn"/"error"（大小写不敏感），
@@ -62,6 +68,7 @@ type Config struct {
 
 // Default 返回默认配置：缓存开启、上限 DefaultMaxEntries、
 // 目录为 os.UserCacheDir()/music-tui（UserCacheDir 失败返回错误）。
+// Ytdlp 保持零值（Headers nil、Path/Proxy 空字符串）= 全部未配置（见 Ytdlp 注释）。
 func Default() (*Config, error) {
 	dir, err := os.UserCacheDir()
 	if err != nil {
@@ -86,7 +93,9 @@ func Default() (*Config, error) {
 //   - JSON 损坏 → 返回错误（原文件保持不动，由 main 层备份重建）
 //   - 字段缺失/非法 → 逐项回落默认：Enabled 缺失 → true（显式 false 保留）、
 //     MaxEntries<1 → DefaultMaxEntries、Dir=="" → 默认目录；
-//     ytdlp.headers 缺失/null → nil，显式 {} → 空 map（均为未配置）
+//     ytdlp.headers 缺失/null → nil，显式 {} → 空 map；
+//     ytdlp.path/ytdlp.proxy 缺失 → 空字符串（显式空字符串等价于缺失），
+//     消费方按空处理（PATH 查找 / 不走代理）
 //
 // 返回的 Config 始终是规范化后的完整值。
 func Load(path string) (*Config, error) {
@@ -122,6 +131,8 @@ func Load(path string) (*Config, error) {
 		} `json:"openai"`
 		Ytdlp struct {
 			Headers map[string]string `json:"headers"`
+			Path    *string           `json:"path"`
+			Proxy   *string           `json:"proxy"`
 		} `json:"ytdlp"`
 		Log struct {
 			Level *string `json:"level"`
@@ -177,6 +188,15 @@ func Load(path string) (*Config, error) {
 	// nil 与空 map 语义一致，均为未配置（不附加任何参数）。
 	if raw.Ytdlp.Headers != nil {
 		c.Ytdlp.Headers = raw.Ytdlp.Headers
+	}
+	// path/proxy：指针区分「缺失 → 空」与「显式空字符串 → 空」，两者结果
+	// 一致（消费方均按默认处理：PATH 查找 yt-dlp / 不走代理）；
+	// 显式非空值原样保留。
+	if raw.Ytdlp.Path != nil {
+		c.Ytdlp.Path = *raw.Ytdlp.Path
+	}
+	if raw.Ytdlp.Proxy != nil {
+		c.Ytdlp.Proxy = *raw.Ytdlp.Proxy
 	}
 	return c, nil
 }

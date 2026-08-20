@@ -72,7 +72,7 @@ func writeFakeYtDlp(t *testing.T, body string) string {
 func TestRealDownloadFakeScript(t *testing.T) {
 	script := writeFakeYtDlp(t, fakeYtDlpBody(fakeAudioOut))
 	destBase := filepath.Join(t.TempDir(), "song")
-	file, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase, "", nil)
+	file, err := realDownload(context.Background(), script, "", "https://youtube.com/watch?v=abc", destBase, "", nil)
 	if err != nil {
 		t.Fatalf("realDownload: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestRealDownloadFakeScript(t *testing.T) {
 func TestRealDownloadScriptFails(t *testing.T) {
 	script := writeFakeYtDlp(t, fakeYtDlpBody(`echo "HTTP Error 403" >&2; exit 1`))
 	destBase := filepath.Join(t.TempDir(), "song")
-	_, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase, "", nil)
+	_, err := realDownload(context.Background(), script, "", "https://youtube.com/watch?v=abc", destBase, "", nil)
 	if err == nil {
 		t.Fatal("realDownload exit 1 = nil error, want error")
 	}
@@ -106,7 +106,7 @@ func TestRealDownloadScriptFails(t *testing.T) {
 func TestRealDownloadNoOutputFile(t *testing.T) {
 	script := writeFakeYtDlp(t, fakeYtDlpBody(`exit 0`)) // 成功退出但什么都没写
 	destBase := filepath.Join(t.TempDir(), "song")
-	_, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase, "", nil)
+	_, err := realDownload(context.Background(), script, "", "https://youtube.com/watch?v=abc", destBase, "", nil)
 	if err == nil {
 		t.Fatal("realDownload 未产出文件 = nil error, want error")
 	}
@@ -118,7 +118,7 @@ func TestRealDownloadNoOutputFile(t *testing.T) {
 func TestRealDownloadZeroByteFile(t *testing.T) {
 	script := writeFakeYtDlp(t, fakeYtDlpBody(`: > "$out"`)) // 写 0 字节产物
 	destBase := filepath.Join(t.TempDir(), "song")
-	_, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase, "", nil)
+	_, err := realDownload(context.Background(), script, "", "https://youtube.com/watch?v=abc", destBase, "", nil)
 	if err == nil {
 		t.Fatal("realDownload 0 字节 = nil error, want error")
 	}
@@ -133,7 +133,7 @@ func TestRealDownloadZeroByteFile(t *testing.T) {
 func TestRealDownloadPartOnly(t *testing.T) {
 	script := writeFakeYtDlp(t, fakeYtDlpBody(`: > "$out.part"`)) // 只产出 .part 临时文件
 	destBase := filepath.Join(t.TempDir(), "song")
-	_, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase, "", nil)
+	_, err := realDownload(context.Background(), script, "", "https://youtube.com/watch?v=abc", destBase, "", nil)
 	if err == nil {
 		t.Fatal("realDownload 仅 .part = nil error, want error")
 	}
@@ -153,7 +153,7 @@ echo "HTTP Error 403" >&2
 exit 1
 `))
 	destBase := filepath.Join(t.TempDir(), "cache[x]", "song")
-	if _, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase, "", nil); err == nil {
+	if _, err := realDownload(context.Background(), script, "", "https://youtube.com/watch?v=abc", destBase, "", nil); err == nil {
 		t.Fatal("realDownload exit 1 = nil error, want error")
 	}
 	if _, err := os.Stat(destBase + ".webm.part"); !os.IsNotExist(err) {
@@ -175,7 +175,7 @@ func TestRealDownloadPicksLatestOnMultipleMatches(t *testing.T) {
 	if err := os.WriteFile(destBase+".m4a", validAudioBytes(), 0o644); err != nil { // 本次产物：后写
 		t.Fatal(err)
 	}
-	file, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase, "", nil)
+	file, err := realDownload(context.Background(), script, "", "https://youtube.com/watch?v=abc", destBase, "", nil)
 	if err != nil {
 		t.Fatalf("realDownload: %v", err)
 	}
@@ -191,7 +191,7 @@ echo "HTTP Error 403" >&2
 exit 1
 `))
 	destBase := filepath.Join(t.TempDir(), "song")
-	if _, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase, "", nil); err == nil {
+	if _, err := realDownload(context.Background(), script, "", "https://youtube.com/watch?v=abc", destBase, "", nil); err == nil {
 		t.Fatal("realDownload exit 1 = nil error, want error")
 	}
 	if _, err := os.Stat(destBase + ".part"); !os.IsNotExist(err) {
@@ -220,7 +220,7 @@ func TestRealDownloadAddsCookieAndHeaders(t *testing.T) {
 		"X-Alpha": "  alpha  ", // 值 TrimSpace 后再拼
 		"X-Skip":  "   ",       // TrimSpace 后为空 → 跳过
 	}
-	if _, err := realDownload(context.Background(), script, url, destBase, cookieFile, headers); err != nil {
+	if _, err := realDownload(context.Background(), script, "", url, destBase, cookieFile, headers); err != nil {
 		t.Fatalf("realDownload: %v", err)
 	}
 	want := []string{
@@ -241,7 +241,44 @@ func TestRealDownloadNoConfigArgsUnchanged(t *testing.T) {
 	script := writeFakeYtDlp(t, argsLogBody(fakeAudioOut))
 	destBase := filepath.Join(t.TempDir(), "song")
 	const url = "https://youtube.com/watch?v=abc"
-	if _, err := realDownload(context.Background(), script, url, destBase, "", nil); err != nil {
+	if _, err := realDownload(context.Background(), script, "", url, destBase, "", nil); err != nil {
+		t.Fatalf("realDownload: %v", err)
+	}
+	want := []string{
+		"--no-playlist", "--no-warnings", "-f", "bestaudio",
+		"-o", destBase + ".%(ext)s", url,
+	}
+	if got := readArgsFile(t, filepath.Dir(destBase)); !reflect.DeepEqual(got, want) {
+		t.Errorf("args = %q\nwant %q", got, want)
+	}
+}
+
+// 配置代理时：args 必须含 "--proxy <proxy>"，且位于 -o 之前（headers 之后）、
+// url 最后——与真实命令顺序完全一致（逐项 DeepEqual）。
+func TestRealDownloadWithProxy(t *testing.T) {
+	script := writeFakeYtDlp(t, argsLogBody(fakeAudioOut))
+	destBase := filepath.Join(t.TempDir(), "song")
+	const url = "https://youtube.com/watch?v=abc"
+	const proxy = "socks5://127.0.0.1:1080"
+	if _, err := realDownload(context.Background(), script, proxy, url, destBase, "", nil); err != nil {
+		t.Fatalf("realDownload: %v", err)
+	}
+	want := []string{
+		"--no-playlist", "--no-warnings", "-f", "bestaudio",
+		"--proxy", proxy,
+		"-o", destBase + ".%(ext)s", url,
+	}
+	if got := readArgsFile(t, filepath.Dir(destBase)); !reflect.DeepEqual(got, want) {
+		t.Errorf("args = %q\nwant %q", got, want)
+	}
+}
+
+// 代理为空（""）时 args 不得出现 --proxy，与未配置代理时逐字节一致（无回归）。
+func TestRealDownloadEmptyProxy(t *testing.T) {
+	script := writeFakeYtDlp(t, argsLogBody(fakeAudioOut))
+	destBase := filepath.Join(t.TempDir(), "song")
+	const url = "https://youtube.com/watch?v=abc"
+	if _, err := realDownload(context.Background(), script, "", url, destBase, "", nil); err != nil {
 		t.Fatalf("realDownload: %v", err)
 	}
 	want := []string{
@@ -262,7 +299,7 @@ printf '<!DOCTYPE html><html>err</html>' > "$out"
 head -c 2048 /dev/zero >> "$out"
 `))
 	destBase := filepath.Join(t.TempDir(), "song")
-	_, err := realDownload(context.Background(), script, "https://youtube.com/watch?v=abc", destBase, "", nil)
+	_, err := realDownload(context.Background(), script, "", "https://youtube.com/watch?v=abc", destBase, "", nil)
 	if err == nil {
 		t.Fatal("realDownload HTML 产物 = nil error, want error")
 	}

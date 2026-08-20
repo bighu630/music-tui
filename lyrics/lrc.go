@@ -140,6 +140,9 @@ func ParseLRC(data []byte) (*Lyrics, error) {
 		if !ok {
 			continue
 		}
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
 		for _, t := range times {
 			lines = append(lines, LyricLine{Time: t, Text: text})
 		}

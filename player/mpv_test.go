@@ -300,6 +300,11 @@ func TestMpvPlayerProgressAndStateEvents(t *testing.T) {
 		t.Errorf("progress = %+v, want {10.5 217.0}", progress)
 	}
 
+	// 用户暂停意图：先显式 Pause()（intendedPause=true），随后的 pause=true
+	// 事件才按"用户主动暂停"处理（非意图残留不发 StateEvent、自动恢复）。
+	if err := p.Pause(); err != nil {
+		t.Fatal(err)
+	}
 	fake.pushEvent(`{"event":"property-change","id":3,"name":"pause","data":true}`)
 	ev = waitEvent(t, p, 2*time.Second)
 	state, ok := ev.(StateEvent)
@@ -846,6 +851,7 @@ func TestMpvPlayerCommands(t *testing.T) {
 	cmds := fake.recordedCommands()
 	got := cmds[3:] // 前 3 条是 observe_property
 	want := [][]interface{}{
+		{"set_property", "pause", false}, // Play 显式复位 pause（mpv pause 属性跨文件残留）
 		{"loadfile", "https://www.youtube.com/watch?v=abc"},
 		{"set_property", "pause", true},
 		{"set_property", "pause", false},
@@ -923,6 +929,41 @@ func TestMpvPlayerPlayPaused(t *testing.T) {
 	want = [][]interface{}{
 		{"set_property", "pause", true},
 		{"loadfile", "https://www.youtube.com/watch?v=def"},
+	}
+	for i := range want {
+		for j := range want[i] {
+			if got[i][j] != want[i][j] {
+				t.Fatalf("cmd[%d] = %v, want %v", i, got[i], want[i])
+			}
+		}
+	}
+}
+
+// 回归（必核）：用户 PlayPaused（pause=true 残留）后再 Play 新曲，必须显式
+// 复位 pause=false——mpv 的 pause 属性不随新文件加载重置，不复位则新曲静默
+// 不播放（不发声、position 不动）而 UI 却显示在播。Play 命令序列 = 意图先于
+// 动作：set pause=false → loadfile（与 PlayPaused 的 set pause=true → loadfile 对称）。
+func TestPlayAfterPlayPausedResetsPause(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+
+	if err := p.PlayPaused("https://www.youtube.com/watch?v=abc", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Play("https://www.youtube.com/watch?v=def"); err != nil {
+		t.Fatal(err)
+	}
+
+	cmds := fake.recordedCommands()
+	got := cmds[3:] // 前 3 条是 observe_property
+	want := [][]interface{}{
+		{"set_property", "pause", true}, // PlayPaused 自身：静默暂停等待用户操作
+		{"loadfile", "https://www.youtube.com/watch?v=abc"},
+		{"set_property", "pause", false}, // Play 显式复位残留暂停（核心回归）
+		{"loadfile", "https://www.youtube.com/watch?v=def"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("commands = %d, want %d: %v", len(got), len(want), got)
 	}
 	for i := range want {
 		for j := range want[i] {
@@ -1130,6 +1171,81 @@ func TestMpvStartProcessYtdlRawOptionsQuotesCommaCookiePath(t *testing.T) {
 	// 无 headers → 不生成临时配置
 	if _, err := os.Stat(filepath.Join(os.TempDir(), fmt.Sprintf("music-tui-ytdlp-%d.conf", os.Getpid()))); !os.IsNotExist(err) {
 		t.Errorf("无 headers 时不应生成临时配置: %v", err)
+	}
+}
+
+// SetYtdlpOptions 配置自定义 yt-dlp 路径与代理后：--ytdl-raw-options 值内追加
+// proxy=<proxy>（单一参数），并新增 --script-opts=ytdl_hook-ytdl_path=<path>
+// 参数（mpv 官方 ytdl_hook.lua 的 script-opt 键名，注意是下划线）。
+func TestSetYtdlpOptionsAddsProxyAndPath(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := testSockPath(t)
+	logPath := filepath.Join(dir, "starts.log")
+	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", logPath)
+	script := writeFakeMpvWrapperScript(t, dir)
+
+	p := NewMpvPlayer(script, socketPath, "", nil)
+	p.SetYtdlpOptions("/custom/yt-dlp", "socks5://127.0.0.1:1080")
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取日志: %v", err)
+	}
+	// 无 cookie/headers 时 proxy 追加后仍是单一 --ytdl-raw-options 参数
+	wantOpts := "--ytdl-raw-options=socket-timeout=15,retries=2,proxy=socks5://127.0.0.1:1080"
+	if n := strings.Count(string(data), "--ytdl-raw-options="); n != 1 {
+		t.Errorf("--ytdl-raw-options 出现次数 = %d, want 1（单一参数）:\n%s", n, data)
+	}
+	if !strings.Contains(string(data), wantOpts) {
+		t.Errorf("mpv 启动参数应含 %s:\n%s", wantOpts, data)
+	}
+	if !strings.Contains(string(data), "--script-opts=ytdl_hook-ytdl_path=/custom/yt-dlp") {
+		t.Errorf("mpv 启动参数应含 --script-opts=ytdl_hook-ytdl_path=/custom/yt-dlp:\n%s", data)
+	}
+}
+
+// SetYtdlpOptions("", "") 与未调用时行为完全一致：启动参数逐字节相同
+// （不出现 proxy= / ytdl_hook-ytdl_path；两次运行用同一 socket 路径，
+// 日志仅剩 args 行可整体比对）。
+func TestSetYtdlpOptionsEmptyNoChange(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := testSockPath(t)
+	script := writeFakeMpvWrapperScript(t, dir)
+
+	// 基线：未调用 SetYtdlpOptions
+	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", filepath.Join(dir, "baseline.log"))
+	p1 := NewMpvPlayer(script, socketPath, "", nil)
+	if err := p1.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := p1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	baseline, err := os.ReadFile(filepath.Join(dir, "baseline.log"))
+	if err != nil {
+		t.Fatalf("读取基线日志: %v", err)
+	}
+
+	// SetYtdlpOptions("", "") 后启动参数应与基线逐字节一致
+	t.Setenv("MUSIC_TUI_FAKE_MPV_LOG", filepath.Join(dir, "empty.log"))
+	p2 := NewMpvPlayer(script, socketPath, "", nil)
+	p2.SetYtdlpOptions("", "")
+	if err := p2.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := p2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "empty.log"))
+	if err != nil {
+		t.Fatalf("读取日志: %v", err)
+	}
+	if string(got) != string(baseline) {
+		t.Errorf("SetYtdlpOptions(\"\", \"\") 后启动参数与未调用不一致:\n--- baseline ---\n%s--- got ---\n%s", baseline, got)
 	}
 }
 
@@ -1846,7 +1962,7 @@ func TestStallWatchdogSuppressedByProgress(t *testing.T) {
 	waitNoStall(t, p, 300*time.Millisecond)
 }
 
-// 窗口内暂停（StateEvent Playing=false）→ disarm，不触发。
+// 窗口内用户主动暂停（StateEvent Playing=false）→ disarm，不触发。
 func TestStallWatchdogDisarmedByPause(t *testing.T) {
 	fake := newFakeMpvServer(t)
 	p := connectTestPlayer(t, fake)
@@ -1854,10 +1970,110 @@ func TestStallWatchdogDisarmedByPause(t *testing.T) {
 
 	fake.pushEvent(`{"event":"file-loaded"}`)
 	waitEvent(t, p, 2*time.Second) // TrackStarted
+	// 用户暂停意图：先显式 Pause()，pause=true 事件才 disarm watchdog
+	//（无意图的残留 pause 不 disarm——见 TestStallWatchdogAutoRecoversUnexpectedPause）。
+	if err := p.Pause(); err != nil {
+		t.Fatal(err)
+	}
 	fake.pushEvent(`{"event":"property-change","id":3,"name":"pause","data":true}`)
 	// 消费 StateEvent（pause 处理在 emit 前 disarm：收到事件即已 disarm）
 	waitEvent(t, p, 2*time.Second)
 
+	time.Sleep(stallWindowTest * 2)
+	waitNoStall(t, p, 600*time.Millisecond)
+}
+
+// 非用户意图的 pause=true（mpv pause 属性跨文件残留，无 Pause()/PlayPaused()
+// 调用）→ ①不发 StateEvent（避免 UI Playing 闪烁）②自动下发 set pause=false
+// 恢复 ③watchdog 不 disarm：窗口后仍照常 StalledEvent（UI 重启链路兜底不失效）。
+func TestStallWatchdogAutoRecoversUnexpectedPause(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+	setStallWindow(t, stallWindowTest)
+
+	fake.pushEvent(`{"event":"file-loaded"}`)
+	waitEvent(t, p, 2*time.Second) // TrackStarted（armStallWatchdog）
+
+	// 模拟 pause 残留：connect 后无任何 Pause()/PlayPaused() 调用（intendedPause=false）
+	fake.pushEvent(`{"event":"property-change","id":3,"name":"pause","data":true}`)
+
+	// ① 不发 StateEvent{Playing:false}（期间若有其它杂散事件直接丢弃）
+	noStateDeadline := time.After(200 * time.Millisecond)
+	for noState := true; noState; {
+		select {
+		case ev := <-p.Events():
+			if _, ok := ev.(StateEvent); ok {
+				t.Fatalf("残留 pause 不应发 StateEvent, got %#v", ev)
+			}
+		case <-noStateDeadline:
+			noState = false
+		}
+	}
+
+	// ② 自动恢复：recordedCommands 出现新增的 set_property pause=false
+	deadline := time.After(2 * time.Second)
+	recovered := false
+	for !recovered {
+		select {
+		case <-deadline:
+			t.Fatalf("应自动下发 set pause=false 恢复, commands = %v", fake.recordedCommands())
+		default:
+		}
+		for _, c := range fake.recordedCommands() {
+			if len(c) == 3 && c[0] == "set_property" && c[1] == "pause" && c[2] == false {
+				recovered = true
+				break
+			}
+		}
+		if !recovered {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// ③ watchdog 未被 disarm（残留 pause 不解除卡住检测）：窗口后仍收到
+	// StalledEvent——自动恢复失败时 UI 重启链路兜底照常生效。
+	waitStalled(t, p, 3*time.Second)
+}
+
+// 恢复语义保护：PlayPaused（续播恢复流程有意静默暂停等待用户操作）后的
+// pause=true 是用户意图——必须 disarm watchdog + 发 StateEvent，且绝不触发
+// 自动恢复（否则恢复流程被"自动解除暂停"破坏）。
+func TestStallWatchdogKeepsResumePaused(t *testing.T) {
+	fake := newFakeMpvServer(t)
+	p := connectTestPlayer(t, fake)
+	setStallWindow(t, stallWindowTest)
+
+	if err := p.PlayPaused("https://example.com/a.mp3", 0); err != nil {
+		t.Fatal(err)
+	}
+	fake.pushEvent(`{"event":"file-loaded"}`)
+	waitEvent(t, p, 2*time.Second) // TrackStarted（armStallWatchdog）
+
+	// 用户意图的暂停（PlayPaused 已置 intendedPause=true）：正常 disarm + StateEvent
+	fake.pushEvent(`{"event":"property-change","id":3,"name":"pause","data":true}`)
+	ev := waitEvent(t, p, 2*time.Second)
+	state, ok := ev.(StateEvent)
+	if !ok || state.Playing {
+		t.Fatalf("want StateEvent{Playing:false}, got %#v", ev)
+	}
+
+	// 不出现自动恢复的 set pause=false：recordedCommands 中 pause 命令恰好 1 条
+	//（仅 PlayPaused 自身的 set pause=true）
+	pauseCmds := 0
+	for _, c := range fake.recordedCommands() {
+		if len(c) == 3 && c[0] == "set_property" && c[1] == "pause" {
+			if c[2] == true {
+				pauseCmds++
+			} else {
+				t.Fatalf("恢复流程不应触发自动恢复的 set pause=false: %v", c)
+			}
+		}
+	}
+	if pauseCmds != 1 {
+		t.Fatalf("pause 命令数 = %d, want 1（仅 PlayPaused 自身）", pauseCmds)
+	}
+
+	// watchdog 已 disarm（用户意图暂停）：窗口后无 StalledEvent
 	time.Sleep(stallWindowTest * 2)
 	waitNoStall(t, p, 600*time.Millisecond)
 }

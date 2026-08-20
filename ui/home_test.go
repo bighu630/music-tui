@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"music-tui/coverrender"
@@ -159,13 +159,13 @@ func TestHomeSeekKeys(t *testing.T) {
 	m.home = m.home.syncState(m.state)
 
 	// → +5s
-	m, cmd := update(m, tea.KeyMsg{Type: tea.KeyRight})
+	m, cmd := update(m, tea.KeyPressMsg{Code: tea.KeyRight})
 	_ = execCmds(cmd)
 	if len(fp.seeks) != 1 || fp.seeks[0] != 105 {
 		t.Errorf("seeks = %v, want [105]", fp.seeks)
 	}
 	// ← -5s
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeyLeft})
 	_ = execCmds(cmd)
 	if len(fp.seeks) != 2 || fp.seeks[1] != 100 {
 		t.Errorf("seeks = %v, want [105 100]", fp.seeks)
@@ -173,7 +173,7 @@ func TestHomeSeekKeys(t *testing.T) {
 	// 无歌曲时按键无效
 	m.state = model.PlaybackState{}
 	m.home = m.home.syncState(m.state)
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRight})
+	m, cmd = update(m, tea.KeyPressMsg{Code: tea.KeyRight})
 	if cmd != nil {
 		t.Error("无歌曲时不应产生 seek 命令")
 	}
@@ -478,7 +478,7 @@ func TestHomeModeKeyCycles(t *testing.T) {
 
 	// 三态循环
 	for i, want := range []queue.Mode{queue.Shuffle, queue.RepeatOne, queue.Sequential} {
-		m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+		m, cmd = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 		found := false
 		for _, msg := range execCmds(cmd) {
 			if mm, ok := msg.(toggleModeMsg); ok {
@@ -497,7 +497,7 @@ func TestHomeModeKeyCycles(t *testing.T) {
 	// 无曲目：m 键也应触发（与队列页 s 键一致）
 	m.state = model.PlaybackState{}
 	m.home = m.home.syncState(m.state)
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "m", Code: 'm'})
 	found := false
 	for _, msg := range execCmds(cmd) {
 		if _, ok := msg.(toggleModeMsg); ok {
@@ -516,7 +516,7 @@ func TestHomePrevNextKeys(t *testing.T) {
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(",")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: ",", Code: ','})
 	if cmd == nil {
 		t.Fatal(", 键应产生命令")
 	}
@@ -528,7 +528,7 @@ func TestHomePrevNextKeys(t *testing.T) {
 		t.Errorf(", 键消息类型 = %T, want prevTrackMsg", msgs[0])
 	}
 
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(".")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: ".", Code: '.'})
 	if cmd == nil {
 		t.Fatal(". 键应产生命令")
 	}
@@ -543,10 +543,10 @@ func TestHomePrevNextKeys(t *testing.T) {
 	// 无曲目：忽略（nil cmd）
 	m.state = model.PlaybackState{}
 	m.home = m.home.syncState(m.state)
-	if m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(",")}); cmd != nil {
+	if m, cmd = update(m, tea.KeyPressMsg{Text: ",", Code: ','}); cmd != nil {
 		t.Error("无曲目时 , 键不应产生命令")
 	}
-	if m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(".")}); cmd != nil {
+	if m, cmd = update(m, tea.KeyPressMsg{Text: ".", Code: '.'}); cmd != nil {
 		t.Error("无曲目时 . 键不应产生命令")
 	}
 	_ = m
@@ -562,7 +562,7 @@ func TestHomeChinesePunctuationKeys(t *testing.T) {
 	m, cmd := m.startPlay(testTrack("t1"))
 	_ = execCmds(cmd)
 
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("，")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "，", Code: '，'})
 	if cmd == nil {
 		t.Fatal("，键应产生命令")
 	}
@@ -574,7 +574,7 @@ func TestHomeChinesePunctuationKeys(t *testing.T) {
 		t.Errorf("，键消息类型 = %T, want prevTrackMsg", msgs[0])
 	}
 
-	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("。")})
+	m, cmd = update(m, tea.KeyPressMsg{Text: "。", Code: '。'})
 	if cmd == nil {
 		t.Fatal("。键应产生命令")
 	}
@@ -589,10 +589,10 @@ func TestHomeChinesePunctuationKeys(t *testing.T) {
 	// 无曲目：忽略（nil cmd）
 	m.state = model.PlaybackState{}
 	m.home = m.home.syncState(m.state)
-	if m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("，")}); cmd != nil {
+	if m, cmd = update(m, tea.KeyPressMsg{Text: "，", Code: '，'}); cmd != nil {
 		t.Error("无曲目时 ，键不应产生命令")
 	}
-	if m, cmd = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("。")}); cmd != nil {
+	if m, cmd = update(m, tea.KeyPressMsg{Text: "。", Code: '。'}); cmd != nil {
 		t.Error("无曲目时 。键不应产生命令")
 	}
 }
@@ -610,12 +610,7 @@ func TestHomeMouseSeekClick(t *testing.T) {
 	m.home = m.home.syncState(m.state)
 
 	barW := m.home.progressBarWidth()
-	m, cmd = update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonLeft,
-		X:      barW / 2,
-		Y:      m.home.height + 1, // 屏幕 Y = height+1（顶部 3 行）→ 页面 Y = height-2（进度条行）
-	})
+	m, cmd = update(m, tea.MouseClickMsg{X: barW / 2, Y: m.home.height + 1, Button: tea.MouseLeft})
 	_ = execCmds(cmd)
 	if len(fp.seeks) != 1 {
 		t.Fatalf("seeks = %v, want 1 次 seek", fp.seeks)
@@ -629,12 +624,7 @@ func TestHomeMouseSeekClick(t *testing.T) {
 	}
 
 	// X 越界（≥ barW）忽略
-	m, cmd = update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonLeft,
-		X:      barW, // 越界
-		Y:      m.home.height + 1,
-	})
+	m, cmd = update(m, tea.MouseClickMsg{X: barW, Y: m.home.height + 1, Button: tea.MouseLeft})
 	if cmd != nil {
 		t.Error("进度条 X 越界不应产生命令")
 	}
@@ -642,12 +632,7 @@ func TestHomeMouseSeekClick(t *testing.T) {
 	// 无曲目：点击忽略
 	m.state = model.PlaybackState{}
 	m.home = m.home.syncState(m.state)
-	m, cmd = update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonLeft,
-		X:      0,
-		Y:      m.home.height + 1,
-	})
+	m, cmd = update(m, tea.MouseClickMsg{X: 0, Y: m.home.height + 1, Button: tea.MouseLeft})
 	if cmd != nil {
 		t.Error("无曲目时点击进度条不应产生命令")
 	}
@@ -664,12 +649,7 @@ func TestHomeMouseButtonClick(t *testing.T) {
 
 	lay := m.home.controlBarLayout(m.home.width)
 	press := func(x int) tea.Cmd {
-		_, c := update(m, tea.MouseMsg{
-			Action: tea.MouseActionPress,
-			Button: tea.MouseButtonLeft,
-			X:      x,
-			Y:      m.home.height + 2, // 屏幕 Y = height+2（顶部 3 行）→ 页面 Y = height-1（按钮行）
-		})
+		_, c := update(m, tea.MouseClickMsg{X: x, Y: m.home.height + 2, Button: tea.MouseLeft})
 		return c
 	}
 
@@ -722,12 +702,7 @@ func TestHomeMouseButtonClick(t *testing.T) {
 	}
 
 	// 中间区点击忽略
-	if _, c := update(m, tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonLeft,
-		X:      5,
-		Y:      10,
-	}); c != nil {
+	if _, c := update(m, tea.MouseClickMsg{X: 5, Y: 10, Button: tea.MouseLeft}); c != nil {
 		t.Error("中间区点击不应产生命令")
 	}
 
@@ -793,7 +768,7 @@ func TestHomeLyricsCenteredWhenFew(t *testing.T) {
 	}
 
 	// 方案 A：视口不收缩（统一 padding 模型），5 行歌词时首行仍在视口中央
-	if got := m.home.lyricView.Height; got != 21 {
+	if got := m.home.lyricView.Height(); got != 21 {
 		t.Errorf("歌词少时视口高 = %d, want 21（不再收缩）", got)
 	}
 }
@@ -819,8 +794,8 @@ func TestHomeLyricsFillWhenMany(t *testing.T) {
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 25, Duration: 200}})
 	m.home = m.home.setSize(120, 39)
 
-	if m.home.lyricView.Height != 21 {
-		t.Errorf("歌词超多时 lyricView.Height = %d, want 21（视口上限）", m.home.lyricView.Height)
+	if m.home.lyricView.Height() != 21 {
+		t.Errorf("歌词超多时 lyricView.Height() = %d, want 21（视口上限）", m.home.lyricView.Height())
 	}
 }
 
@@ -922,12 +897,12 @@ func TestHomeLyricsViewport21(t *testing.T) {
 	ly, _ := lyrics.ParseLRC([]byte(sb.String()))
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
 	m.home = m.home.setSize(120, 60) // midH = 58 > 21
-	if got := m.home.lyricView.Height; got != 21 {
+	if got := m.home.lyricView.Height(); got != 21 {
 		t.Errorf("歌词超多时视口高 = %d, want 21（上限）", got)
 	}
 	// 当前行推进 → 滚动到正中（上下各 10 行）
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 155, Duration: 2000}})
-	if got := m.home.lyricView.YOffset; got != 29 { // LineAt(155)=29 → YOffset=29（padding 模型，当前行恒在视口中央）
+	if got := m.home.lyricView.YOffset(); got != 29 { // LineAt(155)=29 → YOffset=29（padding 模型，当前行恒在视口中央）
 		t.Errorf("YOffset = %d, want 29", got)
 	}
 }
@@ -952,18 +927,18 @@ func TestHomeLyricsCurrentLineCentered(t *testing.T) {
 
 	// 第 30 行（0-based 29，155s）：YOffset = 29（内容含 H/2=10 行前导空白，当前行显示在视口第 10 行正中）
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 155, Duration: 2000}})
-	if got := m.home.lyricView.YOffset; got != 29 {
+	if got := m.home.lyricView.YOffset(); got != 29 {
 		t.Errorf("第 30 行 YOffset = %d, want 29（视口正中）", got)
 	}
 	// 末行（LineAt(495) = idx 59，305s ≤ 495）：YOffset = clamp(59, 0, N−1=59) = 59
 	// （padding 模型末行停中央；旧模型 59−10=49 被 viewport clamp 到 39 贴底）
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 495, Duration: 2000}})
-	if got := m.home.lyricView.YOffset; got != 59 {
+	if got := m.home.lyricView.YOffset(); got != 59 {
 		t.Errorf("末行 YOffset = %d, want 59（padding 模型末行停中央）", got)
 	}
 	// 首行（idx=0）：YOffset = clamp(0, 0, N−1) = 0（padding 模型，首行在视口中央）
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
-	if got := m.home.lyricView.YOffset; got != 0 {
+	if got := m.home.lyricView.YOffset(); got != 0 {
 		t.Errorf("首行 YOffset = %d, want 0", got)
 	}
 	// 回到第 30 行（wheel 测试基线一致性）
@@ -989,30 +964,30 @@ func TestHomeLyricsWheelScroll(t *testing.T) {
 	m.home = m.home.setSize(120, 60)
 	// 先滚动到中间（第 30 行居中，YOffset 29）
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 155, Duration: 2000}})
-	base := m.home.lyricView.YOffset
+	base := m.home.lyricView.YOffset()
 
 	// 歌词列区域滚轮向下：offset 增加（上限 clamp）
-	m, _ = update(m, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, X: 60, Y: 20})
-	if got := m.home.lyricView.YOffset; got <= base {
+	m, _ = update(m, tea.MouseWheelMsg{X: 60, Y: 20, Button: tea.MouseWheelDown})
+	if got := m.home.lyricView.YOffset(); got <= base {
 		t.Errorf("滚轮向下 YOffset = %d, want > %d", got, base)
 	}
 	// 滚轮向上：offset 减少
-	mid := m.home.lyricView.YOffset
-	m, _ = update(m, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, X: 60, Y: 20})
-	if got := m.home.lyricView.YOffset; got >= mid {
+	mid := m.home.lyricView.YOffset()
+	m, _ = update(m, tea.MouseWheelMsg{X: 60, Y: 20, Button: tea.MouseWheelUp})
+	if got := m.home.lyricView.YOffset(); got >= mid {
 		t.Errorf("滚轮向上 YOffset = %d, want < %d", got, mid)
 	}
 	// 封面区域（X < coverW+2）忽略
-	before := m.home.lyricView.YOffset
-	m, _ = update(m, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, X: 5, Y: 20})
-	if got := m.home.lyricView.YOffset; got != before {
+	before := m.home.lyricView.YOffset()
+	m, _ = update(m, tea.MouseWheelMsg{X: 5, Y: 20, Button: tea.MouseWheelUp})
+	if got := m.home.lyricView.YOffset(); got != before {
 		t.Errorf("封面区域滚轮不应滚动, got %d", got)
 	}
 	// 无歌词态（loading）忽略
 	m2, _ := update(m, lyricsResultMsg{trackID: "t1", err: lyrics.ErrNotFound})
-	before = m2.home.lyricView.YOffset
-	m2, _ = update(m2, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, X: 60, Y: 20})
-	if got := m2.home.lyricView.YOffset; got != before {
+	before = m2.home.lyricView.YOffset()
+	m2, _ = update(m2, tea.MouseWheelMsg{X: 60, Y: 20, Button: tea.MouseWheelDown})
+	if got := m2.home.lyricView.YOffset(); got != before {
 		t.Errorf("无歌词态滚轮不应滚动, got %d", got)
 	}
 }
@@ -1202,7 +1177,7 @@ func TestHomeLyricsFirstAndLastLineCentered(t *testing.T) {
 
 	// 首行（10s 内 idx=0）：首行歌词显示在中央行
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
-	if got := m.home.lyricView.YOffset; got != 0 {
+	if got := m.home.lyricView.YOffset(); got != 0 {
 		t.Fatalf("首行 YOffset = %d, want 0", got)
 	}
 	lines := strings.Split(m.home.view(), "\n")
@@ -1225,7 +1200,7 @@ func TestHomeLyricsFirstAndLastLineCentered(t *testing.T) {
 
 	// 末行（idx=59）：末行歌词停在中央行
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 495, Duration: 2000}})
-	if got := m.home.lyricView.YOffset; got != 59 {
+	if got := m.home.lyricView.YOffset(); got != 59 {
 		t.Fatalf("末行 YOffset = %d, want 59", got)
 	}
 	lines = strings.Split(m.home.view(), "\n")
@@ -1253,17 +1228,17 @@ func TestHomeLyricsFewLinesScroll(t *testing.T) {
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
 	m.home = m.home.setSize(120, 39) // H=21 > N=3
 
-	if got := m.home.lyricView.Height; got != 21 {
+	if got := m.home.lyricView.Height(); got != 21 {
 		t.Fatalf("视口高 = %d, want 21（N<H 不收缩）", got)
 	}
 	// 首行（idx=0）：YOffset=0，第一行在视口中央
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
-	if got := m.home.lyricView.YOffset; got != 0 {
+	if got := m.home.lyricView.YOffset(); got != 0 {
 		t.Errorf("首行 YOffset = %d, want 0", got)
 	}
 	// 末行（idx=2）：YOffset=2，第三行停在视口中央
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 32, Duration: 2000}})
-	if got := m.home.lyricView.YOffset; got != 2 {
+	if got := m.home.lyricView.YOffset(); got != 2 {
 		t.Errorf("末行 YOffset = %d, want 2", got)
 	}
 	// 方案 A：N<H 时首末行都在视口中央（view 内坐标 8+10=18）
@@ -1301,7 +1276,10 @@ func TestHomeLyricsMinWhitespace(t *testing.T) {
 		if wantH < 1 {
 			wantH = 1
 		}
-		if got := m.home.lyricView.Height; got != wantH {
+		if wantH%2 == 0 && wantH > 1 {
+			wantH--
+		}
+		if got := m.home.lyricView.Height(); got != wantH {
 			t.Errorf("%dx%d 视口高 = %d, want %d", sz[0], sz[1], got, wantH)
 		}
 		// 歌词列视口上下留白 ≥ 2（外层 Place 垂直居中 + 视口 H = midH−4）
@@ -1325,12 +1303,12 @@ func TestHomeLyricsResizeRepads(t *testing.T) {
 	m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
 	m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: 12, Duration: 2000}})
 	m.home = m.home.setSize(120, 39) // H=21，首行在中央行
-	m.home = m.home.setSize(80, 20)  // midH=18 → H=14，padding 7
+	m.home = m.home.setSize(80, 20)  // midH=18 → H=13（18-4=14→13 奇数），padding 6
 
-	if got := m.home.lyricView.Height; got != 14 {
-		t.Fatalf("resize 后视口高 = %d, want 14", got)
+	if got := m.home.lyricView.Height(); got != 13 {
+		t.Fatalf("resize 后视口高 = %d, want 13", got)
 	}
-	centerRow := (18-14)/2 + 7 // view 内坐标：2（留白）+ 7（H/2）= 9（页面行 12）
+	centerRow := (18-13)/2 + 6 // view 内坐标：2（留白）+ 6（H/2）= 8（页面行 11）
 	lines := strings.Split(m.home.view(), "\n")
 	if !strings.Contains(stripAnsiForTest(lines[centerRow]), "第一行") {
 		t.Errorf("resize 后首行应显示在新中央行 %d: %q", centerRow, lines[centerRow])
@@ -1475,7 +1453,7 @@ func TestHomeLyricFileAITrackUpdatesLabel(t *testing.T) {
 	}
 }
 
-// ---- 歌词时间偏移（Alt+L/H 全局键在 home 层的行为） ----
+// ---- 歌词时间偏移（Ctrl+Shift+←/→ 全局键在 home 层的行为） ----
 
 // TestHomeShiftLyricsNoLyrics 无歌词/未同步时 shiftLyrics 原样返回
 // （不偏移、不改变 offset、不 panic）。

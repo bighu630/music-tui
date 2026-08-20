@@ -385,7 +385,7 @@ func TestSchedulerIntegrationWithRealCache(t *testing.T) {
 	}
 	dir := t.TempDir()
 	cm, err := cache.New(cache.Options{Enabled: true, MaxEntries: 100, Dir: dir},
-		writeFakeYtDlp(t, fakeYtDlpBody(fakeAudioOut)), "", nil)
+		writeFakeYtDlp(t, fakeYtDlpBody(fakeAudioOut)), "", "", nil)
 	if err != nil {
 		t.Fatalf("cache.New: %v", err)
 	}

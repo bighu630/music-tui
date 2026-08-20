@@ -3,10 +3,10 @@ package ui
 import (
 	"fmt"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"music-tui/model"
 	"music-tui/queue"
@@ -92,7 +92,13 @@ type queueModel struct {
 func newQueueModel() queueModel {
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = false // 单行条目（▶ 序号. 标题 - 作者 · 时长）
+	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.Foreground(lipgloss.Color("252"))
+	delegate.Styles.DimmedTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Padding(0, 0, 0, 2)
 	l := list.New(nil, delegate, 80, 24)
+	s := l.Styles
+	s.ActivePaginationDot = s.ActivePaginationDot.Foreground(lipgloss.Color("212"))
+	s.InactivePaginationDot = s.InactivePaginationDot.Foreground(lipgloss.Color("240"))
+	l.Styles = s
 	l.Title = "播放队列"
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false)
@@ -110,7 +116,7 @@ func (q queueModel) typing() bool { return q.filtering && q.filterInput.Focused(
 // 确认失焦、Esc 退出恢复全量；其余按键交给列表（↑↓ 选择等）。
 func (q queueModel) Update(msg tea.Msg) (queueModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// 移动模式：只认移动/结束键，其余一律忽略（d/c/s/p// 等都不消费）
 		if q.moving {
 			switch msg.String() {
@@ -300,9 +306,9 @@ func (q queueModel) sync(qu *queue.Queue) queueModel {
 func (q queueModel) setSize(width, height int) queueModel {
 	q.width, q.height = width, height
 	q.list.SetSize(width, height-3)
-	q.filterInput.Width = width - 18 // 过滤行前缀 "过滤: "(6 列) + 计数 "(n/m)"(≤10 列)
-	if q.filterInput.Width < 10 {
-		q.filterInput.Width = 10
+	q.filterInput.SetWidth(width - 18) // 过滤行前缀 "过滤: "(6 列) + 计数 "(n/m)"(≤10 列)
+	if q.filterInput.Width() < 10 {
+		q.filterInput.SetWidth(10)
 	}
 	return q
 }
