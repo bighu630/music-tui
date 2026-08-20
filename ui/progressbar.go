@@ -4,7 +4,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // 渐变端点 RGB（紫 #5A56E0 → 粉 #EE6FF8，与 bubbles progress

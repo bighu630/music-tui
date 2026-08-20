@@ -1,7 +1,7 @@
 package ui
 
 import (
-	"github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"music-tui/queue"
 )

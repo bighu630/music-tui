@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"music-tui/cache"
@@ -1241,7 +1241,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.onMouse(msg)
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// 选择器打开时：所有按键交给选择器（完成/取消时带回成功提示并刷新列表页）。
 		if m.plPicker != nil {
 			var cmd tea.Cmd
@@ -1282,13 +1282,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.delegate(msg)
 			}
 			return m.switchPage(msg.String()), nil
-		case " ":
+		case "space":
 			// 输入框聚焦（搜索关键词/播放列表命名）时空格是输入字符。
 			// bubbletea 把空格解析为 KeySpace 类型（真实终端解析会带 Runes，
 			// 但测试构造的 KeySpace 无 Runes）；textinput 按 msg.Runes 插字符，
 			// 统一转成 KeyRunes(' ') 保证插入。
 			if m.typingText() {
-				return m.delegate(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+				return m.delegate(tea.KeyPressMsg{Code: ' ', Text: " "})
 			}
 			return m.togglePlay()
 		case "q", "ctrl+c":
@@ -1334,7 +1334,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // 顶部首行留空（布局整体下移一行：空行第 1 行、Tab 栏第 2 行、分隔线第 3 行、
 // 页面自第 4 行起）；活跃 toast 左对齐覆盖在最后一行（状态栏行），报错期间
 // 临时显示、消失后恢复（不参与布局，行数不变）。
-func (m Model) View() string {
+func (m Model) View() tea.View {
 	var body string
 	if m.plPicker != nil {
 		body = m.plPicker.view()
@@ -1354,7 +1354,11 @@ func (m Model) View() string {
 	}
 	body = m.padBody(body)
 	out := "\n" + m.tabBar() + "\n" + body + "\n" + m.statusBarView()
-	return m.overlayToast(out)
+	out = m.overlayToast(out)
+	v := tea.NewView(out)
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
 }
 
 // padBody 把页面 body 垂直填充到页面高度（m.height），使底部状态栏恒在屏幕
@@ -2395,29 +2399,30 @@ func (m Model) onMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	if m.plPicker != nil {
 		return m, nil
 	}
-	if msg.Y != 1 {
+	mPos := msg.Mouse()
+	if mPos.Y != 1 {
 		// 鼠标不在 Tab 栏（空行/分隔线/页面区）：清除悬停高亮，事件交给页面
 		if m.hoverTab >= 0 {
 			m.hoverTab = -1
 		}
 		return m.delegate(msg)
 	}
-	p, ok := m.tabHitAt(msg.X)
-	switch msg.Action {
-	case tea.MouseActionMotion:
+	p, ok := m.tabHitAt(mPos.X)
+	switch msg.(type) {
+	case tea.MouseMotionMsg:
 		if ok {
 			m.hoverTab = int(p)
 		} else {
 			m.hoverTab = -1
 		}
 		return m, nil // 悬停事件不落到页面
-	case tea.MouseActionPress:
+	case tea.MouseClickMsg:
 		m.hoverTab = -1 // 点击后清除悬停
-		if msg.Button == tea.MouseButtonLeft && ok {
+		if mPos.Button == tea.MouseLeft && ok {
 			m.current = p
 		}
 		return m, nil
-	case tea.MouseActionRelease:
+	case tea.MouseReleaseMsg:
 		m.hoverTab = -1 // 拖拽结束清除残留高亮（CellMotion 下无按键移动不上报）
 		return m, nil
 	}

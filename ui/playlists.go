@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"music-tui/model"
 	"music-tui/playlists"
@@ -295,7 +295,7 @@ func newPlaylistModel() playlistModel {
 //
 // 其余按键交给对应 list/textinput。
 func (p playlistModel) Update(msg tea.Msg) (playlistModel, tea.Cmd) {
-	if msg, ok := msg.(tea.KeyMsg); ok {
+	if msg, ok := msg.(tea.KeyPressMsg); ok {
 		switch p.mode {
 		case plNaming:
 			switch msg.String() {
@@ -714,9 +714,9 @@ func (p playlistModel) setSize(width, height int) playlistModel {
 	p.overview.SetSize(width, height-3)
 	p.detail.SetSize(width, height-3)
 	p.setup.SetSize(width, height-3)
-	p.input.Width = width - 6
-	if p.input.Width < 10 {
-		p.input.Width = 10
+	p.input.SetWidth(width - 6)
+	if p.input.Width() < 10 {
+		p.input.SetWidth(10)
 	}
 	return p
 }
@@ -924,7 +924,7 @@ func (pickerNewItem) FilterValue() string { return "新建列表" }
 // 命名输入 Enter：创建列表并加入当前曲目 → 关闭（失败红字展示，不清除输入）；
 // Esc：命名输入返回选择，选择态直接关闭。
 func (p plPickerModel) Update(msg tea.Msg) (plPickerModel, tea.Cmd) {
-	if msg, ok := msg.(tea.KeyMsg); ok {
+	if msg, ok := msg.(tea.KeyPressMsg); ok {
 		if p.naming {
 			switch msg.String() {
 			case "enter":
@@ -997,9 +997,9 @@ func (p plPickerModel) Update(msg tea.Msg) (plPickerModel, tea.Cmd) {
 func (p plPickerModel) setSize(width, height int) plPickerModel {
 	p.width, p.height = width, height
 	p.list.SetSize(width, height-3)
-	p.input.Width = width - 6
-	if p.input.Width < 10 {
-		p.input.Width = 10
+	p.input.SetWidth(width - 6)
+	if p.input.Width() < 10 {
+		p.input.SetWidth(10)
 	}
 	return p
 }

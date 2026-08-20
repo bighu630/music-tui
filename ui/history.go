@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"music-tui/history"
 	"music-tui/model"
@@ -64,7 +64,7 @@ func (h historyModel) typing() bool { return h.filtering && h.filterInput.Focuse
 // Update 处理历史页按键。
 func (h historyModel) Update(msg tea.Msg) (historyModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "/":
 			// 打开或重聚焦过滤输入框；已聚焦时 "/" 作为普通字符输入
@@ -177,9 +177,9 @@ func (h historyModel) selectedTrack() (model.Track, bool) {
 func (h historyModel) setSize(width, height int) historyModel {
 	h.width, h.height = width, height
 	h.list.SetSize(width, height-3)
-	h.filterInput.Width = width - 18 // 过滤行前缀 "过滤: "(6 列) + 计数 "(n/m)"(≤10 列)
-	if h.filterInput.Width < 10 {
-		h.filterInput.Width = 10
+	h.filterInput.SetWidth(width - 18) // 过滤行前缀 "过滤: "(6 列) + 计数 "(n/m)"(≤10 列)
+	if h.filterInput.Width() < 10 {
+		h.filterInput.SetWidth(10)
 	}
 	return h
 }
