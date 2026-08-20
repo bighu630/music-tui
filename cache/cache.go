@@ -36,6 +36,7 @@ type Manager struct {
 	idx        index
 	inflight   map[string]chan struct{}
 	ytdlpPath  string
+	proxy      string
 	cookieFile string
 	headers    map[string]string
 }
@@ -44,9 +45,10 @@ type Manager struct {
 // 启动清理（条目文件缺失删条目；内容有效性校验：非音频（HTML/截断）删文件+删条目；
 // 超限按 LastPlayed 淘汰最旧并删文件；有变化则持久化）。
 // opts 规范化：MaxEntries<1 → 100；Dir=="" → 错误。
+// proxy 可选：非空时附加到 yt-dlp 下载参数（--proxy），空时不改变既有行为。
 // cookieFile/headers 可选：附加到 yt-dlp 下载参数（--cookies/--add-header），
 // 均空时不改变既有行为。
-func New(opts Options, ytdlpPath string, cookieFile string, headers map[string]string) (*Manager, error) {
+func New(opts Options, ytdlpPath string, proxy string, cookieFile string, headers map[string]string) (*Manager, error) {
 	if opts.Dir == "" {
 		return nil, fmt.Errorf("缓存目录为空")
 	}
@@ -60,6 +62,7 @@ func New(opts Options, ytdlpPath string, cookieFile string, headers map[string]s
 		maxEntries: maxEntries,
 		inflight:   map[string]chan struct{}{},
 		ytdlpPath:  ytdlpPath,
+		proxy:      proxy,
 		cookieFile: cookieFile,
 		headers:    headers,
 	}
@@ -243,7 +246,7 @@ func (m *Manager) download(track model.Track, done chan struct{}) {
 	for attempt := 0; attempt < MaxDownloadAttempts; attempt++ {
 		logger.Debug("缓存下载开始(%s) 第 %d/%d 次: %s - %s", track.ID, attempt+1, MaxDownloadAttempts, track.Title, track.Artist)
 		attemptCtx, cancelAttempt := context.WithTimeout(ctx, DownloadAttemptTimeout)
-		file, err := realDownload(attemptCtx, m.ytdlpPath, track.URL, destBase, m.cookieFile, m.headers)
+		file, err := realDownload(attemptCtx, m.ytdlpPath, m.proxy, track.URL, destBase, m.cookieFile, m.headers)
 		cancelAttempt()
 		if err == nil {
 			if rerr := m.register(track.ID, file); rerr != nil {
