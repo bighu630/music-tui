@@ -57,6 +57,12 @@ type MpvPlayer struct {
 	cookieFile    string
 	headers       map[string]string
 	ytdlpConfPath string
+	// ytdlpPath/proxy 由 SetYtdlpOptions 设置（须在 Start 之前调用）：
+	// ytdlpPath 非空 → mpv 用该路径调用 yt-dlp（--script-opts=ytdl_hook-ytdl_path=）；
+	// proxy 非空 → --ytdl-raw-options 值内追加 proxy=（mpv 传给 yt-dlp 的 --proxy）。
+	// 两者均空 = 行为与现状完全一致；startProcess 只读它们，无需 stateMu 保护。
+	ytdlpPath string
+	proxy     string
 
 	cmd    *exec.Cmd
 	waitCh chan error
@@ -130,6 +136,15 @@ func NewMpvPlayer(binPath, socketPath string, cookieFile string, headers map[str
 	}
 }
 
+// SetYtdlpOptions 设置取流附加配置（必须在 Start() 之前调用）：
+// ytdlpPath 非空时 mpv 用该路径调用 yt-dlp（--script-opts=ytdl_hook-ytdl_path=，
+// ytdl_hook.lua 的 script-opt 键名，下划线）；proxy 非空时 mpv 传给 yt-dlp
+// 的 --proxy（--ytdl-raw-options=proxy=）。两者均空 = 行为与现状完全一致。
+func (p *MpvPlayer) SetYtdlpOptions(ytdlpPath, proxy string) {
+	p.ytdlpPath = ytdlpPath
+	p.proxy = proxy
+}
+
 // Start 启动 mpv 进程（--idle=yes 常驻），等待 IPC socket 就绪后
 // 连接、注册属性观察并启动事件泵。
 func (p *MpvPlayer) Start() error {
@@ -148,13 +163,16 @@ func (p *MpvPlayer) Start() error {
 func (p *MpvPlayer) startProcess() error {
 	_ = os.Remove(p.socketPath) // 清理上次残留的 socket 文件
 	// --ytdl-raw-options 动态拼接：打底 socket-timeout=15,retries=2（yt-dlp 取流
-	// 收紧：403/网络黑洞快速失败），cookieFile/headers 非空时追加 cookies= 与
-	// config-locations=（mpv 列表值语法：值含逗号时双引号包裹，内部 `"` 无法
+	// 收紧：403/网络黑洞快速失败），cookieFile/proxy/headers 非空时追加 cookies=、
+	// proxy= 与 config-locations=（mpv 列表值语法：值含逗号时双引号包裹，内部 `"` 无法
 	// 转义表示）。headers 生成临时配置失败仅 log 警告并跳过 config-locations
 	// 段——绝不因 header 配置问题导致 mpv 启动失败（取流功能降级不崩溃）。
 	ytdlRawOpts := "socket-timeout=15,retries=2"
 	if p.cookieFile != "" {
 		ytdlRawOpts += ",cookies=" + quoteMpvOptionValue(p.cookieFile)
+	}
+	if p.proxy != "" {
+		ytdlRawOpts += ",proxy=" + quoteMpvOptionValue(p.proxy)
 	}
 	if len(p.headers) > 0 {
 		confPath, err := buildYtdlpConf(p.headers)
@@ -176,6 +194,12 @@ func (p *MpvPlayer) startProcess() error {
 		"--ytdl-raw-options=" + ytdlRawOpts, // yt-dlp 取流收紧：403/网络黑洞快速失败（默认 retries=10 可拖 1-2 分钟）
 		"--no-resume-playback",              // 不写恢复播放状态文件
 		"--input-ipc-server=" + p.socketPath,
+	}
+	// ytdlpPath 非空：mpv 用自定义 yt-dlp 路径（--script-opts=ytdl_hook-ytdl_path=，
+	// ytdl_hook.lua 的 script-opt 键名，下划线；值含逗号同样按 mpv 列表值语法
+	// 双引号包裹）。
+	if p.ytdlpPath != "" {
+		args = append(args, "--script-opts=ytdl_hook-ytdl_path="+quoteMpvOptionValue(p.ytdlpPath))
 	}
 	p.stateMu.Lock()
 	binPath := p.binPath
