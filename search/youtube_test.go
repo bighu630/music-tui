@@ -445,7 +445,7 @@ func TestSearchGlobalCookieAndHeaders(t *testing.T) {
 		}
 	}
 	// 原有搜索参数保持在后
-	if !strings.Contains(s, "--dump-json --no-warnings --flat-playlist ytsearch20:hello world") {
+	if !strings.Contains(s, "--dump-json --no-warnings --flat-playlist ytsearch50:hello world") {
 		t.Errorf("args = %q, want 保留原有搜索参数", s)
 	}
 }
@@ -463,7 +463,7 @@ func TestSearchNoGlobalArgsUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "--dump-json --no-warnings --flat-playlist ytsearch20:hello"
+	want := "--dump-json --no-warnings --flat-playlist ytsearch50:hello"
 	if s := strings.TrimSpace(string(got)); s != want {
 		t.Errorf("args = %q, want %q（未设全局时参数与现状逐字节一致）", s, want)
 	}
@@ -587,7 +587,7 @@ func TestSearchWithProxy(t *testing.T) {
 		t.Errorf("args = %q, --proxy 应排在 --dump-json 之前", s)
 	}
 	// 原有搜索参数保持在后
-	if !strings.Contains(s, "--dump-json --no-warnings --flat-playlist ytsearch20:hello world") {
+	if !strings.Contains(s, "--dump-json --no-warnings --flat-playlist ytsearch50:hello world") {
 		t.Errorf("args = %q, want 保留原有搜索参数", s)
 	}
 }
@@ -641,7 +641,7 @@ func TestSetGlobalProxyEmptyNoOp(t *testing.T) {
 	if s := strings.TrimSpace(string(got)); strings.Contains(s, "--proxy") {
 		t.Errorf("args = %q, SetGlobalProxy(\"\") 不应附加 --proxy", s)
 	}
-	want := "--dump-json --no-warnings --flat-playlist ytsearch20:hello"
+	want := "--dump-json --no-warnings --flat-playlist ytsearch50:hello"
 	if s := strings.TrimSpace(string(got)); s != want {
 		t.Errorf("args = %q, want %q（与未设置全局完全一致）", s, want)
 	}

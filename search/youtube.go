@@ -21,8 +21,9 @@ const (
 	searchTimeout = 10 * time.Second
 	// playlistTimeout 是歌单拉取的总超时：歌单条目数远多于单次搜索，单独给 30s。
 	playlistTimeout = 30 * time.Second
-	// searchLimit 是 ytsearch 返回的最大结果数。
-	searchLimit = 20
+	// searchLimit 是 ytsearch 返回的最大结果数（50 条：flat 模式只拉搜索页
+	// 元数据，实测 ytsearch50 约 4s，10s 超时余量充足）。
+	searchLimit = 50
 	// maxStderrTail 是错误分支拼入错误消息的 stderr 诊断文本最大长度。
 	maxStderrTail = 512
 )
