@@ -4463,12 +4463,12 @@ func testLyricOffsetModel(t *testing.T, fp *fakePlayer, ly *lyrics.Lyrics) (Mode
 }
 
 // shiftRightKey 构造 Ctrl+Shift+↑ 按键（String() == "ctrl+shift+up"）。
-func shiftRightKey() tea.KeyMsg {
+func shiftRightKey() tea.KeyPressMsg {
 	return tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModCtrl | tea.ModShift}
 }
 
 // shiftLeftKey 构造 Ctrl+Shift+↓ 按键（String() == "ctrl+shift+down"）。
-func shiftLeftKey() tea.KeyMsg {
+func shiftLeftKey() tea.KeyPressMsg {
 	return tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModCtrl | tea.ModShift}
 }
 

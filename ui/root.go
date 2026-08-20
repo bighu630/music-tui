@@ -1284,9 +1284,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.switchPage(msg.String()), nil
 		case "space":
 			// 输入框聚焦（搜索关键词/播放列表命名）时空格是输入字符。
-			// bubbletea 把空格解析为 KeySpace 类型（真实终端解析会带 Runes，
-			// 但测试构造的 KeySpace 无 Runes）；textinput 按 msg.Runes 插字符，
-			// 统一转成 KeyRunes(' ') 保证插入。
+			// bubbletea 把空格解析为 KeySpace 类型（真实终端解析会带 Text，
+			// 但测试构造的 KeySpace 无 Text）；textinput 按 msg.Text 插字符，
+			// 统一转成 Code:' ' 保证插入。
 			if m.typingText() {
 				return m.delegate(tea.KeyPressMsg{Code: ' ', Text: " "})
 			}
