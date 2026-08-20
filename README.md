@@ -43,7 +43,9 @@ go build -o music-tui .
     "base_url": ""
   },
   "ytdlp": {
-    "headers": {}
+    "headers": {},
+    "path": "",
+    "proxy": ""
   },
   "log": {
     "level": "info"
@@ -51,16 +53,20 @@ go build -o music-tui .
 }
 ```
 
-| 配置项              | 说明                                                                                   |
-| ------------------- | -------------------------------------------------------------------------------------- |
-| `cache.enabled`     | 音频缓存总开关（默认开）                                                               |
-| `cache.max_entries` | 缓存歌曲数上限，超出按 LRU 淘汰（默认 100）                                            |
-| `cache.dir`         | 缓存目录（默认 `~/.cache/music-tui`，删掉即清空缓存）                                  |
-| `openai.api_key`    | OpenAI 协议兼容服务的 API key；**留空 = 禁用 AI 歌词增强**（行为与不带 key 完全一致）  |
-| `openai.model`      | 模型名（默认 `gpt-4o-mini`）                                                           |
-| `openai.base_url`   | 兼容服务地址，可填 DeepSeek（`https://api.deepseek.com/v1`）等任何 OpenAI 协议兼容服务 |
-| `ytdlp.headers`     | 附加到每次 yt-dlp 调用的 HTTP 头（可选）                                               |
-| `log.level`         | 日志级别：`debug` / `info` / `warn` / `error`                                          |
+| 配置项              | 说明                                                                                                                                  |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `cache.enabled`     | 音频缓存总开关（默认开）                                                                                                              |
+| `cache.max_entries` | 缓存歌曲数上限，超出按 LRU 淘汰（默认 100）                                                                                           |
+| `cache.dir`         | 缓存目录（默认 `~/.cache/music-tui`，删掉即清空缓存）                                                                                 |
+| `openai.api_key`    | OpenAI 协议兼容服务的 API key；**留空 = 禁用 AI 歌词增强**（行为与不带 key 完全一致）                                                 |
+| `openai.model`      | 模型名（默认 `gpt-4o-mini`）                                                                                                          |
+| `openai.base_url`   | 兼容服务地址，可填 DeepSeek（`https://api.deepseek.com/v1`）等任何 OpenAI 协议兼容服务                                                |
+| `ytdlp.headers`     | 附加到每次 yt-dlp 调用的 HTTP 头（可选）                                                                                              |
+| `ytdlp.path`        | yt-dlp 可执行文件路径；**空 = 用 PATH 查找 `yt-dlp`**（默认）；配置了则只检测/使用该路径（如 `/usr/local/bin/yt-dlp`）                |
+| `ytdlp.proxy`       | 代理 URL（`http://` / `https://` / `socks5://` 等，如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`）；**空 = 不走代理**（默认） |
+| `log.level`         | 日志级别：`debug` / `info` / `warn` / `error`                                                                                         |
+
+`ytdlp.path` 与 `ytdlp.proxy` 生效范围：搜索、歌单拉取、缓存下载、mpv 播放取流，以及启动时的依赖检测（path 配置了但路径无效会在启动时报错；移除该配置项即回落到 PATH 查找）。
 
 ## 🖼️ 封面渲染
 
