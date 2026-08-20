@@ -92,7 +92,13 @@ type queueModel struct {
 func newQueueModel() queueModel {
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = false // 单行条目（▶ 序号. 标题 - 作者 · 时长）
+	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.Foreground(lipgloss.Color("252"))
+	delegate.Styles.DimmedTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Padding(0, 0, 0, 2)
 	l := list.New(nil, delegate, 80, 24)
+	s := l.Styles
+	s.ActivePaginationDot = s.ActivePaginationDot.Foreground(lipgloss.Color("212"))
+	s.InactivePaginationDot = s.InactivePaginationDot.Foreground(lipgloss.Color("240"))
+	l.Styles = s
 	l.Title = "播放队列"
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false)
