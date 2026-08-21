@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"music-tui/logger"
 )
 
 // Mode 封面渲染方式。
@@ -85,9 +87,15 @@ func computeMode() Mode {
 	// 透传进 pane 即铁证；tmux 3.5+ 会把 pane 的 kitty APC 原样中继给外层）。
 	// 早期实现把 tmux → half 放在 KITTY_WINDOW_ID 检查之前，导致哪怕外层是 kitty
 	// 也永远回退半块（回归：日志实测 tmux 内 KITTY_WINDOW_ID=1 仍 halfblocks）。
+	// 收紧：KITTY_WINDOW_ID 可被终端模拟器配置跨会话泄漏（如 foot 继承 kitty 的
+	// 环境），需经能力校验或 TERM 线索才信任，否则视为泄漏忽略。
 	if os.Getenv("TMUX") != "" {
-		if os.Getenv("KITTY_WINDOW_ID") != "" {
-			return ModeKitty // 外层确证 kitty，允许中继
+		if v := os.Getenv("KITTY_WINDOW_ID"); v != "" {
+			if isTrustedKittyEnv() {
+				return ModeKitty // 经能力查询或 TERM 线索确证 kitty，允许中继
+			}
+			logger.Debug("KITTY_WINDOW_ID 存在但未通过 kitty 能力校验，忽略（疑似跨终端泄漏） TERM=%q TERM_PROGRAM=%q lastQueryRaw=%q (tmux)", os.Getenv("TERM"), os.Getenv("TERM_PROGRAM"), lastQueryRaw)
+			// 泄漏：不直接返回，继续走 kittyThroughTMUX 校验或回退
 		}
 		if kittyThroughTMUX {
 			return ModeKitty // client_termname 含 kitty（无 KITTY_WINDOW_ID 场景）
@@ -105,9 +113,13 @@ func computeMode() Mode {
 	if capabilityMode == ModeKitty {
 		return ModeKitty
 	}
-	// 5. 环境提示
-	if os.Getenv("KITTY_WINDOW_ID") != "" {
-		return ModeKitty
+	// 5. 环境提示（KITTY_WINDOW_ID 收紧：需能力校验或 TERM 线索，否则视为泄漏）
+	if v := os.Getenv("KITTY_WINDOW_ID"); v != "" {
+		if isTrustedKittyEnv() {
+			return ModeKitty
+		}
+		logger.Debug("KITTY_WINDOW_ID 存在但未通过 kitty 能力校验，忽略（疑似跨终端泄漏） TERM=%q TERM_PROGRAM=%q lastQueryRaw=%q", os.Getenv("TERM"), os.Getenv("TERM_PROGRAM"), lastQueryRaw)
+		// 视为泄漏，回落不返回，继续后续探测（lastQueryRaw 为空时保持 halfblocks，需用户显式 MUSIC_TUI_COVER）
 	}
 	switch strings.ToLower(os.Getenv("TERM_PROGRAM")) {
 	case "ghostty", "wezterm", "rio":
@@ -120,6 +132,17 @@ func computeMode() Mode {
 	// 6. 默认（含 foot/mlterm/sixel 等六边形终端）：像素风（半块自绘）——
 	//    sixel 需 MUSIC_TUI_COVER=sixel 显式强制
 	return ModeHalf
+}
+
+// isTrustedKittyEnv 判断 KITTY_WINDOW_ID 是否可信：需经能力查询确证或 TERM/TERM_PROGRAM 线索确证，
+// 避免 foot 等终端泄漏的 KITTY_WINDOW_ID 误触发 kitty 模式。
+func isTrustedKittyEnv() bool {
+	if capabilityMode == ModeKitty || strings.Contains(lastQueryRaw, "OK") {
+		return true
+	}
+	t := strings.ToLower(os.Getenv("TERM"))
+	tp := strings.ToLower(os.Getenv("TERM_PROGRAM"))
+	return strings.Contains(t, "kitty") || tp == "kitty" || tp == "ghostty" || tp == "wezterm" || tp == "rio"
 }
 
 // kittyThroughTMUX 是否已确证“外层 kitty + tmux 中继”的 kitty（仅当 main 查得
@@ -137,4 +160,5 @@ func ResetModeCacheForTests() {
 	modeOnce = sync.Once{}
 	capabilityMode = ModeHalf
 	kittyThroughTMUX = false
+	lastQueryRaw = ""
 }

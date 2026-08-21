@@ -196,8 +196,8 @@ type homeModel struct {
 	// 直接写 stdout（像素驻留覆于文本之上，见 ui/coveroverlay.go）。指针共享：
 	// view() 是值接收者，状态变更必须落在共享指针上才能跨渲染循环持久。
 	sixelPayload string     // 全帧 DCS 载荷（空 = 无六像素材质）
-	sixelRedrawPending bool // 中间区已重建：foot 网格驻留型六边形会被行重写擦除，需延迟重画
-	sixelSt      *sixelState   // 写出状态（token/位置）：view() 内变更，指针可见
+	sixelRedrawPending bool // deprecated: 已迁移至 sixelSt.pending，保留兼容（双写）
+	sixelSt      *sixelState   // 写出状态（token/位置/gen/pending）：view() 内变更，指针可见
 
 	// windowHeight 整个终端窗口高度（root 在 WindowSizeMsg 时注入 msg.Height，
 	// 非页面高度 m.height=窗口高-4）。封面隐藏判定按整个窗口尺寸计算（用户需求：
@@ -561,8 +561,12 @@ func (m homeModel) setCover(trackID, path string, err error) homeModel {
 		logger.Debug("sixel 载荷生成: %d 字节 (cell %dx%d, 前缀 %q)",
 			len(m.sixelPayload), cellW, cellH, m.sixelPayload[:8])
 		if st := m.sixelSt; st != nil {
+			st.mu.Lock()
 			st.token = "" // 强制下次 view() 重写（含清旧景）
 			st.drawn = false
+			st.gen++
+			st.pending = false // token 变化分支会下一帧被 rebuildMiddleCache 的 pending=true 覆盖（延迟重画）
+			st.mu.Unlock()
 		}
 		s := blankCoverGrid(coverW, coverH)
 		m.coverRenderCache = s
@@ -772,7 +776,11 @@ func (m homeModel) rebuildMiddleCache() homeModel {
 	// 中间区内容变化 → 封面行可能被帧差量重写（foot 网格驻留型六边形会被重写
 	// 擦除，konsole/kitty 覆盖型不受影响）：标记需延迟重画（ensureSixel 消费）。
 	if m.coverMode == 2 && m.sixelPayload != "" && !m.coverHidden() {
-		m.sixelRedrawPending = true
+		if m.sixelSt != nil {
+			m.sixelSt.mu.Lock()
+			m.sixelSt.pending = true
+			m.sixelSt.mu.Unlock()
+		}
 	}
 	return m
 }

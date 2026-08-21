@@ -32,10 +32,13 @@ var (
 )
 
 type sixelState struct {
+	mu     sync.Mutex
 	token  string // 已写出位置标识（track|mode|row|col）
 	drawn  bool   // 当前画面是否有已写出的六像素（切歌/回退时需先清）
 	posRow int    // 上次写出的屏幕行（0 基，清除用）
 	posCol int
+	gen     int  // 每一次 token 变更/clear 递增，防幽灵重画
+	pending bool // 是否待重画（foot 网格驻留擦除后延迟重画）
 }
 
 // blankCoverGrid 生成 w 列×h 行的纯空格网格（无任何 SGR/文本内容）——sixel 图像
@@ -94,14 +97,26 @@ func writeSixel(row, col int, payload string) {
 // 覆盖型终端（konsole/kitty 等，像素驻留）缩小窗口致使封面隐藏时，不清理
 // 会残影罩住居中歌词；foot 网格驻留型会被行重写自愈，清除同样无害。
 func sixelClear(st *sixelState) {
-	if st == nil || !st.drawn {
+	if st == nil {
 		return
 	}
+	st.mu.Lock()
+	if !st.drawn {
+		st.pending = false
+		st.mu.Unlock()
+		return
+	}
+	rr, cc := st.posRow, st.posCol
+	st.mu.Unlock()
 	cellW, cellH := coverrender.FontCellSize()
 	clear := coverrender.SixelClear(coverW, coverH, cellW, cellH)
-	writeSixel(st.posRow, st.posCol, clear)
+	writeSixel(rr, cc, clear)
+	st.mu.Lock()
 	st.drawn = false
 	st.token = ""
+	st.gen++
+	st.pending = false
+	st.mu.Unlock()
 }
 
 // clearSixel 清除已绘制的六像素（在最后一次写出位置重绘背景色全帧）。
@@ -118,6 +133,7 @@ func (m homeModel) clearSixel() homeModel {
 
 // ensureSixel 在 view() 内写出六像覆盖层：素材/位置（token）变化时重绘。
 // 布局文本流不包含任何协议字节（DCS 仅经此外带写出）。
+// 值接收者但状态落在共享 st 指针上（st.pending/gen 跨 view() 拷贝持久）。
 func (m homeModel) ensureSixel() {
 	// 封面隐藏（窗口宽 < 60 或 高 < 28）：不渲染封面区，也不外带写出图像。
 	// 显示→隐藏过渡须清除已画出的六像素（覆盖型终端像素驻留：不清则旧封面
@@ -140,34 +156,48 @@ func (m homeModel) ensureSixel() {
 		return // 窗口过小：封面被裁剪，不画
 	}
 	token := fmt.Sprintf("%s|%d|%d|%d", m.state.Track.ID, m.coverMode, row, col)
-	if token == st.token && st.drawn {
-		// 已画出：若中间区重建过，foot 网格驻留型六边形可能被行重写擦除——
-		// 延迟重画（等擦除帧 flush 落地后，落笔在安静期；payload 4KB 开销可忽略）。
-		if m.sixelRedrawPending {
-			m.sixelRedrawPending = false
+	st.mu.Lock()
+	sameTokenAndDrawn := token == st.token && st.drawn
+	pending := st.pending
+	capturedGen := st.gen
+	oldToken := st.token
+	if sameTokenAndDrawn {
+		if pending {
+			st.pending = false
+			st.mu.Unlock()
 			payload := m.sixelPayload
 			rr, cc := row, col
-			logger.Info("sixel 重画: 中间区已重建 (row=%d col=%d payload=%d 字节)", rr, cc, len(payload))
-			// 已知角点（低概率、非阻塞）：异步 45ms 无法取消——若其间窗口缩小到
-			// 封面隐藏触发 sixelClear（drawn 复位），此 goroutine 仍会把载荷画回旧位，
-			// 残留幽灵封面。foot 网格驻留型会被行重写自愈；覆盖型（konsole/kitty）
-			// 需下次 rebuild/重绘覆盖，影响有限。如后续需要，可给 sixelState 加代数计数
-			// 在 goroutine 写出前复查跳过。
-			go func() {
+			gen := capturedGen
+			logger.Info("sixel 重画: 中间区已重建 (row=%d col=%d payload=%d 字节 gen=%d)", rr, cc, len(payload), gen)
+			// 捕获 st 指针可见的 gen；隐藏过渡会经 sixelClear 递增 gen/clear drawn，
+			// 此处仅靠 gen 与 drawn 即可防幽灵重画，无需捕获已失效的 m 副本。
+			go func(gen int, payload string, rr, cc int) {
 				time.Sleep(45 * time.Millisecond)
-				overlayMu.Lock()
+				st.mu.Lock()
+				ok := st.gen == gen && st.drawn
+				st.mu.Unlock()
+				if !ok {
+					return
+				}
 				writeSixel(rr, cc, payload)
-				overlayMu.Unlock()
-			}()
+			}(gen, payload, rr, cc)
+		} else {
+			st.mu.Unlock()
 		}
 		return
 	}
+	oldTokenCopy := oldToken
+	st.mu.Unlock()
 	logger.Info("sixel 写出: row=%d col=%d (窗口 w=%d h=%d, 屏幕高=%d) payload=%d 字节 token=%q (旧=%q)",
-		row, col, m.width, m.height, m.height+overlayHdrRows+overlayStatusRows, len(m.sixelPayload), token, st.token)
+		row, col, m.width, m.height, m.height+overlayHdrRows+overlayStatusRows, len(m.sixelPayload), token, oldTokenCopy)
 	writeSixel(row, col, m.sixelPayload)
+	st.mu.Lock()
 	st.token = token
 	st.drawn = true
+	st.gen++
+	st.pending = false
 	st.posRow, st.posCol = row, col
+	st.mu.Unlock()
 }
 
 // 布局常量：页面在屏幕中的偏移。
