@@ -76,7 +76,11 @@ func TestRequireYtdlpEmptyUsesPATH(t *testing.T) {
 // requireYtdlp 自定义路径：配置的路径存在且可执行 → 返回该路径。
 func TestRequireYtdlpCustomPath(t *testing.T) {
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "custom-yt-dlp")
+	name := "custom-yt-dlp"
+	if runtime.GOOS == "windows" {
+		name = "custom-yt-dlp.exe"
+	}
+	bin := filepath.Join(dir, name)
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}

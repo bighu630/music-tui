@@ -3,7 +3,6 @@ package player
 import (
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -161,7 +160,7 @@ func (p *MpvPlayer) Start() error {
 // → 等待 socket 就绪 → connect()。任一步失败都会杀掉进程并清空
 // cmd/waitCh/conn，不残留脏状态（Start 与自动重连共用）。
 func (p *MpvPlayer) startProcess() error {
-	_ = os.Remove(p.socketPath) // 清理上次残留的 socket 文件
+	_ = removeSocket(p.socketPath) // 清理上次残留的 socket 文件（Windows 命名管道为 no-op）
 	// --ytdl-raw-options 动态拼接：打底 socket-timeout=15,retries=2（yt-dlp 取流
 	// 收紧：403/网络黑洞快速失败），cookieFile/proxy/headers 非空时追加 cookies=、
 	// proxy= 与 config-locations=（mpv 列表值语法：值含逗号时双引号包裹，内部 `"` 无法
@@ -234,7 +233,7 @@ func (p *MpvPlayer) startProcess() error {
 func (p *MpvPlayer) waitForSocket(waitCh chan error, timeout time.Duration) error {
 	deadline := time.After(timeout)
 	for {
-		conn, err := net.Dial("unix", p.socketPath)
+		conn, err := dialIPC(p.socketPath)
 		if err == nil {
 			conn.Close()
 			return nil
@@ -1081,7 +1080,7 @@ func (p *MpvPlayer) Close() error {
 	}
 	_ = p.killProcess()
 	p.clearProcess()
-	_ = os.Remove(p.socketPath)
+	_ = removeSocket(p.socketPath)
 	p.stateMu.Lock()
 	confPath := p.ytdlpConfPath
 	p.ytdlpConfPath = ""

@@ -112,7 +112,7 @@ func run() error {
 	cm := loadCache(cfg.Cache, ytdlpPath, cfg.Ytdlp.Proxy, cookieFile, ytdlpHeaders)
 
 	// 4. 启动 mpv（defer 保证退出时清理进程与 socket）
-	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("music-tui-%d.sock", os.Getpid()))
+	sockPath := ipcSocketPath()
 	mpv := player.NewMpvPlayer(mpvPath, sockPath, cookieFile, ytdlpHeaders)
 	// 取流附加配置（自定义 yt-dlp 路径/代理）必须在 Start 之前设置。
 	// 传 cfg.Ytdlp.Path 原始配置值而非 requireYtdlp 解析后的路径：
@@ -368,6 +368,14 @@ func requireTool(name string) (string, error) {
 		return "", fmt.Errorf("缺少依赖 %s，请先安装：\n%s", name, installHint(name))
 	}
 	return path, nil
+}
+
+// ipcSocketPath 返回 mpv IPC 通信路径：Windows 下为命名管道 \\.\pipe\music-tui-<pid>，其余平台为 Unix socket。
+func ipcSocketPath() string {
+	if runtime.GOOS == "windows" {
+		return fmt.Sprintf(`\\.\pipe\music-tui-%d`, os.Getpid())
+	}
+	return filepath.Join(os.TempDir(), fmt.Sprintf("music-tui-%d.sock", os.Getpid()))
 }
 
 // installHint 返回当前平台安装 mpv/yt-dlp 的命令提示。
