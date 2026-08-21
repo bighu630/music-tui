@@ -137,7 +137,13 @@ func computeMode() Mode {
 // isTrustedKittyEnv 判断 KITTY_WINDOW_ID 是否可信：需经能力查询确证或 TERM/TERM_PROGRAM 线索确证，
 // 避免 foot 等终端泄漏的 KITTY_WINDOW_ID 误触发 kitty 模式。
 func isTrustedKittyEnv() bool {
-	if capabilityMode == ModeKitty || strings.Contains(lastQueryRaw, "OK") {
+	if capabilityMode == ModeKitty {
+		return true
+	}
+	// Gi 兜底：kitty 独有响应前缀，ENODATA 亦含 Gi，避免载荷微差回落 halfblocks
+	// （修复前 f=32+AAAA 仅 3 字节 <4 触发 ENODATA，参考 go-termimg f=24 使 3 字节满足）
+	// ENOSUPPORT 表示不支持 kitty 图形协议，不视为可信
+	if !strings.Contains(lastQueryRaw, "ENOSUPPORT") && (strings.Contains(lastQueryRaw, "OK") || strings.Contains(lastQueryRaw, "Gi=") || strings.Contains(lastQueryRaw, "_Gi")) {
 		return true
 	}
 	t := strings.ToLower(os.Getenv("TERM"))

@@ -431,6 +431,9 @@ func TestQueryCapabilityResponseFormats(t *testing.T) {
 		want Mode
 	}{
 		{"kitty OK 应答", "\x1b_Gi=31;OK\x1b\\", ModeKitty},
+		{"kitty ENODATA 兜底（f=24 前载荷不足场景）", "\x1b_Gi=31;ENODATA:Insufficient image data: 3 < 4\x1b\\", ModeKitty},
+		{"kitty ENODATA 简写", "_Gi=31;ENODATA", ModeKitty},
+		{"kitty ENOSUPPORT 仍 half", "\x1b_Gi=31;ENOSUPPORT:Not supported\x1b\\", ModeHalf},
 		{"DA1 含 4（sixel）", "\x1b[?62;4;22;23c", ModeSixel},
 		{"DA1 无 sixel", "\x1b[?62;22;23c", ModeHalf},
 		{"空应答", "", ModeHalf},
@@ -442,6 +445,8 @@ func TestQueryCapabilityResponseFormats(t *testing.T) {
 			got := ModeHalf
 			switch {
 			case containsStr(s, "OK"):
+				got = ModeKitty
+			case (containsStr(s, "Gi=") || containsStr(s, "_Gi")) && !containsStr(s, "ENOSUPPORT"):
 				got = ModeKitty
 			case containsStr(s, ";4"):
 				got = ModeSixel
@@ -608,11 +613,25 @@ func TestDetectModeFootLeak(t *testing.T) {
 			t.Errorf("泄漏 KITTY_WINDOW_ID=1 无 OK → %v, want half", m)
 		}
 	})
-	t.Run("ENODATA 无 OK 仍 half", func(t *testing.T) {
+	t.Run("ENODATA 含 Gi 应 kitty（kitty 真机回 ENODATA 兜底）", func(t *testing.T) {
+		ResetModeCacheForTests()
+		lastQueryRaw = "\x1b_Gi=31;ENODATA:Insufficient image data: 3 < 4\x1b\\"
+		if m := DetectMode(); m != ModeKitty {
+			t.Errorf("ENODATA Gi → %v, want kitty", m)
+		}
+	})
+	t.Run("ENODATA 简写 _Gi 亦 kitty", func(t *testing.T) {
 		ResetModeCacheForTests()
 		lastQueryRaw = "_Gi=31;ENODATA"
+		if m := DetectMode(); m != ModeKitty {
+			t.Errorf("ENODATA _Gi → %v, want kitty", m)
+		}
+	})
+	t.Run("ENOSUPPORT 仍 half", func(t *testing.T) {
+		ResetModeCacheForTests()
+		lastQueryRaw = "\x1b_Gi=31;ENOSUPPORT\x1b\\"
 		if m := DetectMode(); m != ModeHalf {
-			t.Errorf("ENODATA → %v, want half", m)
+			t.Errorf("ENOSUPPORT → %v, want half", m)
 		}
 	})
 	t.Run("含 OK 应 kitty", func(t *testing.T) {
