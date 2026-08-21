@@ -1835,6 +1835,15 @@ func waitForPlayerEvents(p player.Player) tea.Cmd {
 	return func() tea.Msg {
 		th := newProgressThrottle(progressWindow)
 		for {
+			// 优先处理 Fired：当 Events 与 Fired 同时就绪时，Go select 随机选分支会导致
+			// 同一抖动序列间歇性回跳（诊断根因B）。此处两阶段优先保证 Fired 先被消费，
+			// 消除随机性，保持原有 Push 对非 ProgressEvent 清 pending 立即返回的语义。
+			select {
+			case <-th.Fired():
+				pe, _ := th.Take()
+				return playerEventMsg{ev: pe}
+			default:
+			}
 			select {
 			case ev, ok := <-p.Events():
 				if !ok {

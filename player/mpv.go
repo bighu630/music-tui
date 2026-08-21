@@ -3,6 +3,7 @@ package player
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
@@ -116,6 +117,9 @@ type MpvPlayer struct {
 	events   chan Event
 	mu       sync.Mutex
 	duration float64
+	lastPos    float64
+	lastPosSet bool
+	lastSeekAt time.Time
 	closed   atomic.Bool
 
 	subsMu sync.Mutex
@@ -691,7 +695,29 @@ func (p *MpvPlayer) handlePropertyChange(ev *mpvipc.Event) {
 		if d > 0 && pos > d {
 			return // 异常进度值（Position > Duration）过滤丢弃
 		}
+		// 单调守卫：过滤 5-20ms 的抖动回退（mpv time-pos 时钟校正/demux 旧值）。
+		// 合法大跳变（|delta|>1.0s，Seek 产生）与 Seek 后 500ms 内的大回退不丢弃。
+		p.mu.Lock()
+		last := p.lastPos
+		hasLast := p.lastPosSet
+		seekAt := p.lastSeekAt
+		p.mu.Unlock()
+		if hasLast && pos < last-0.02 {
+			deltaAbs := math.Abs(pos - last)
+			if deltaAbs > 1.0 {
+				// 合法 Seek 大跳变，不丢弃
+			} else if !seekAt.IsZero() && time.Since(seekAt) < 500*time.Millisecond {
+				// Seek 后 500ms 内的回退视为合法定位过程，不丢弃
+			} else {
+				logger.Warn("time-pos 抖动回退丢弃: last=%.3f pos=%.3f delta=%.3fms", last, pos, (pos-last)*1000)
+				return
+			}
+		}
 		p.emit(ProgressEvent{Position: pos, Duration: d})
+		p.mu.Lock()
+		p.lastPos = pos
+		p.lastPosSet = true
+		p.mu.Unlock()
 	case obsDuration:
 		if d, ok := toFloat64(ev.Data); ok {
 			p.setDuration(d)
@@ -940,6 +966,9 @@ func (p *MpvPlayer) Seek(seconds float64) error {
 	}); err != nil {
 		return fmt.Errorf("seek: %w", err)
 	}
+	p.mu.Lock()
+	p.lastSeekAt = time.Now()
+	p.mu.Unlock()
 	return nil
 }
 
