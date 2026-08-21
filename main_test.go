@@ -116,7 +116,9 @@ func TestRequireYtdlpCustomPathMissingNoFallback(t *testing.T) {
 	if !strings.Contains(err.Error(), "ytdlp.path") {
 		t.Errorf("错误信息应包含 ytdlp.path: %v", err)
 	}
-	if !strings.Contains(err.Error(), missing) {
+	// Windows 下 %q 会转义反斜杠为 \\，且 TempDir 可能返回短路径（RUNNER~1），
+	// 直接比较原始 missing 可能失败，退而校验文件名包含即可（足以证明配置值被回显）。
+	if !strings.Contains(err.Error(), missing) && !strings.Contains(err.Error(), filepath.Base(missing)) {
 		t.Errorf("错误信息应包含配置值: %v", err)
 	}
 }
