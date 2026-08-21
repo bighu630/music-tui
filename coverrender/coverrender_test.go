@@ -88,6 +88,8 @@ func TestDetectModeHints(t *testing.T) {
 		for _, set := range []string{"1", "12345"} {
 			t.Setenv("KITTY_WINDOW_ID", set)
 			ResetModeCacheForTests()
+			// 收紧后 KITTY_WINDOW_ID 需能力校验：注入 OK 应答模拟真实 kitty
+			lastQueryRaw = "\x1b_Gi=31;OK\x1b\\"
 			if m := DetectMode(); m != ModeKitty {
 				t.Errorf("KITTY_WINDOW_ID=%s → %v, want kitty", set, m)
 			}
@@ -112,6 +114,7 @@ func TestDetectModeHints(t *testing.T) {
 		t.Setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
 		t.Setenv("KITTY_WINDOW_ID", "1")
 		ResetModeCacheForTests()
+		lastQueryRaw = "\x1b_Gi=31;OK\x1b\\"
 		if m := DetectMode(); m != ModeKitty {
 			t.Errorf("TMUX 内 KITTY_WINDOW_ID=1（外层确证 kitty）→ %v, want kitty", m)
 		}
@@ -554,6 +557,7 @@ func TestDetectModeTMUXKittyRelay(t *testing.T) {
 		t.Setenv("KITTY_WINDOW_ID", "1")
 		ResetModeCacheForTests()
 		SetTMUXKittyRelay(false)
+		lastQueryRaw = "\x1b_Gi=31;OK\x1b\\"
 		if m := DetectMode(); m != ModeKitty {
 			t.Errorf("tmux + KITTY_WINDOW_ID=1（外层确证 kitty）→ %v, want kitty", m)
 		}
@@ -587,6 +591,39 @@ func TestDetectModeTMUXKittyRelay(t *testing.T) {
 // TestKittyPayloadSizeBound 回归：大 cell（tmux 内 14×27 格 → 显示 420×459px）
 // 传输分辨率封顶到基准 8×16 格（240×272px），载荷从 300-500KB 压到 ~100KB 内
 //（tmux 中继超大 APC 易丢）。
+// TestDetectModeFootLeak 回归：foot 泄漏 KITTY_WINDOW_ID=1（跨会话继承）不应误触发 kitty。
+// 仅当 lastQueryRaw 含 OK 或能力确证时才信任。
+func TestDetectModeFootLeak(t *testing.T) {
+	old := stdinIsTTY
+	stdinIsTTY = func() bool { return true }
+	defer func() { stdinIsTTY = old }()
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TERM_PROGRAM", "")
+	t.Setenv("KITTY_WINDOW_ID", "1")
+	t.Setenv("TMUX", "")
+	t.Run("泄漏 KITTY_WINDOW_ID 无 OK 应为 half", func(t *testing.T) {
+		ResetModeCacheForTests()
+		lastQueryRaw = ""
+		if m := DetectMode(); m != ModeHalf {
+			t.Errorf("泄漏 KITTY_WINDOW_ID=1 无 OK → %v, want half", m)
+		}
+	})
+	t.Run("ENODATA 无 OK 仍 half", func(t *testing.T) {
+		ResetModeCacheForTests()
+		lastQueryRaw = "_Gi=31;ENODATA"
+		if m := DetectMode(); m != ModeHalf {
+			t.Errorf("ENODATA → %v, want half", m)
+		}
+	})
+	t.Run("含 OK 应 kitty", func(t *testing.T) {
+		ResetModeCacheForTests()
+		lastQueryRaw = "\x1b_Gi=31;OK\x1b\\"
+		if m := DetectMode(); m != ModeKitty {
+			t.Errorf("含 OK → %v, want kitty", m)
+		}
+	})
+}
+
 func TestKittyPayloadSizeBound(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
