@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"regexp"
 	"strings"
+	"time"
 
 	_ "image/jpeg"
 	_ "image/png"
@@ -34,6 +36,10 @@ const (
 // （用户按实机观感从 2×coverH=34 下调为 28——28 的页面高 24、中间区 22 行仍
 // 可容纳 17 行封面留白充足）；宽度阈值仍为 2×coverW=60。
 const coverHideMinH = 28
+
+// lyricSwitchHysteresis 行回跳抑制窗口：回退1行且距上次切换 <400ms 时抑制，
+// 消除 mpv 5-20ms 回退经 LineAt 锐利边界产生的 N→N+1→N 抖动。
+const lyricSwitchHysteresis = 400 * time.Millisecond
 
 // ---- 控制消息（root 消费；root 接线在后续任务，本文件只定义类型与 emit） ----
 
@@ -173,6 +179,9 @@ type homeModel struct {
 	lyricsState lyricsState
 	lyrics      *lyrics.Lyrics
 	currentLine int // 当前高亮行下标;-1 = 无高亮
+
+	lyricSwitchAt time.Time // 上次行切换时间（hysteresis 用）
+	lastPosition  float64   // 上次位置（可选诊断用）
 
 	// lyricOffset 当前歌曲歌词时间偏移累计（秒；Ctrl+Shift+←/→ 每按 ±0.5s）。
 	// 仅用于 toast 展示与测试断言——偏移已并入 m.lyrics.Lines 的时间戳，
@@ -345,6 +354,8 @@ func (m homeModel) resetForTrack(track *model.Track) homeModel {
 	m.lyrics = nil
 	m.lyricsState = lyricsLoading
 	m.currentLine = -1
+	m.lyricSwitchAt = time.Time{}
+	m.lastPosition = 0
 	m.lyricView.SetContent("")
 	m.coverRenderCache = ""
 	m.coverFallback = false
@@ -428,6 +439,9 @@ func (m homeModel) trackLabel() string {
 }
 
 // syncState 同步播放状态并推进歌词高亮（每次 player 事件后调用）。
+// hysteresis 防抖：仅当 idx != currentLine 时触发重建，避免同行内 position
+// 微抖（如 1ms 误差）导致高频重建；lyrics 层已按毫秒整数比较消除亚毫秒抖动，
+// 此处为双保险——即使上游仍有微小浮点残余，UI 侧也不会频抖重建视口/缓存。
 func (m homeModel) syncState(state model.PlaybackState) homeModel {
 	m.state = state
 	if state.Track == nil {
@@ -444,10 +458,20 @@ func (m homeModel) syncState(state model.PlaybackState) homeModel {
 		m.state.Position = m.state.Duration
 	}
 	// 歌词高亮:二分查找当前行,行变化时才重渲染(而非每帧)
+	// hysteresis：同行内 position 微抖不触发 rebuildLyrics/scrollLyricsTo，
+	// 避免视口在同一行内上下 1 行抖动（第二层防御）。
 	if m.lyricsState == lyricsSynced && m.lyrics != nil {
 		idx, _ := m.lyrics.LineAt(m.state.Position)
 		if idx != m.currentLine {
+			// 时间滞回：回退1行且距上次切换 <400ms 则抑制回跳，保留 currentLine 不更新。
+			// 前进（idx > currentLine）与回退超过1行（Seek 大跳回）不抑制，直接切换。
+			if idx == m.currentLine-1 && !m.lyricSwitchAt.IsZero() && time.Since(m.lyricSwitchAt) < lyricSwitchHysteresis {
+				m.lastPosition = m.state.Position
+				return m
+			}
 			m.currentLine = idx
+			m.lyricSwitchAt = time.Now()
+			m.lastPosition = m.state.Position
 			if idx >= 0 && m.lyricFile != nil {
 				m.lyricFile.WriteLine(m.lyrics.Lines[idx].Text)
 			}
@@ -459,6 +483,7 @@ func (m homeModel) syncState(state model.PlaybackState) homeModel {
 			//（注意必须在 scrollLyricsTo 之后：滚动改变视口输出）。
 			return m.rebuildMiddleCache()
 		}
+		m.lastPosition = m.state.Position
 	}
 	return m
 }
@@ -592,13 +617,17 @@ func (m homeModel) setSize(width, height int) homeModel {
 	// 歌词 viewport 尺寸 = 中间区歌词列尺寸：宽 = width-coverW-4（gap 2 + 边距 2），
 	// 高 = 动态视口行数 min(21, 中间区高−上下各 2 行留白)（见 lyricsHeight），
 	// 窄窗口下自动收缩。视口高度强制奇数，保证中心对称。
-	// 使用同一 coverHidden 快照计算列宽，避免中间状态不一致导致抖动。
+	// 使用同一 coverHidden 快照计算列宽，避免中间状态不一致导致抖动：
+	// lyricsColumnWidthWithHide(hide) 与 centerLyrics 的 lyricsW 同源，保持原子性。
 	hide := m.coverHidden()
 	m.lyricView.SetWidth(m.lyricsColumnWidthWithHide(hide))
 	m.lyricView.SetHeight(m.lyricsHeight())
-	// 视口高度可能已变化（留白/上限动态计算），先重建 padding 内容再重算
+	// 视口高度可能已变化（留白/上限动态计算），必须先重建 padding 内容再重算
 	// 滚动偏移：此前基于未知尺寸（Height=1）的 scrollLyricsTo 会留下越界
 	// YOffset，导致歌词首行被吞（回归：TestHomeLyricsCenteredWhenFew）。
+	// 顺序原子性：rebuildLyrics → scrollLyricsTo → rebuildMiddleCache，
+	// 确保 resize 时先重建 H/2 对称 padding，再定位 YOffset=idx，最后重建
+	// 中间区缓存；任一步乱序都会导致视口中央行偏移一行的残余抖动。
 	if m.lyricsState == lyricsSynced && m.lyrics != nil {
 		m.rebuildLyrics()
 		if m.currentLine >= 0 {
@@ -624,11 +653,15 @@ var lyricActiveStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(
 // + H/2 行空白（padding 模型，配合 scrollLyricsTo 使当前行恒在视口中央；
 // H 恒为奇数，故上下 padding 对称，H/2 向下取整即 (H-1)/2 行空白，中心对称；
 // H 变化后必须重调本函数，padding 行数随 H/2 变化）。
+// 防抖注释：pad = Height/2 在 H 奇数时恒为 (H-1)/2，上下对称，视口中央行 H/2
+// 精确对齐；偶数 H 会在两行之间取整导致上下差 1 行抖动，已由 lyricViewportHeight
+// 强制奇数消除。此处为第二层防御——即使 lyrics 毫秒化后 LineAt 稳定，viewport
+// 仍需对称 padding 保证行切换、窗口 resize、封面显隐时无上下跳动。
 func (m *homeModel) rebuildLyrics() {
 	if m.lyrics == nil {
 		return
 	}
-	pad := m.lyricView.Height() / 2 // H 奇数时 pad = (H-1)/2，对称
+	pad := m.lyricView.Height() / 2 // H 奇数时 pad = (H-1)/2，对称；H 偶数会不对称抖动（已强制奇数）
 	var sb strings.Builder
 	sb.WriteString(strings.Repeat("\n", pad))
 	for i, line := range m.lyrics.Lines {
@@ -646,6 +679,11 @@ func (m *homeModel) rebuildLyrics() {
 // scrollLyricsTo 让当前行保持在歌词区视口中央（padding 模型：YOffset = 当前行）。
 // 开头首行在中央（上方整片空白）、结尾末行停中央（下方可空白）；行数少时
 // 同样滚动 N−1 行，首末行都在中央。
+// defensive clamp 注释：YOffset=idx 恒等于 N-1 且与 maxYOffset 无缝衔接，
+// H 奇数时 content = N+2*(H/2)=N+H-1，maxYOffset=(N+H-1)-H=N-1 恰好无富余；
+// 若 H 为偶数则 content=N+H-2，maxYOffset=N-2 会导致末行无法居中或越界抖动，
+// 已由 lyricViewportHeight 强制奇数消除。lyricScrollOffset 内 clamp 到 [0,N-1]
+// 为双保险，即使 idx 越界也不越界 viewport。
 func (m *homeModel) scrollLyricsTo(idx int) {
 	if m.lyricView.Height() <= 0 || m.lyrics == nil {
 		return
@@ -815,18 +853,38 @@ func (m homeModel) lyricsColumnView() string {
 	return ""
 }
 
+// inlineTimeTagRe 匹配 LRCLIB 逐字增强 LRC 的 inline 时间标签如 <00:00.366>、
+// <01:23.45>，用于宽度计算防抖：含此类标签的长行若按原文计宽会误判为超宽
+// 而左对齐抖动。stripInlineTimeTags 在 vis 计算前剥离，保证宽度稳定。
+var inlineTimeTagRe = regexp.MustCompile(`<\d{1,3}:\d{2}(?:[.:]\d{1,3})?>`)
+
+// stripInlineTimeTags 剥离行内时间标签 <mm:ss.xxx> 片段，保留可见文本。
+// 仅用于宽度计算与渲染防抖；不影响原始 Lyrics 文本存储。
+func stripInlineTimeTags(s string) string {
+	if !strings.Contains(s, "<") {
+		return s
+	}
+	return inlineTimeTagRe.ReplaceAllString(s, "")
+}
+
 // centerLyrics 把每行文本水平居中到歌词列内，并补尾空格到歌词列宽——
 // 外层 Place(lyricsW, ...) 对满宽行不再重新水平居中（否则短行/提示文本
 // 会被推回歌词列中心，回归：暂无歌词偏右）。尾空格填充使每行占满 lyricsW，
 // 防止外层 Place 对短行再次居中导致偶发一列抖动。
 // viewport 填充的行尾空格先 TrimRight 剔除，再用 ansi.StringWidth 计宽，
 // 避免宽度计算失真；超宽行 vis>lyricsW 时 pad=0 tail=0 退化为左对齐。
+// inline 防御：若文本含 '<' 且匹配 <mm:ss.xxx> 片段，vis 计算前先
+// stripInlineTimeTags 剥离，防止因内联标签导致误判超宽而左对齐抖动；
+// 当前剥离后渲染与宽度同源（显示亦为剥离后文本），保证 pad 视口居中稳定。
 func (m homeModel) centerLyrics(s string) string {
 	lyricsW := m.lyricsColumnWidth()
 	lines := strings.Split(s, "\n")
 	for i, ln := range lines {
 		trimmed := strings.TrimRight(ln, " ")
-		vis := ansi.StringWidth(trimmed)
+		// 防御 LRCLIB 逐字增强 LRC 的 <00:00.366> 残留：宽度按剥离后计算，
+		// 避免长行因标签计入 vis 而误判超宽抖动。
+		visText := stripInlineTimeTags(trimmed)
+		vis := ansi.StringWidth(visText)
 		// 歌词在封面右侧剩余空间（歌词列）内居中：中心 = 列起点 + 列宽/2。
 		// （回归：曾以屏幕中心为基准，歌词偏左、封面右侧大片空白；
 		//  超宽行 pad 为负时左对齐——列内也放不下时无居中可言。）
@@ -839,7 +897,8 @@ func (m homeModel) centerLyrics(s string) string {
 			tail = 0
 		}
 		// 防 Place 重新居中：每行补尾空格至 lyricsW，使外层 Place 视其为满宽行
-		lines[i] = strings.Repeat(" ", pad) + trimmed + strings.Repeat(" ", tail)
+		// 若存在 inline 标签，使用剥离后文本渲染以保持宽度与显示一致。
+		lines[i] = strings.Repeat(" ", pad) + visText + strings.Repeat(" ", tail)
 	}
 	return strings.Join(lines, "\n")
 }

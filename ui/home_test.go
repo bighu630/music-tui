@@ -1723,3 +1723,119 @@ func lastLine(s string) string {
 	lines := strings.Split(s, "\n")
 	return lines[len(lines)-1]
 }
+
+// TestHomeLyricsMixedPrecisionCentered 混合精度 LRC（02:25.40 与 02:29.058 共存）
+// 在多窗口高度下逐行推进，断言每行在视口中央行 H/2 且 YOffset==idx，无越界；
+// resize 后仍居中。第二层防御验证：即使小数位 2/3 位混用，viewport 同步稳固。
+func TestHomeLyricsMixedPrecisionCentered(t *testing.T) {
+	lrc := "[00:10.40]第一行\n[00:15.058]第二行\n[00:20.40]第三行\n[00:25.058]第四行\n[00:30.40]第五行\n"
+	ly, err := lyrics.ParseLRC([]byte(lrc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ly.Lines) != 5 {
+		t.Fatalf("解析行数 = %d, want 5", len(ly.Lines))
+	}
+	// 验证混合精度时间戳正确（02:25.40=145.4s 模型，实际用 10s 级便于测试）
+	// 10.40 vs 15.058 应保持 2/3 位精度区分
+	if ly.Lines[0].Time != 10.4 || ly.Lines[1].Time != 15.058 {
+		t.Fatalf("混合精度解析错误: %v %v", ly.Lines[0].Time, ly.Lines[1].Time)
+	}
+	sizes := []struct{ w, h int }{
+		{120, 39},
+		{80, 24},
+		{100, 28},
+		{60, 30},
+	}
+	for _, sz := range sizes {
+		fp := newFakePlayer()
+		m := newTestModel(t, fp, &fakeSearchAdapter{}, nil)
+		m, cmd := m.startPlay(testTrack("t1"))
+		_ = execCmds(cmd)
+		m, _ = update(m, lyricsResultMsg{trackID: "t1", lyrics: ly})
+		m.home = m.home.setSize(sz.w, sz.h)
+		H := m.home.lyricView.Height()
+		if H%2 == 0 {
+			t.Fatalf("%dx%d H=%d 非奇数，中心不对称", sz.w, sz.h, H)
+		}
+		// 逐行推进 idx 0..N-1
+		for idx := 0; idx < len(ly.Lines); idx++ {
+			pos := ly.Lines[idx].Time + 0.01
+			m, _ = update(m, playerEventMsg{ev: player.ProgressEvent{Position: pos, Duration: 200}})
+			if m.home.currentLine != idx {
+				t.Fatalf("%dx%d idx %d currentLine=%d", sz.w, sz.h, idx, m.home.currentLine)
+			}
+			if got := m.home.lyricView.YOffset(); got != idx {
+				t.Fatalf("%dx%d idx %d YOffset=%d want %d", sz.w, sz.h, idx, got, idx)
+			}
+			if got := m.home.lyricView.YOffset(); got < 0 || got > len(ly.Lines)-1 {
+				t.Fatalf("%dx%d idx %d YOffset 越界 %d", sz.w, sz.h, idx, got)
+			}
+			// 视口中央行 H/2 应显示当前行文本
+			lines := strings.Split(m.home.view(), "\n")
+			midH := m.home.middleHeight()
+			centerRow := (midH-H)/2 + H/2
+			wantText := ly.Lines[idx].Text
+			if !strings.Contains(stripAnsiForTest(lines[centerRow]), wantText) {
+				t.Fatalf("%dx%d idx %d 中央行 %d 未找到 %q 行内容 %q", sz.w, sz.h, idx, centerRow, wantText, stripAnsiForTest(lines[centerRow]))
+			}
+		}
+		// resize 后仍居中：切换到另一尺寸，末行仍在中央
+		m.home = m.home.setSize(120, 39)
+		H2 := m.home.lyricView.Height()
+		midH2 := m.home.middleHeight()
+		centerRow2 := (midH2-H2)/2 + H2/2
+		lines2 := strings.Split(m.home.view(), "\n")
+		if !strings.Contains(stripAnsiForTest(lines2[centerRow2]), "第五行") {
+			t.Errorf("%dx%d resize 后中央行未居中", sz.w, sz.h)
+		}
+	}
+}
+
+// TestCenterLyricsInlineTagDefense 内联时间标签 <mm:ss.xxx> 防御：含标签的长行
+// 不应因标签计入视宽而误判超宽左对齐抖动，剥离后宽度稳定，pad 居中。
+func TestCenterLyricsInlineTagDefense(t *testing.T) {
+	m := homeModel{width: 120, height: 40, windowHeight: 40}
+	m.lyricView.SetWidth(m.lyricsColumnWidth())
+	// 构造含 inline 标签的行：可见文本相同，标签长度额外 11 字符
+	plain := "Hello World"
+	withTag := "Hello <00:00.366>World" // 剥离后同 plain
+	// centerLyrics 对两行 pad 应一致（宽度按剥离后计算）
+	outPlain := m.centerLyrics(plain)
+	outTag := m.centerLyrics(withTag)
+	// 剥离后文本应为 Hello World，不含标签
+	if strings.Contains(outTag, "<00:00") {
+		t.Fatalf("centerLyrics 未剥离 inline 标签: %q", outTag)
+	}
+	if ansi.StringWidth(strings.TrimSpace(outPlain)) != ansi.StringWidth(strings.TrimSpace(outTag)) {
+		t.Errorf("含标签与纯文本视宽不一致，防抖失效")
+	}
+	// 长行 + inline 标签不应额外导致 pad=0 左对齐抖动：剥离后宽度决定 pad
+	longVis := strings.Repeat("a", 30)
+	longWithTag := longVis + " <00:01.234>" + strings.Repeat("b", 10)
+	outLong := m.centerLyrics(longWithTag)
+	stripped := stripInlineTimeTags(longWithTag)
+	if strings.TrimSpace(outLong) != stripped {
+		t.Errorf("含标签长行剥离后 TrimSpace 应等于 stripped %q got %q", stripped, strings.TrimSpace(outLong))
+	}
+	// 剥离后视宽应小于原串视宽（标签已移除），保证不误判超宽
+	if ansi.StringWidth(stripped) >= ansi.StringWidth(longWithTag) {
+		t.Errorf("剥离后视宽应小于原串")
+	}
+}
+
+// TestStripInlineTimeTags helper 单测
+func TestStripInlineTimeTags(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"hello <00:00.366>world", "hello world"},
+		{"a<01:23.45>b", "ab"},
+		{"no tag", "no tag"},
+		{"<00:00.1>", ""},
+		{"keep <not-a-tag> as is", "keep <not-a-tag> as is"},
+	}
+	for _, c := range cases {
+		if got := stripInlineTimeTags(c.in); got != c.want {
+			t.Errorf("strip %q = %q want %q", c.in, got, c.want)
+		}
+	}
+}

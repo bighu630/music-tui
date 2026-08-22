@@ -243,3 +243,103 @@ func TestParseLRCRejectsOverflowMinutes(t *testing.T) {
 		t.Errorf("Lines[1] = %+v, want 巨大正时间边界行", ly.Lines[1])
 	}
 }
+
+func TestParseLRC_FracMsEquivalence(t *testing.T) {
+	// 2 位与 3 位同值必须毫秒相等且二进制一致
+	ly1, err := ParseLRC([]byte("[00:10.40]A"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ly2, err := ParseLRC([]byte("[00:10.400]A"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ly1.Lines) != 1 || len(ly2.Lines) != 1 {
+		t.Fatalf("lines = %d %d, want 1 1", len(ly1.Lines), len(ly2.Lines))
+	}
+	if ly1.Lines[0].Time != ly2.Lines[0].Time {
+		t.Errorf("2位与3位同值不等: %v vs %v", ly1.Lines[0].Time, ly2.Lines[0].Time)
+	}
+	if timeToMs(ly1.Lines[0].Time) != 10400 {
+		t.Errorf("00:10.40 ms = %d, want 10400", timeToMs(ly1.Lines[0].Time))
+	}
+	// 02:25.40 与 02:25.400 同毫秒
+	lya, _ := ParseLRC([]byte("[02:25.40]A"))
+	lyb, _ := ParseLRC([]byte("[02:25.400]A"))
+	if lya.Lines[0].Time != lyb.Lines[0].Time {
+		t.Errorf("02:25.40 vs 02:25.400 不等: %v vs %v", lya.Lines[0].Time, lyb.Lines[0].Time)
+	}
+	if timeToMs(lya.Lines[0].Time) != 2*60*1000+25*1000+400 {
+		t.Errorf("02:25.40 ms = %d, want %d", timeToMs(lya.Lines[0].Time), 2*60*1000+25*1000+400)
+	}
+	// 1位与3位同值：.4 == .400
+	lyc, _ := ParseLRC([]byte("[00:10.4]A"))
+	lyd, _ := ParseLRC([]byte("[00:10.400]A"))
+	if lyc.Lines[0].Time != lyd.Lines[0].Time {
+		t.Errorf("1位与3位同值不等: %v vs %v", lyc.Lines[0].Time, lyd.Lines[0].Time)
+	}
+}
+
+func TestLineAt_SubMillisecondStability(t *testing.T) {
+	ly, err := ParseLRC([]byte("[00:10.058]目标行\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ly.Lines) != 1 {
+		t.Fatalf("lines = %d, want 1", len(ly.Lines))
+	}
+	// pos 在 10.0575~10.0584 范围内均应稳定归到该行（Round 到 ms）
+	stablePos := []float64{10.0575, 10.0576, 10.058, 10.0580001, 10.0579999, 10.0584}
+	for _, pos := range stablePos {
+		idx, text := ly.LineAt(pos)
+		if idx != 0 || text != "目标行" {
+			t.Errorf("LineAt(%v) = (%d,%q), want (0, 目标行) - 亚毫秒应稳定命中", pos, idx, text)
+		}
+	}
+	// 略低于阈值应不命中
+	if idx, _ := ly.LineAt(10.0574); idx != -1 {
+		t.Errorf("LineAt(10.0574) = %d, want -1 (Round 后为 10057)", idx)
+	}
+	// 模拟二进制浮点误差：10.058 ± 1e-9 / 1e-12 均应稳定
+	for _, delta := range []float64{1e-9, -1e-9, 1e-12, -1e-12, 1e-7, -1e-7} {
+		pos := 10.058 + delta
+		idx, _ := ly.LineAt(pos)
+		if idx != 0 {
+			t.Errorf("LineAt(10.058%+g)=%v idx=%d want 0", delta, pos, idx)
+		}
+	}
+	// 双行场景：前一行 09.00，边界仍稳定
+	ly2, _ := ParseLRC([]byte("[00:09.00]上一行\n[00:10.058]目标行\n"))
+	if idx, text := ly2.LineAt(10.0575); idx != 1 || text != "目标行" {
+		t.Errorf("双行 LineAt(10.0575) = (%d,%q) want (1,目标行)", idx, text)
+	}
+	if idx, text := ly2.LineAt(10.0574); idx != 0 || text != "上一行" {
+		t.Errorf("双行 LineAt(10.0574) = (%d,%q) want (0,上一行)", idx, text)
+	}
+}
+
+func TestShift_MillisecondPrecision(t *testing.T) {
+	ly := &Lyrics{Lines: []LyricLine{{Time: 10.058, Text: "a"}}}
+	ly.Shift(0.5)
+	want := 10.558
+	if ly.Lines[0].Time != want {
+		t.Errorf("Shift(0.5) 10.058 -> %v, want %v (ms 精确)", ly.Lines[0].Time, want)
+	}
+	if timeToMs(ly.Lines[0].Time) != 10558 {
+		t.Errorf("Shift 后 ms = %d, want 10558", timeToMs(ly.Lines[0].Time))
+	}
+	// 多次 Shift 不累积浮点误差
+	ly2 := &Lyrics{Lines: []LyricLine{{Time: 10.058, Text: "a"}}}
+	for i := 0; i < 10; i++ {
+		ly2.Shift(0.1)
+	}
+	if timeToMs(ly2.Lines[0].Time) != 11058 {
+		t.Errorf("10 次 Shift(0.1) ms = %d, want 11058", timeToMs(ly2.Lines[0].Time))
+	}
+	// 负偏移 clamp
+	ly3 := &Lyrics{Lines: []LyricLine{{Time: 0.001, Text: "a"}}}
+	ly3.Shift(-0.002)
+	if ly3.Lines[0].Time != 0 {
+		t.Errorf("Shift clamp = %v, want 0", ly3.Lines[0].Time)
+	}
+}

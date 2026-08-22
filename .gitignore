@@ -3,3 +3,4 @@
 .worktrees/
 .worktrees/
 /AGENTS.md
+/scripts/release.sh

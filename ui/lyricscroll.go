@@ -1,6 +1,7 @@
 package ui
 
-// 歌词视口行数常量。
+// 歌词视口行数常量。第二层防御（lyrics 已毫秒化，此处保证 viewport 同步稳固）：
+// 即使上游时间戳已稳定，若视口 H 为偶数，H/2 上下不对称仍会导致居中抖动。
 const (
 	// lyricMaxLines 歌词视口最大行数：当前行恒居中（上 10 下 10），大窗口不再增大。
 	lyricMaxLines = 21
@@ -30,6 +31,8 @@ func lyricViewportHeight(midH int) int {
 // lyricScrollOffset 歌词视口滚动偏移：内容 = H/2 行空白 + N 行歌词 + H/2 行空白，
 // 歌词行 idx 在内容中的行号 = H/2 + idx，显示在视口行 = H/2 + idx − YOffset。
 // 令其恒等于视口中央行 H/2 → YOffset = idx，clamp 到 [0, N−1]。
+// 防抖第二层防御：即使 lyrics 毫秒化后 LineAt 亚毫秒稳定，此处仍保证 YOffset 与
+// viewport 几何（H 奇数、content = N+H-1、maxYOffset = N-1）无缝衔接，无富余抖动。
 // 等价于参考公式（视口顶部行号，可为负）top = clamp(idx−H/2, −H/2, N−1−H/2)：
 //
 //	开头（idx=0）→ top=−H/2，首行在视口中央，上方整片空白；
